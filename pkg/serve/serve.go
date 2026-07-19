@@ -76,6 +76,7 @@ func Run(ctx context.Context, b *brain.Brain) error {
 
 	deps := Deps{Memory: mem, Notify: channel, Speakers: cfg.Speakers}
 	deps.Enqueue = startJobs(ctx, b, store, &deps)
+	startCrons(ctx, b, deps.Enqueue)
 
 	srv := &http.Server{Addr: cfg.HTTP.Addr, Handler: Handler(b, deps)}
 	errc := make(chan error, 1)
@@ -97,25 +98,38 @@ func Run(ctx context.Context, b *brain.Brain) error {
 }
 
 // startJobs recovers pending jobs, then runs newly enqueued ones as they
-// arrive. The returned enqueue persists intent before waking the runner.
+// arrive; deferred jobs (self-installed triggers) fire when due. The
+// returned enqueue persists intent before waking the runner.
 func startJobs(ctx context.Context, b *brain.Brain, store job.Store, deps *Deps) func(context.Context, job.Job) error {
 	wake := make(chan struct{}, 1)
-	sweep := func() {
-		err := store.Sweep(ctx, func(ctx context.Context, j job.Job) error {
+	sweep := func() time.Time {
+		next, err := store.Sweep(ctx, func(ctx context.Context, j job.Job) error {
 			return runJob(ctx, b, deps, j)
 		})
 		if err != nil {
 			logrus.WithError(err).Error("job sweep failed")
 		}
+		return next
 	}
 	go func() {
-		sweep() // crash recovery: whatever was pending re-runs from the start
+		timer := time.NewTimer(time.Hour)
+		defer timer.Stop()
 		for {
+			next := sweep() // first pass = crash recovery
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			if !next.IsZero() {
+				timer.Reset(time.Until(next))
+			}
 			select {
 			case <-ctx.Done():
 				return
 			case <-wake:
-				sweep()
+			case <-timer.C:
 			}
 		}
 	}()
@@ -129,6 +143,46 @@ func startJobs(ctx context.Context, b *brain.Brain, store job.Store, deps *Deps)
 		}
 		return nil
 	}
+}
+
+// startCrons enqueues a job every time a brain-defined schedule fires.
+// Recurring schedules need no durability: they reappear from brain code.
+func startCrons(ctx context.Context, b *brain.Brain, enqueue func(context.Context, job.Job) error) {
+	for _, c := range b.Crons {
+		go func(c brain.Cron) {
+			for {
+				next := nextCron(c, time.Now())
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Until(next)):
+				}
+				j := job.Job{ID: uuid.NewString(), Pipeline: c.Pipeline, At: time.Now()}
+				if err := enqueue(ctx, j); err != nil {
+					logrus.WithError(err).WithField("pipeline", c.Pipeline).Error("cron enqueue failed")
+				}
+			}
+		}(c)
+	}
+}
+
+// nextCron returns the next firing after now.
+// ponytail: Every + Daily cover the reference stories; a cron-expression
+// library slots in here if a brain ever needs one.
+func nextCron(c brain.Cron, now time.Time) time.Time {
+	if c.Every > 0 {
+		return now.Add(c.Every)
+	}
+	t, err := time.ParseInLocation("15:04", c.Daily, now.Location())
+	if err != nil {
+		logrus.WithField("daily", c.Daily).Error("invalid daily schedule; firing in 24h")
+		return now.Add(24 * time.Hour)
+	}
+	next := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
+	if !next.After(now) {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next
 }
 
 // runJob executes one background job against its named pipeline.
@@ -167,7 +221,34 @@ func Handler(b *brain.Brain, deps Deps) http.Handler {
 	mux.HandleFunc("GET /v1/models", func(w http.ResponseWriter, _ *http.Request) {
 		openaiwire.WriteModels(w, b.Name)
 	})
+	mux.HandleFunc("POST /triggers/{name}", func(w http.ResponseWriter, r *http.Request) {
+		webhook(b, deps, w, r)
+	})
 	return mux
+}
+
+// webhook fires a webhook trigger (story 6): the event becomes a durable
+// job, so a crash after 202 still runs the pipeline.
+func webhook(b *brain.Brain, deps Deps, w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	pipeline, ok := b.Webhooks[name]
+	if !ok {
+		openaiwire.WriteError(w, http.StatusNotFound, "no such trigger: "+name)
+		return
+	}
+	var payload any
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		openaiwire.WriteError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	j := job.Job{ID: uuid.NewString(), Pipeline: pipeline, At: time.Now(),
+		Payload: map[string]any{"payload": payload}}
+	if err := deps.Enqueue(r.Context(), j); err != nil {
+		logrus.WithError(err).Error("webhook enqueue failed")
+		openaiwire.WriteError(w, http.StatusInternalServerError, "could not accept event")
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func completions(b *brain.Brain, deps Deps, w http.ResponseWriter, r *http.Request) {

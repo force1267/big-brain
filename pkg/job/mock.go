@@ -1,6 +1,9 @@
 package job
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Mock is a Store for test injection.
 type Mock struct {
@@ -21,12 +24,21 @@ func (m *Mock) Enqueue(_ context.Context, j Job) error {
 }
 
 // Sweep implements Store.
-func (m *Mock) Sweep(ctx context.Context, fn func(context.Context, Job) error) error {
+func (m *Mock) Sweep(ctx context.Context, fn func(context.Context, Job) error) (time.Time, error) {
+	now := time.Now()
 	jobs := m.Pending
 	m.Pending = nil
+	var next time.Time
 	for _, j := range jobs {
+		if !j.Due(now) {
+			m.Pending = append(m.Pending, j)
+			if next.IsZero() || j.RunAt.Before(next) {
+				next = j.RunAt
+			}
+			continue
+		}
 		m.Swept = append(m.Swept, j)
 		_ = fn(ctx, j)
 	}
-	return nil
+	return next, nil
 }

@@ -28,6 +28,16 @@ var (
 // soon as the intent is stored — the reply can promise "I'll text you"
 // honestly, because a crash re-runs the job rather than losing it.
 func Go(pipeline string, payload func(*Run) map[string]any) Node {
+	return goNode(pipeline, payload, nil)
+}
+
+// GoAt is Go deferred: the pipeline runs at the time when returns — a
+// trigger the brain installs for itself, durable like any other job.
+func GoAt(when func(*Run) time.Time, pipeline string, payload func(*Run) map[string]any) Node {
+	return goNode(pipeline, payload, when)
+}
+
+func goNode(pipeline string, payload func(*Run) map[string]any, when func(*Run) time.Time) Node {
 	return Func(func(ctx context.Context, r *Run) error {
 		if r.Enqueue == nil {
 			return ErrNoEnqueue
@@ -35,6 +45,9 @@ func Go(pipeline string, payload func(*Run) map[string]any) Node {
 		j := job.Job{ID: uuid.NewString(), Pipeline: pipeline, Speaker: r.Speaker, At: time.Now()}
 		if payload != nil {
 			j.Payload = payload(r)
+		}
+		if when != nil {
+			j.RunAt = when(r)
 		}
 		return r.Enqueue(ctx, j)
 	})

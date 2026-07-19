@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func open(t *testing.T, path string) Store {
@@ -20,7 +21,7 @@ func open(t *testing.T, path string) Store {
 func sweep(t *testing.T, s Store, fn func(context.Context, Job) error) []Job {
 	t.Helper()
 	var got []Job
-	err := s.Sweep(context.Background(), func(ctx context.Context, j Job) error {
+	_, err := s.Sweep(context.Background(), func(ctx context.Context, j Job) error {
 		got = append(got, j)
 		if fn != nil {
 			return fn(ctx, j)
@@ -31,6 +32,53 @@ func sweep(t *testing.T, s Store, fn func(context.Context, Job) error) []Job {
 		t.Fatalf("Sweep: %v", err)
 	}
 	return got
+}
+
+func TestSweepSkipsNotDueAndReturnsNext(t *testing.T) {
+	s := open(t, filepath.Join(t.TempDir(), "jobs.jsonl"))
+	ctx := context.Background()
+	future := time.Now().Add(time.Hour).Truncate(time.Second)
+	if err := s.Enqueue(ctx, Job{ID: "now", Pipeline: "p"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Enqueue(ctx, Job{ID: "later", Pipeline: "p", RunAt: future}); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []Job
+	next, err := s.Sweep(ctx, func(_ context.Context, j Job) error {
+		got = append(got, j)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "now" {
+		t.Fatalf("ran %+v; want just \"now\"", got)
+	}
+	if !next.Equal(future) {
+		t.Fatalf("next = %v; want %v", next, future)
+	}
+}
+
+func TestDeferredJobSurvivesReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.jsonl")
+	ctx := context.Background()
+	s := open(t, path)
+	future := time.Now().Add(time.Hour)
+	if err := s.Enqueue(ctx, Job{ID: "later", Pipeline: "p", RunAt: future}); err != nil {
+		t.Fatal(err)
+	}
+	sweep(t, s, nil) // must not run or discard it
+
+	s = open(t, path)
+	next, err := s.Sweep(ctx, func(context.Context, Job) error {
+		t.Fatal("future job ran early")
+		return nil
+	})
+	if err != nil || next.IsZero() {
+		t.Fatalf("next=%v err=%v; deferred job lost across reopen", next, err)
+	}
 }
 
 func TestEnqueueSweepInOrder(t *testing.T) {
@@ -105,7 +153,7 @@ func TestMockStore(t *testing.T) {
 	if err := m.Enqueue(context.Background(), Job{ID: "a"}); err != nil {
 		t.Fatal(err)
 	}
-	_ = m.Sweep(context.Background(), func(context.Context, Job) error { return nil })
+	_, _ = m.Sweep(context.Background(), func(context.Context, Job) error { return nil })
 	if len(m.Swept) != 1 || m.Swept[0].ID != "a" || len(m.Pending) != 0 {
 		t.Fatalf("mock %+v", m)
 	}

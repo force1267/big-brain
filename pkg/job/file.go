@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 )
 
 var (
@@ -79,23 +80,40 @@ func (s *fileStore) Enqueue(_ context.Context, j Job) error {
 	return nil
 }
 
-func (s *fileStore) Sweep(ctx context.Context, fn func(context.Context, Job) error) error {
+func (s *fileStore) Sweep(ctx context.Context, fn func(context.Context, Job) error) (time.Time, error) {
+	now := time.Now()
 	s.mu.Lock()
-	jobs := s.pending
-	s.pending = nil
+	var due, later []Job
+	for _, j := range s.pending {
+		if j.Due(now) {
+			due = append(due, j)
+		} else {
+			later = append(later, j)
+		}
+	}
+	s.pending = later
 	s.mu.Unlock()
 
-	for _, j := range jobs {
+	for _, j := range due {
 		fnErr := fn(ctx, j) // attempt is the promise; caller logs failures
 		s.mu.Lock()
 		err := s.append(record{Op: "done", ID: j.ID})
 		s.mu.Unlock()
 		if err != nil {
-			return err
+			return time.Time{}, err
 		}
 		_ = fnErr
 	}
-	return nil
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var next time.Time
+	for _, j := range s.pending {
+		if next.IsZero() || j.RunAt.Before(next) {
+			next = j.RunAt
+		}
+	}
+	return next, nil
 }
 
 // append writes and syncs one record; callers hold the lock.

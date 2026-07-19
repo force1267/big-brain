@@ -270,3 +270,41 @@ The hardest engine slice: initiative made real.
 
 Next: slice 5 (stories 6+7) — webhook and cron triggers, self-installed
 triggers (durable, per the persistence promise).
+
+## 2026-07-19 — Slice 5 built: stories 6+7 pass end to end (session 4, continued)
+
+Design move: every trigger firing enqueues a durable job — webhooks,
+cron ticks, and self-installed future runs all reuse the slice-4 runner,
+so durability comes free and one mechanism serves all triggers.
+
+- `pkg/job` — `Job.RunAt` (zero = now; future = a self-installed
+  trigger), `Job.Due`; `Sweep` now runs only due jobs, keeps the rest
+  pending, and returns the earliest future due time. The runner arms a
+  timer accordingly (deferred jobs fire with no external nudge) and
+  deferred jobs survive reopen — self-installed triggers persist, per
+  the PRODUCT.md promise, with no new store.
+- `pkg/brain` — `Brain.Webhooks` (trigger name → pipeline),
+  `Brain.Crons` (`Every` interval or `Daily "15:04"`; a cron-expression
+  lib slots in later if ever needed), and `GoAt(when, pipeline,
+  payload)` — the brain installing a trigger for itself.
+- `pkg/serve` — `POST /triggers/{name}` verifies the trigger, decodes
+  the JSON event, enqueues it (202; crash after accept still runs it);
+  `startCrons` goroutines enqueue on schedule (config-defined crons need
+  no durability — they reappear from brain code).
+- Reference brain — story 6: webhook "door" → pipeline "unknown-face":
+  recall facts, describe the camera event, Extract an open/alert
+  verdict, Notify either way; register-guest now Remembers "X is on the
+  door guest list" so the verdict has facts to stand on. Story 7:
+  "party" intent → GoAt one-shot "party-prep" (JARVIS_PARTY_DELAY
+  shortens for demos) + daily 21:00 "nightly-review" cron.
+- Verified: all tests green (due/not-due sweeps, deferred-job reopen
+  survival, timer-driven deferred execution, webhook route statuses,
+  nextCron math incl. invalid spec); live against gemma: stranger at
+  the door → alert notification; "add Leo" → registered + remembered →
+  door sees Leo → "Door opened: Leo is explicitly listed…"; party
+  message → self-installed reminder fired 10s later (run_at honored in
+  jobs.jsonl).
+
+Next: slice 6 (stories 8+10) — time/system context injection and
+fan-out/join; then v1 is functionally complete minus the Anthropic
+messages API.

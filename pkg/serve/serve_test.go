@@ -219,6 +219,82 @@ func TestStartJobsRecoversAndRunsEnqueued(t *testing.T) {
 	}
 }
 
+func TestWebhookEnqueuesDurableJob(t *testing.T) {
+	var got job.Job
+	b := &brain.Brain{Webhooks: map[string]string{"door": "unknown-face"}}
+	deps := Deps{Enqueue: func(_ context.Context, j job.Job) error { got = j; return nil }}
+	h := Handler(b, deps)
+
+	req := httptest.NewRequest(http.MethodPost, "/triggers/door",
+		strings.NewReader(`{"event":"unrecognized_face","confidence":0.92}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d body %s", rec.Code, rec.Body)
+	}
+	if got.Pipeline != "unknown-face" {
+		t.Fatalf("job = %+v", got)
+	}
+	payload := got.Payload["payload"].(map[string]any)
+	if payload["event"] != "unrecognized_face" {
+		t.Fatalf("payload = %+v", payload)
+	}
+
+	// unknown trigger and bad body
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/triggers/nope", strings.NewReader(`{}`)))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown trigger status = %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/triggers/door", strings.NewReader(`{bad`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad body status = %d", rec.Code)
+	}
+}
+
+func TestNextCron(t *testing.T) {
+	now := time.Date(2026, 7, 19, 20, 0, 0, 0, time.UTC)
+
+	if got := nextCron(brain.Cron{Every: 5 * time.Minute}, now); !got.Equal(now.Add(5 * time.Minute)) {
+		t.Fatalf("every: %v", got)
+	}
+	// daily later today
+	if got := nextCron(brain.Cron{Daily: "21:00"}, now); !got.Equal(time.Date(2026, 7, 19, 21, 0, 0, 0, time.UTC)) {
+		t.Fatalf("daily today: %v", got)
+	}
+	// daily already passed → tomorrow
+	if got := nextCron(brain.Cron{Daily: "19:00"}, now); !got.Equal(time.Date(2026, 7, 20, 19, 0, 0, 0, time.UTC)) {
+		t.Fatalf("daily tomorrow: %v", got)
+	}
+	// invalid spec falls back to +24h instead of spinning
+	if got := nextCron(brain.Cron{Daily: "not-a-time"}, now); !got.Equal(now.Add(24 * time.Hour)) {
+		t.Fatalf("invalid: %v", got)
+	}
+}
+
+func TestStartJobsRunsDeferredJobWhenDue(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	b := &brain.Brain{Pipelines: map[string][]brain.Node{
+		"p": {brain.Func(func(context.Context, *brain.Run) error { close(done); return nil })},
+	}}
+	store := &job.Mock{}
+	enqueue := startJobs(ctx, b, store, &Deps{})
+
+	// due in 150ms — the runner must wake itself, no external nudge
+	err := enqueue(ctx, job.Job{ID: "later", Pipeline: "p", RunAt: time.Now().Add(150 * time.Millisecond)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("deferred job never ran")
+	}
+}
+
 func TestModelsListsTheBrain(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	rec := httptest.NewRecorder()
