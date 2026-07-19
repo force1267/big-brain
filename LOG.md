@@ -63,3 +63,19 @@ Next step (per init.md): discuss features, discover the product, then build.
 - Local directory is still named `wrapper/`; the repo name is `big-brain`.
 
 Next: product discovery (unchanged).
+
+## 2026-07-19 — Product discovery (session 3)
+
+Discussed `discussion.md` with the user; decisions captured in `PRODUCT.md`:
+
+- Core framing: an agent disguised as a model, behind OpenAI/Anthropic APIs.
+- Brains are authored **library-first as Go programs** against `pkg/`; graph
+  is a runtime object. File-format brains and remote "small-brain" topology
+  are deferred, expressible later as loaders/node types.
+- **One process serves one brain** (vLLM, not OpenAI). Multi-user = speaker
+  identity within one brain; being a provider is out of scope.
+- Reference brain: **home assistant** (exercises memory + initiative with
+  the fewest dependencies).
+
+Next: choose the first building blocks from what the home-assistant brain
+needs from `pkg/`.
