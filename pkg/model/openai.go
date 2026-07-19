@@ -19,7 +19,7 @@ func OpenAI(baseURL, apiKey, name string) Model {
 		opts = append(opts, option.WithBaseURL(baseURL))
 	}
 	c := openai.NewClient(opts...)
-	return openaiModel{client: &c, name: name}
+	return Monitored(openaiModel{client: &c, name: name}, name)
 }
 
 type openaiModel struct {

@@ -44,7 +44,7 @@ func OpenFile(path string) (Memory, error) {
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrOpen, err)
 	}
-	return &fileMemory{file: f, facts: facts}, nil
+	return Monitored(&fileMemory{file: f, facts: facts}), nil
 }
 
 type fileMemory struct {

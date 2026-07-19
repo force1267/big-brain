@@ -29,7 +29,7 @@ type Channel interface {
 
 // Webhook returns the v1 built-in Channel: an HTTP POST of the Message as
 // JSON to url. It composes with any relay (Telegram bots, ntfy, ...).
-func Webhook(url string) Channel { return webhook(url) }
+func Webhook(url string) Channel { return Monitored(webhook(url)) }
 
 type webhook string
 

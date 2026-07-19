@@ -59,7 +59,7 @@ func OpenFile(path string) (Store, error) {
 			s.pending = append(s.pending, j)
 		}
 	}
-	return s, nil
+	return Monitored(s), nil
 }
 
 type fileStore struct {

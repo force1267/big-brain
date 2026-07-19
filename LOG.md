@@ -341,3 +341,32 @@ messages API.
 
 All ten reference stories now pass end to end. v1 API surface (chat
 completions + messages + streaming + /models) is complete.
+
+## 2026-07-20 — Telemetry wrappers (session 4, continued)
+
+Fulfilled the CLAUDE.md telemetry rule with the lazy-correct design: the
+existing internal/telemetry Provider sets the *global* OTel meter
+provider (noop when WRAPPER_TELEMETRY_ENABLED=false, OTLP gRPC when
+true), so `Monitored` wrappers can be applied unconditionally in each
+package's constructor — inert until telemetry is enabled, no config
+plumbed into pkg/.
+
+- Metric-bearing interfaces wrapped, each in its package's telemetry.go:
+  - model.Monitored(m, name): model.calls (by outcome incl. rejected),
+    model.call.seconds, model.chunks — tagged with the backing model.
+    Applied in model.OpenAI.
+  - memory.Monitored: memory.remembered, memory.recalls (by outcome).
+    Applied in memory.OpenFile.
+  - job.Monitored: job.enqueued, job.ran (by pipeline and outcome).
+    Applied in job.OpenFile.
+  - notify.Monitored: notify.sent (by outcome). Applied in
+    notify.Webhook (Log() stays bare).
+- serve.Run now owns the telemetry lifecycle: Start after logging,
+  graceful Shutdown on exit.
+- Instrument-creation failure falls back to the unwrapped value —
+  metrics must never break the model path.
+- Tests: delegation and error-propagation per wrapper; a ManualReader
+  test on the model wrapper asserts all three instruments record; test
+  cleanup restores a noop global provider (nil panics — learned by
+  test). Full suite green under -race; live smoke with telemetry
+  disabled unchanged.

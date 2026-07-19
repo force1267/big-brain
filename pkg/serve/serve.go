@@ -16,6 +16,7 @@ import (
 	"github.com/force1267/big-brain/internal/config"
 	"github.com/force1267/big-brain/internal/logging"
 	openaiwire "github.com/force1267/big-brain/internal/openai"
+	"github.com/force1267/big-brain/internal/telemetry"
 	"github.com/force1267/big-brain/pkg/brain"
 	"github.com/force1267/big-brain/pkg/job"
 	"github.com/force1267/big-brain/pkg/memory"
@@ -54,6 +55,15 @@ func Run(ctx context.Context, b *brain.Brain) error {
 	if err := logging.New().Init(cfg); err != nil {
 		return fmt.Errorf("%w: %w", ErrConfig, err)
 	}
+	tel := telemetry.New(cfg)
+	if err := tel.Start(ctx); err != nil {
+		return fmt.Errorf("%w: %w", ErrConfig, err)
+	}
+	defer func() {
+		if err := tel.Shutdown(context.WithoutCancel(ctx)); err != nil {
+			logrus.WithError(err).Error("telemetry shutdown")
+		}
+	}()
 
 	if b.Models == nil {
 		b.Models = model.Models{}
