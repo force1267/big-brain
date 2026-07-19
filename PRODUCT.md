@@ -122,6 +122,50 @@ structured tool call; reply-then-finish with notification; webhook-driven
 runs; scheduled and self-scheduled runs; time/system awareness; model
 roles; parallel multi-stage reasoning behind one streamed reply.
 
+## Decision: continuity — transcripts vs memory
+
+The chat API is stateless: the client sends history each request, and the
+engine keeps no server-side conversation. **Transcripts belong to the
+client; durable facts belong to memory.** Memory is the only continuity
+there is; the brain never assumes the client sent full history, and two
+different clients share nothing except what memory carries.
+
+## Decision: caller-declared tools and reasoning are the brain's concern
+
+The interface is chat, and chat includes tool calls — a caller may declare
+tools and receive tool-call responses; a brain may likewise emit `<think>`
+blocks to explain its reasoning. Whether and how to honor caller tools or
+expose reasoning is the **brain developer's choice**; the engine only
+faithfully carries the chat protocol in both directions.
+
+## Decision: background-job outcomes are not policed
+
+The engine does not enforce "every background continuation ends in a
+notification." Whether a failed background job notifies the user is a
+per-story, per-brain decision by the brain developer. The concern (a
+promise followed by silence) is real and is documented in an authoring
+guide, not enforced by the engine. The home-assistant reference brain
+*does* notify on background failure.
+
+## Decision: notification channel v1 = outgoing webhook
+
+The one built-in channel is an HTTP POST to a configured URL — it composes
+with any relay (Telegram bots, ntfy, …) without integrating them. The
+channel concept is **explicitly open to extension**: channels are an
+extensible family, outgoing webhook is merely the first member.
+
+## Decision: v1 API surface
+
+Chat completions (OpenAI-compatible) and messages (Anthropic-compatible),
+both with streaming, plus `/models` listing the single brain. No voice,
+vision, or realtime endpoints in v1 — senses remain a roadmap faculty, not
+a v1 promise. Sampling parameters clients send (temperature, etc.) are
+accepted, never an error, and exposed to the brain as context. Recorded
+here so future work doesn't silently widen or shrink this contract.
+
 ## Open (next discussion)
 
+- Persistence: what engine-owned state survives a restart (memory,
+  self-installed triggers, in-flight background jobs), and what the
+  product promises about it. Undecided — under active discussion.
 - Ranking: which building blocks get built first.

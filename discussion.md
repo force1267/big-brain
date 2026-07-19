@@ -163,6 +163,29 @@ itself?) that deserve their own discussion. The engine constraint that
 keeps it possible costs nothing now: graphs are first-class values, and
 registration is not restricted to startup.
 
+## Pre-build double-check
+
+Before building, the ten stories were re-walked for hidden assumptions.
+Six surfaced; five were resolved (see `PRODUCT.md`), one stays open:
+
+- **Transcripts vs memory** — the chat API is stateless, so memory is the
+  only continuity; transcripts are the client's, facts are the brain's.
+- **Caller-declared tools / reasoning** — chat includes tool calls and may
+  include `<think>` blocks; honoring them is the brain developer's choice,
+  the engine just carries the protocol faithfully.
+- **Background-job failure** ("the broken promise") — deliberately *not*
+  an engine rule. Notify-on-failure is a per-brain, per-story choice,
+  documented as guidance in an authoring guide; the reference home
+  assistant chooses to notify.
+- **Notification channel** — v1 ships one: outgoing webhook (HTTP POST to
+  a configured URL), with channels explicitly an extensible family.
+- **v1 API surface** — chat completions + messages + streaming +
+  `/models`; no voice/vision/realtime; client sampling params accepted and
+  passed to the brain as context.
+- **Persistence across restarts** — *open*: which engine-owned state
+  (memory, self-installed triggers, in-flight jobs) survives, and what the
+  product promises. Also interacts with the stateless-provider-brain idea.
+
 ## Outcome
 
 Decisions locked in `PRODUCT.md`: code-first authoring, one brain per

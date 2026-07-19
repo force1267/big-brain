@@ -96,3 +96,14 @@ needs from `pkg/`.
   startup.
 
 Next: rank which building blocks get built first.
+
+## 2026-07-19 — Pre-build double-check (session 3, continued)
+
+Re-walked the ten stories for hidden assumptions; five decisions recorded
+in PRODUCT.md (transcripts vs memory, caller tools/`<think>` as brain
+developer's concern, background-failure notification as guidance not rule,
+outgoing-webhook channel open to extension, exact v1 API surface). One
+question deliberately left open and under discussion: **persistence** —
+what engine-owned state survives restarts and what the product promises.
+
+Next: settle persistence, then rank building blocks.
