@@ -75,7 +75,53 @@ exist in v1. Chosen over the research-lab helper because it exercises both
 differentiators — memory and initiative — with the fewest heavy
 dependencies (no Elasticsearch/vector/vision stack on day one).
 
+## Decision: building-block taxonomy
+
+Every building block plays one of three roles in how a brain runs:
+
+- **Triggers** start a pipeline run: `chat` (the standard API request —
+  not special, just the most common trigger), `webhook`, `cron`. Brains
+  can install their own triggers at runtime; that is what makes
+  initiative real.
+- **Nodes** are the steps: prompt template, structured output
+  (json-schema; validate first, repair-model only on mismatch), tool/HTTP
+  call, conditionals, fan-out/join, and explicitly **reply** and
+  **notify**. Background work is not a node type — it is the pipeline
+  continuing after the reply node fires.
+- **Context & effects** are ambient, visible to every node: memory,
+  speaker identity, time/system awareness, model roles, outgoing
+  channels.
+
+**Model roles** (fast, smart, cheap…) are first-class: nodes reference a
+role; which provider/model backs each role is deployment configuration.
+This keeps brain code portable across providers.
+
+## Decision: dynamism ladder
+
+Behavior change lives in data whenever possible; structure change only
+when data can't express it. Because graphs are runtime objects built by
+code, dynamism comes in grades, none requiring engine features:
+
+1. Fixed graph, dynamic data (memory) — most "learning".
+2. Dynamic construction — brain code assembles subgraphs at runtime.
+3. Self-installed triggers — the brain schedules its own future runs.
+4. Self-modifying structure — the brain registers new pipelines for
+   itself (skill learning, self-healing).
+
+Levels 1–3 are v1 scope; all ten reference stories run on them. Level 4
+is deliberately deferred pending its own discussion (persistence, audit,
+rollback of learned skills). Engine constraint preserving it: graphs are
+first-class values and registration is not restricted to startup.
+
+## Reference stories
+
+Ten home-assistant functionality stories define v1 coverage — each block
+must appear in at least one (full text in `discussion.md`): persona chat
+through any standard client; ambient memory; speaker identity; intent →
+structured tool call; reply-then-finish with notification; webhook-driven
+runs; scheduled and self-scheduled runs; time/system awareness; model
+roles; parallel multi-stage reasoning behind one streamed reply.
+
 ## Open (next discussion)
 
-- Which building blocks to create first, derived from what the home
-  assistant brain actually needs from `pkg/`.
+- Ranking: which building blocks get built first.

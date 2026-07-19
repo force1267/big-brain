@@ -77,8 +77,95 @@ running many instances or a stateless brain that treats tenant identity as
 request context. In scope: speaker identity *within* one brain (household
 members, lab members) — one brain, one memory, aware of who is talking.
 
+## Functionality stories (home assistant)
+
+Ten stories that together exercise every v1 building block; each block must
+earn its place by appearing in at least one story.
+
+1. **Basic chat with character** — "good morning" answered in persona,
+   streaming, through any off-the-shelf OpenAI-compatible client.
+2. **Remembering ambient facts** — "we're vegetarian now" said in passing
+   shapes a menu plan weeks later; the pipeline itself decided the fact was
+   worth keeping.
+3. **Knowing who's talking** — owner and kid ask "when is my dentist
+   appointment?" and each gets their own; same brain, speaker identity from
+   the API credential.
+4. **Intent → tool call** — "add John to the guest list" becomes a
+   structured request matching the door-camera endpoint's schema, is
+   executed, remembered, and confirmed.
+5. **Finish later, then reach out** — "on it — I'll text you when it's
+   done": work continues after the HTTP response closes; a notification
+   goes out on completion.
+6. **Reacting to the world** — the door camera POSTs "unrecognized face";
+   the pipeline checks the guest list in memory and opens or alerts. No
+   human prompted this run.
+7. **Acting on schedule** — a nightly 21:00 calendar review; "party
+   tomorrow" in chat becomes a one-shot trigger the brain installed for
+   itself.
+8. **Time and situation awareness** — "is it too late to run the
+   dishwasher?" answered knowing current time, timezone, quiet hours, and
+   the system/caller context, without hand-crafted prompt plumbing.
+9. **Choosing the right mind for the job** — small-talk on a fast/cheap
+   model, party budget on a smart one: nodes reference declared model
+   *roles*; which provider backs each role is deployment config.
+10. **Multi-stage reasoning behind one reply** — weather check and RSVP
+    check fan out in parallel and merge into one streamed answer; the
+    caller sees one model reply, never the pipeline.
+
+## Building blocks — taxonomy
+
+The blocks first came up as a flat list (prompt template step, json-schema
+structured output, webhook initiation, background tool call, time
+awareness, cronjobs, system awareness). The agreed structure gives each
+block one of three roles matching how a brain runs:
+
+- **Triggers** — what starts a pipeline run: `chat` (the API request
+  itself), `webhook`, `cron`. The load-bearing unification: a chat message
+  is not special, just the most common trigger. Brains can install their
+  own triggers at runtime — that is what makes initiative real.
+- **Nodes** — the steps: prompt template, structured output (json-schema,
+  validate first, repair model only on mismatch), tool/HTTP call,
+  conditionals, fan-out/join, and — explicitly — **reply** and **notify**.
+  "Background" is not a node type; it is the pipeline continuing after the
+  reply node has fired.
+- **Context & effects** — ambient things every node can see: memory,
+  speaker identity, time/system awareness, model roles, outgoing channels.
+  Not steps; injected.
+
+Model roles (fast, smart, cheap…) are a first-class concept, not a prompt
+parameter — they keep brain code portable across providers.
+
+## Dynamism — the graph is dynamic, in grades
+
+"We're vegetarian" was raised as a case for dynamic graphs; on inspection
+it is not one — the graph is identical before and after, only *data*
+(memory) changed. Principle: **behavior change lives in data whenever
+possible; structure change only when data can't express it.** A brain that
+learns through memory is auditable; one that rewires itself has bugs you
+can't reproduce.
+
+Because graphs are runtime objects built by code (the code-first decision
+paying off again), dynamism is a capability ladder the brain author climbs,
+not an engine feature:
+
+1. **Fixed graph, dynamic data** — memory and context; ~90% of "learning".
+2. **Dynamic construction** — brain code assembles or parameterizes
+   subgraphs at runtime (per intent, per N events). Free; it's just Go.
+3. **Self-installed triggers** — the brain schedules its own future runs.
+4. **Self-modifying structure** — the brain writes and registers new
+   pipelines for itself: skill learning, expanding, self-healing brains.
+   Expressible as a node whose effect is "register this graph."
+
+Levels 1–3 are in scope for v1 (all ten stories run on them). Level 4 is
+deliberately deferred — it raises product questions with teeth (do learned
+skills survive restarts? can you audit and roll back what the brain taught
+itself?) that deserve their own discussion. The engine constraint that
+keeps it possible costs nothing now: graphs are first-class values, and
+registration is not restricted to startup.
+
 ## Outcome
 
 Decisions locked in `PRODUCT.md`: code-first authoring, one brain per
-process, and the home assistant as the reference brain that drives which
-building blocks are created first.
+process, the home assistant as the reference brain, the
+trigger/node/context taxonomy, and the dynamism ladder with levels 1–3 in
+v1 scope.

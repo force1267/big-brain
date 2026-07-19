@@ -79,3 +79,20 @@ Discussed `discussion.md` with the user; decisions captured in `PRODUCT.md`:
 
 Next: choose the first building blocks from what the home-assistant brain
 needs from `pkg/`.
+
+## 2026-07-19 — Building blocks & dynamism (session 3, continued)
+
+- Wrote 10 home-assistant functionality stories covering all v1 blocks
+  (discussion.md); PRODUCT.md summarizes them.
+- Decided the block taxonomy: **triggers** (chat/webhook/cron, brains can
+  install their own), **nodes** (prompt template, structured output with
+  validate-then-repair, tool call, conditionals, fan-out/join, explicit
+  reply and notify), **context & effects** (memory, speaker identity,
+  time/system, model roles, channels). Model roles are first-class.
+- Decided the dynamism ladder: (1) dynamic data, (2) dynamic construction,
+  (3) self-installed triggers, (4) self-modifying structure. 1–3 in v1;
+  4 deferred pending persistence/audit/rollback discussion. Engine keeps
+  it possible: graphs are first-class values, registration not limited to
+  startup.
+
+Next: rank which building blocks get built first.
