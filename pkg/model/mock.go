@@ -7,8 +7,10 @@ import "context"
 // immediately instead.
 type Mock struct {
 	Chunks []string
-	Fail   error // sent as a terminal Chunk.Err after Chunks
-	Reject error // returned by Stream itself
+	Script []string // when set, each call streams the next entry instead
+	Fail   error    // sent as a terminal Chunk.Err after Chunks
+	Reject error    // returned by Stream itself
+	Calls  int
 	// Got records the last call for assertions.
 	Got struct {
 		Msgs   []Message
@@ -25,8 +27,13 @@ func (m *Mock) Stream(_ context.Context, msgs []Message, p Params) (<-chan Chunk
 	if m.Reject != nil {
 		return nil, m.Reject
 	}
-	out := make(chan Chunk, len(m.Chunks)+1)
-	for _, c := range m.Chunks {
+	chunks := m.Chunks
+	if len(m.Script) > 0 {
+		chunks = []string{m.Script[min(m.Calls, len(m.Script)-1)]}
+	}
+	m.Calls++
+	out := make(chan Chunk, len(chunks)+1)
+	for _, c := range chunks {
 		out <- Chunk{Content: c}
 	}
 	if m.Fail != nil {

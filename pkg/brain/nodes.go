@@ -53,6 +53,28 @@ func Call(role model.Role) Node {
 	})
 }
 
+// Seq composes nodes into one, for use inside If branches.
+func Seq(nodes ...Node) Node {
+	return Func(func(ctx context.Context, r *Run) error {
+		return Execute(ctx, nodes, r)
+	})
+}
+
+// If returns a node that runs then when cond holds, els otherwise. Either
+// branch may be nil, meaning do nothing.
+func If(cond func(*Run) bool, then, els Node) Node {
+	return Func(func(ctx context.Context, r *Run) error {
+		n := els
+		if cond(r) {
+			n = then
+		}
+		if n == nil {
+			return nil
+		}
+		return n.Run(ctx, r)
+	})
+}
+
 // Reply returns the node that streams the current model output to the
 // caller. The pipeline may continue after it — that is what "background"
 // means in this engine.

@@ -90,6 +90,18 @@ func TestOpenAICancelledContext(t *testing.T) {
 	}
 }
 
+func TestCollect(t *testing.T) {
+	stream, _ := (&Mock{Chunks: []string{"a", "b"}}).Stream(context.Background(), nil, Params{})
+	if got, err := Collect(stream); err != nil || got != "ab" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	boom := errors.New("boom")
+	stream, _ = (&Mock{Chunks: []string{"a"}, Fail: boom}).Stream(context.Background(), nil, Params{})
+	if got, err := Collect(stream); !errors.Is(err, boom) || got != "a" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+}
+
 func TestMockRecordsAndStreams(t *testing.T) {
 	boom := errors.New("boom")
 	m := &Mock{Chunks: []string{"a"}, Fail: boom}

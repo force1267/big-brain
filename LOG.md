@@ -173,3 +173,29 @@ no `telemetry.go` wrappers yet — no interface is metric-bearing in slice 1,
 first candidate is `model.Model` when OTel wiring reaches pkg/.
 
 Next: slice 2 (story 4) — structured output, tool node, conditionals.
+
+## 2026-07-19 — Slice 2 built: story 4 passes end to end (session 4, continued)
+
+- `pkg/brain`: `Run.Vars`/`SetVar` + generic `Var[T]` (per-run state —
+  nodes are shared by concurrent runs, so state must live on the Run,
+  never in closed-over variables); `If(cond, then, els)`; `Seq(...)`;
+  `Extract[T](role, instruction, key)` — structured output that sends a
+  zero-value shape hint, strictly decodes (unknown fields rejected,
+  tolerates prose/fences around the object), and makes exactly one
+  repair round-trip only on mismatch (per PRODUCT.md). Extraction
+  deliberately ignores caller sampling params.
+- `pkg/model`: `Collect(stream)` helper; Mock gains `Script`/`Calls`
+  for multi-call sequences.
+- `cmd/homeassistant`: story-4 pipeline — Prompt → Extract intent →
+  If(add_guest → addGuest tool) → Call → Reply. The tool is a plain Go
+  closure POSTing to JARVIS_DOOR_URL and appending the tool result as a
+  system message; no tool framework, code-first as decided.
+- Verified: all tests green (happy/repair/failed-repair/prose-wrapped/
+  unbound-role/branching); live end to end against LM Studio gemma
+  (localhost:1234): "add my friend John…" → door endpoint received
+  {"name":"John"}, Jarvis confirmed in persona; plain chat unaffected.
+- Note: earlier LAN-IP timeouts were environmental (sandbox blocks LAN
+  dials, allows loopback); localhost upstream works.
+
+Next: slice 3 (stories 2+3) — memory interface with zero-setup default,
+speaker identity from the API credential.

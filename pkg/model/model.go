@@ -35,3 +35,16 @@ type Model interface {
 
 // Models binds declared roles to backing models.
 type Models map[Role]Model
+
+// Collect drains a stream into the full completion text, returning the
+// terminal error if the stream ended badly.
+func Collect(stream <-chan Chunk) (string, error) {
+	var b []byte
+	for c := range stream {
+		if c.Err != nil {
+			return string(b), c.Err
+		}
+		b = append(b, c.Content...)
+	}
+	return string(b), nil
+}

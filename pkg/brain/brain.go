@@ -27,6 +27,23 @@ type Run struct {
 	Models   model.Models            // role → model, bound from config
 	Stream   <-chan model.Chunk      // output of the last model call
 	Emit     func(model.Chunk) error // delivers reply chunks to the caller
+	Vars     map[string]any          // per-run state nodes pass to each other
+}
+
+// SetVar stores a per-run value for later nodes. Per-run state must live
+// here, never in variables nodes close over — nodes are shared by
+// concurrent runs.
+func (r *Run) SetVar(key string, v any) {
+	if r.Vars == nil {
+		r.Vars = map[string]any{}
+	}
+	r.Vars[key] = v
+}
+
+// Var reads a typed per-run value stored by an earlier node.
+func Var[T any](r *Run, key string) (T, bool) {
+	v, ok := r.Vars[key].(T)
+	return v, ok
 }
 
 // Node is one step of a pipeline.
