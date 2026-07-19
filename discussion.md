@@ -205,6 +205,46 @@ Externalizing them is what makes the provider/stateless-brain deployment
 possible — statelessness becomes a deployment choice, not a different
 product.
 
+## One binary — dissolving the "what does small-brain produce" worry
+
+A late question probed whether the authoring model hides a static graph
+after all: if the big-brain binary "runs what the brain author produces,"
+isn't that product the data format we rejected? It is not, because there
+are not two binaries. big-brain is a **library**; the brain author's Go
+program imports `pkg/`, builds the graph as runtime values (node bodies
+are arbitrary Go closures), and calls the engine's serve entry point.
+That program *is* the executable. The engine — linked into the same
+process — owns the HTTP server and trigger dispatch (webhooks included);
+the author's code owns the thinking. Conditionals and loops run in two
+places: inside node bodies during a run, and at graph-construction time
+(dynamism level 2). A protocol between orchestrator and thinker only
+appears in the deferred remote-node deployment variant.
+
+## Build order
+
+Blocks are built as vertical slices, each making one story pass end to
+end, because each slice ships something demoable and hits the risky
+unknowns (pkg API shape, run model, post-reply continuation) in the order
+we can afford to learn from them. Story 1 is the walking skeleton — it
+forces every load-bearing decision (graph runtime, chat trigger, model
+roles, streaming, serving) while staying thin. Then: 4 (structured
+output/tools/conditionals), 2+3 (memory + speaker identity), 5
+(continuation + notify + durable intent — hardest engine work, done after
+the run model is proven), 6+7 (more triggers), 8+10 (context, fan-out).
+The slice-1 author code (`cmd/homeassistant`) is written *first*, as the
+spec the engine must satisfy.
+
+## Engine internals — pkg/ vs internal/
+
+A brain author is an external module, and Go forbids importing our
+`internal/`; therefore everything a brain needs to compile lives in
+`pkg/`, and `internal/` holds only what runs behind that API (first: the
+OpenAI wire types and SSE encoding). One deliberate deviation from the
+repo rule "initialization lives in internal/": the reference brain's
+`main` uses only `pkg/`, exactly like a stranger would — if `pkg/` can't
+comfortably init a brain in one small `main`, that is a pkg API defect,
+not something to paper over with internal wiring only we can reach.
+
 ## Outcome
 
 Decisions locked in `PRODUCT.md`: code-first authoring, one brain per

@@ -119,3 +119,57 @@ provider/stateless-brain deployment.
 **Next topic (agreed, written down so no session loses it): ranking which
 building blocks get built first — the gate between product discovery and
 building.**
+
+## 2026-07-19 — Build order settled; IMPLEMENTATION.md created (session 4)
+
+- Clarified the authoring model against a late worry: there is one
+  binary; big-brain is a library, the author's program is the
+  executable, node bodies are Go closures — no hidden static graph, no
+  inter-process protocol (that only appears in the deferred remote-node
+  variant). Recorded in discussion.md.
+- Decided build order: vertical slices in story order 1 → 4 → 2+3 → 5 →
+  6+7 → 8+10; Anthropic API after slice 2. Recorded in PRODUCT.md
+  (closes the last open product question).
+- Decided pkg/ vs internal/ split: everything author-facing in pkg/
+  (external modules can't import internal/); internal/openai first for
+  wire types/SSE. Deliberate deviation from the "initialization lives in
+  internal/" rule: cmd/homeassistant uses only pkg/, since it is
+  executable documentation for external authors.
+- Created IMPLEMENTATION.md — the bridge between PRODUCT.md and code:
+  layout, slice plan with slice-1 definition of done, author-code-first
+  workflow, requirements carried from product decisions, binding repo
+  rules, non-goals.
+
+Next: write cmd/homeassistant for slice 1 (the spec), then build the
+pkg/ surface until story 1 passes.
+
+## 2026-07-19 — Slice 1 built: story 1 passes end to end (session 4, continued)
+
+Author code written first (`cmd/homeassistant`, pkg-only, ~35 lines), then
+the surface to satisfy it:
+
+- `pkg/model` — provider-neutral Message/Params/Chunk, Role indirection,
+  `Model` interface (1 method), OpenAI-compatible backing via
+  openai-go/v3 (new direct dep, per CLAUDE.md tech choices), `Mock`.
+- `pkg/brain` — `Brain`, `Run`, `Node` (1 method) + `Func` adapter
+  (http.HandlerFunc-style), `Execute`, built-in nodes `Prompt`
+  (text/template), `Call(role)`, `Reply` (streams to Emit; pipeline may
+  continue after it).
+- `pkg/serve` — `Run` (config+logging+role binding+graceful server) and
+  exported `Handler` for tests/embedding; streaming (SSE) and
+  non-streaming chat completions, `/v1/models`, OpenAI-shaped errors.
+- `internal/openai` — wire types, SSE encoding; no mock (pure encoding).
+- `internal/config` — added `WRAPPER_MODELS` (role=model pairs),
+  `WRAPPER_UPSTREAM_BASE_URL/API_KEY`, sentinel `ErrInvalidModels`.
+
+Verified: `go build`/`vet`/`gofmt` clean, all package tests green (happy/
+unhappy/edge per node and handler), and a live smoke test — the
+homeassistant binary against a fake OpenAI upstream answered `/v1/models`,
+non-streaming, and SSE streaming via plain curl.
+
+Deviations, deliberate: reference brain's init lives in main via
+`serve.Run`, not `internal/` (it documents the external-author path);
+no `telemetry.go` wrappers yet — no interface is metric-bearing in slice 1,
+first candidate is `model.Model` when OTel wiring reaches pkg/.
+
+Next: slice 2 (story 4) — structured output, tool node, conditionals.

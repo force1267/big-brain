@@ -188,8 +188,25 @@ requires zero setup — one binary, durability included. Externalizing these
 interfaces is what enables the provider/stateless-brain deployment: same
 brain code, tenant-keyed external state.
 
-## Open (next discussion)
+## Decision: build order — vertical slices in story order
 
-- **Ranking: which building blocks get built first.** All product
-  questions raised so far are resolved; this ordering discussion is the
-  gate between product discovery and building.
+Blocks are built as vertical slices, each making a reference story pass
+end-to-end — never layer-by-layer. The order (rationale in
+`discussion.md`):
+
+1. **Story 1** — walking skeleton: chat trigger, prompt + model-call +
+   reply nodes, model roles, streaming, OpenAI-compatible serving.
+2. **Story 4** — structured output, tool node, conditionals.
+3. **Stories 2+3** — memory interface (zero-setup default) + speaker
+   identity.
+4. **Story 5** — post-reply continuation, outgoing-webhook channel,
+   durable-intent job store.
+5. **Stories 6+7** — webhook and cron triggers, self-installed triggers.
+6. **Stories 8+10** — context injection, fan-out/join (9 falls out of
+   slice 1's roles).
+
+Anthropic-messages compatibility is deferred until after slice 2; one
+client protocol proves the boundary.
+
+There are no open product questions; how the code is organized lives in
+`IMPLEMENTATION.md`.

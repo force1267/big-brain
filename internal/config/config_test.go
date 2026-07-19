@@ -39,6 +39,39 @@ func TestLoad_InvalidEnv(t *testing.T) {
 	}
 }
 
+func TestLoad_Models(t *testing.T) {
+	t.Setenv("WRAPPER_MODELS", "fast=gpt-4o-mini, smart = gpt-4o")
+	t.Setenv("WRAPPER_UPSTREAM_BASE_URL", "http://up")
+	t.Setenv("WRAPPER_UPSTREAM_API_KEY", "k")
+
+	c, err := New().Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.Models["fast"] != "gpt-4o-mini" || c.Models["smart"] != "gpt-4o" {
+		t.Fatalf("models = %+v", c.Models)
+	}
+	if c.Upstream.BaseURL != "http://up" || c.Upstream.APIKey != "k" {
+		t.Fatalf("upstream = %+v", c.Upstream)
+	}
+}
+
+func TestLoad_ModelsEmpty(t *testing.T) {
+	c, err := New().Load()
+	if err != nil || len(c.Models) != 0 {
+		t.Fatalf("want empty models, got %+v, %v", c.Models, err)
+	}
+}
+
+func TestLoad_ModelsInvalid(t *testing.T) {
+	t.Setenv("WRAPPER_MODELS", "fast")
+
+	_, err := New().Load()
+	if !errors.Is(err, ErrLoad) || !errors.Is(err, ErrInvalidModels) {
+		t.Fatalf("expected ErrLoad wrapping ErrInvalidModels, got: %v", err)
+	}
+}
+
 func TestMockLoader(t *testing.T) {
 	m := &MockLoader{Cfg: Config{Env: EnvLocal}, Err: nil}
 	c, err := m.Load()

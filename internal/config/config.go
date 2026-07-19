@@ -19,6 +19,8 @@ var (
 	ErrLoad = errors.New("config load failed")
 	// ErrInvalidEnv is returned when WRAPPER_ENV is not a known environment.
 	ErrInvalidEnv = errors.New("invalid environment")
+	// ErrInvalidModels is returned when WRAPPER_MODELS is not role=model pairs.
+	ErrInvalidModels = errors.New("invalid models binding")
 )
 
 // Config holds every environment-derived setting, ready to be passed by value.
@@ -39,6 +41,16 @@ type Config struct {
 		Endpoint    string // OTLP gRPC endpoint, e.g. "localhost:4317"
 		ServiceName string
 	}
+
+	// Upstream is the OpenAI-compatible endpoint backing the model roles.
+	Upstream struct {
+		BaseURL string // empty means the provider SDK's default
+		APIKey  string
+	}
+
+	// Models binds brain-declared roles to upstream model names, parsed
+	// from WRAPPER_MODELS, e.g. "fast=gpt-4o-mini,smart=gpt-4o".
+	Models map[string]string
 }
 
 // Loader loads configuration. Implementations must be safe to call once at
@@ -76,9 +88,33 @@ func (envLoader) Load() (Config, error) {
 	c.Telemetry.Enabled = v.GetBool("telemetry.enabled")
 	c.Telemetry.Endpoint = v.GetString("telemetry.endpoint")
 	c.Telemetry.ServiceName = v.GetString("telemetry.service_name")
+	c.Upstream.BaseURL = v.GetString("upstream.base_url")
+	c.Upstream.APIKey = v.GetString("upstream.api_key")
+
+	models, err := parseModels(v.GetString("models"))
+	if err != nil {
+		return Config{}, fmt.Errorf("%w: %w", ErrLoad, err)
+	}
+	c.Models = models
 
 	if c.Env != EnvLocal && c.Env != EnvProduction {
 		return Config{}, fmt.Errorf("%w: %w: %q", ErrLoad, ErrInvalidEnv, c.Env)
 	}
 	return c, nil
+}
+
+func parseModels(s string) (map[string]string, error) {
+	models := map[string]string{}
+	for _, pair := range strings.Split(s, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		role, name, ok := strings.Cut(pair, "=")
+		if !ok || role == "" || name == "" {
+			return nil, fmt.Errorf("%w: %q", ErrInvalidModels, pair)
+		}
+		models[strings.TrimSpace(role)] = strings.TrimSpace(name)
+	}
+	return models, nil
 }
