@@ -182,9 +182,28 @@ Six surfaced; five were resolved (see `PRODUCT.md`), one stays open:
 - **v1 API surface** — chat completions + messages + streaming +
   `/models`; no voice/vision/realtime; client sampling params accepted and
   passed to the brain as context.
-- **Persistence across restarts** — *open*: which engine-owned state
-  (memory, self-installed triggers, in-flight jobs) survives, and what the
-  product promises. Also interacts with the stateless-provider-brain idea.
+- **Persistence across restarts** — resolved below.
+
+## Persistence
+
+The trap was treating engine-owned state as one question; it is three,
+with three promises. Memory survives unconditionally. Self-installed
+triggers survive (config-defined ones reappear from code for free — it is
+specifically the runtime-installed ones needing durability). For
+background jobs, two options were weighed: *durable intent* (the job
+record survives, re-runs from the start, at-least-once) versus *durable
+execution* (resume mid-pipeline — Temporal territory: journaling, replay,
+determinism constraints leaking into every brain). Durable intent won:
+"your intent survives, your execution restarts" is easy to state, honest
+to build, and fits the reference brain — re-registering a face twice is
+harmless, losing it silently is not. At-most-once was rejected as
+betraying story 5.
+
+Cross-cutting: promises are about *what* survives, never *where*; state
+lives behind engine-owned pluggable interfaces with a zero-setup default.
+Externalizing them is what makes the provider/stateless-brain deployment
+possible — statelessness becomes a deployment choice, not a different
+product.
 
 ## Outcome
 

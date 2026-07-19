@@ -163,9 +163,33 @@ a v1 promise. Sampling parameters clients send (temperature, etc.) are
 accepted, never an error, and exposed to the brain as context. Recorded
 here so future work doesn't silently widen or shrink this contract.
 
+## Decision: persistence
+
+One line: **memory and installed triggers always survive; background jobs
+survive as intent and re-run rather than resume; storage is pluggable with
+a zero-setup default.** The three kinds of engine-owned state carry three
+different promises:
+
+- **Memory** — survives unconditionally. Memory *is* the product.
+- **Self-installed triggers** — survive. Initiative that evaporates on
+  restart is fake initiative. (Config-defined triggers need no durability;
+  they reappear from brain code on startup.)
+- **Background jobs** — *durable intent, not durable execution*: the job
+  record survives and re-runs from the start after a crash (at-least-once);
+  partial execution is not resumed. Queued work is never silently lost,
+  but brain developers must write background pipelines to tolerate a
+  duplicate run (authoring-guide material). Durable mid-pipeline
+  resumption (workflow-engine territory) is a possible future grade, like
+  the dynamism ladder — not v1.
+
+The promise is *what* survives, never *where* it is stored: all three live
+behind engine-owned interfaces with pluggable backing. Default backing
+requires zero setup — one binary, durability included. Externalizing these
+interfaces is what enables the provider/stateless-brain deployment: same
+brain code, tenant-keyed external state.
+
 ## Open (next discussion)
 
-- Persistence: what engine-owned state survives a restart (memory,
-  self-installed triggers, in-flight background jobs), and what the
-  product promises about it. Undecided — under active discussion.
-- Ranking: which building blocks get built first.
+- **Ranking: which building blocks get built first.** All product
+  questions raised so far are resolved; this ordering discussion is the
+  gate between product discovery and building.

@@ -107,3 +107,15 @@ question deliberately left open and under discussion: **persistence** —
 what engine-owned state survives restarts and what the product promises.
 
 Next: settle persistence, then rank building blocks.
+
+## 2026-07-19 — Persistence settled (session 3, continued)
+
+Decision recorded in PRODUCT.md: memory and self-installed triggers always
+survive restarts; background jobs survive as intent (at-least-once re-run,
+no mid-pipeline resumption in v1); storage pluggable behind engine-owned
+interfaces with a zero-setup default — which also enables the
+provider/stateless-brain deployment.
+
+**Next topic (agreed, written down so no session loses it): ranking which
+building blocks get built first — the gate between product discovery and
+building.**
