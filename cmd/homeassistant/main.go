@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -83,6 +84,29 @@ func describeFace(_ context.Context, r *brain.Run) error {
 	return nil
 }
 
+// checkWeather and checkRSVPs are the story-10 fan-out tools. Each could
+// call a real API; what matters is they run concurrently and merge into
+// one reply. ponytail: canned results; swap for real endpoints anytime.
+func checkWeather(_ context.Context, r *brain.Run) error {
+	r.SetVar("weather", "clear skies expected, around 24°C")
+	return nil
+}
+
+func checkRSVPs(ctx context.Context, r *brain.Run) error {
+	facts, err := r.Memory.Recall(ctx, 0)
+	if err != nil {
+		return err
+	}
+	guests := 0
+	for _, f := range facts {
+		if strings.Contains(f.Content, "guest list") {
+			guests++
+		}
+	}
+	r.SetVar("rsvps", fmt.Sprintf("%d guests on the door list so far", guests))
+	return nil
+}
+
 // partyAt schedules the brain's own reminder before the party (story 7).
 // ponytail: fixed "tomorrow 09:00"; parsing dates out of chat is a model
 // job for a later slice. JARVIS_PARTY_DELAY overrides for demos.
@@ -115,6 +139,8 @@ func main() {
 		Name: "jarvis",
 		Chat: []brain.Node{
 			brain.Prompt(persona),
+			// story 8: time/situation awareness, no per-request plumbing
+			brain.Situation("House quiet hours are 22:00 to 07:00; avoid noisy appliances then."),
 			brain.RecallFacts(50),
 			brain.Extract[intent]("fast", classify, "intent"),
 			brain.If(isAddGuest, brain.Seq(
@@ -130,9 +156,13 @@ func main() {
 			}, brain.Seq(
 				// story 7: the brain installs a trigger for itself
 				brain.GoAt(partyAt, "party-prep", nil),
+				// story 10: fan out checks, join into one reply
+				brain.Parallel(brain.Func(checkWeather), brain.Func(checkRSVPs)),
 				brain.Func(func(_ context.Context, r *brain.Run) error {
+					weather, _ := brain.Var[string](r, "weather")
+					rsvps, _ := brain.Var[string](r, "rsvps")
 					r.Messages = append(r.Messages, model.Message{Role: "system",
-						Content: "You scheduled yourself a party-prep reminder for tomorrow morning. Acknowledge the party plan in persona, one short sentence."})
+						Content: fmt.Sprintf("You scheduled yourself a party-prep reminder for tomorrow morning. Checks you ran: weather — %s; RSVPs — %s. Acknowledge the party plan in persona, one or two short sentences, weaving these in.", weather, rsvps)})
 					return nil
 				}),
 			), nil),

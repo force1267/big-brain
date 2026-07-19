@@ -308,3 +308,36 @@ so durability comes free and one mechanism serves all triggers.
 Next: slice 6 (stories 8+10) — time/system context injection and
 fan-out/join; then v1 is functionally complete minus the Anthropic
 messages API.
+
+## 2026-07-20 — Slice 6 + Anthropic API: all ten stories pass; v1 surface complete (session 4, continued)
+
+- `pkg/brain` — story 8: `Situation(notes...)` node injects current
+  date/time/weekday/timezone, who is speaking, and standing brain notes
+  (quiet hours) as a system message — no per-request prompt plumbing.
+  Story 10: `Parallel(nodes...)` fans out concurrently, joins, and
+  errors.Join()s branch failures; branches write results via SetVar,
+  which (with Var) is now mutex-guarded — the race detector validated
+  this, and also caught job.Mock needing the same lock.
+- `internal/anthropic` — messages wire format: string-or-blocks Content
+  (UnmarshalJSON at the boundary), non-streaming response, the
+  message_start/content_block_delta/message_stop SSE sequence, error
+  bodies. `pkg/serve` routes POST /v1/messages over the same brain; the
+  chat loop is factored into executeChat shared by both protocols;
+  speakers resolve from x-api-key (Anthropic) or bearer (OpenAI).
+- Bug found by live testing and fixed: a mid-stream pipeline failure
+  wrote an error body onto an already-started SSE stream (superfluous
+  WriteHeader); writeErr now no-ops once streaming has begun — the
+  stream just truncates, on both protocols.
+- Live quirk documented: with max_tokens≈100, LM Studio's gemma spends
+  the entire budget on hidden reasoning and streams zero content tokens
+  on BOTH protocols; the engine passes sampling params through
+  faithfully by design, so this is upstream behavior, not engine loss.
+- Verified: full suite green under -race; live against gemma — story 8:
+  "is it too late to run the dishwasher?" at 23:57 answered "save that
+  cycle for when the house wakes up" (quiet hours + clock, injected);
+  story 10: party reply weaving parallel weather + RSVP results into
+  one streamed answer; Anthropic /v1/messages streaming the correct
+  event sequence with speaker from x-api-key.
+
+All ten reference stories now pass end to end. v1 API surface (chat
+completions + messages + streaming + /models) is complete.

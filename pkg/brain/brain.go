@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/force1267/big-brain/pkg/job"
@@ -49,12 +50,16 @@ type Run struct {
 	Notify   notify.Channel                       // outgoing channel for brain-initiated contact
 	Enqueue  func(context.Context, job.Job) error // persists durable background intent
 	Replied  bool                                 // set by Reply once the caller has the answer
+
+	mu sync.Mutex // guards Vars: Parallel branches write concurrently
 }
 
 // SetVar stores a per-run value for later nodes. Per-run state must live
 // here, never in variables nodes close over — nodes are shared by
-// concurrent runs.
+// concurrent runs. Safe from Parallel branches.
 func (r *Run) SetVar(key string, v any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.Vars == nil {
 		r.Vars = map[string]any{}
 	}
@@ -63,6 +68,8 @@ func (r *Run) SetVar(key string, v any) {
 
 // Var reads a typed per-run value stored by an earlier node.
 func Var[T any](r *Run, key string) (T, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	v, ok := r.Vars[key].(T)
 	return v, ok
 }

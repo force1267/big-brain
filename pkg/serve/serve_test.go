@@ -219,6 +219,71 @@ func TestStartJobsRecoversAndRunsEnqueued(t *testing.T) {
 	}
 }
 
+func TestMessagesNonStreaming(t *testing.T) {
+	mock := &model.Mock{Chunks: []string{"hello", " there"}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+		`{"model":"jarvis","max_tokens":100,"system":"be brief","messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	handler(jarvis(mock)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body %s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		Type    string
+		Content []struct{ Text string }
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Type != "message" || resp.Content[0].Text != "hello there" {
+		t.Fatalf("resp = %+v", resp)
+	}
+	// caller system message and max_tokens reached the model
+	if mock.Got.Msgs[1].Role != "system" || mock.Got.Msgs[1].Content != "be brief" {
+		t.Fatalf("model got %+v", mock.Got.Msgs)
+	}
+	if mock.Got.Params.MaxTokens == nil || *mock.Got.Params.MaxTokens != 100 {
+		t.Fatalf("params = %+v", mock.Got.Params)
+	}
+}
+
+func TestMessagesStreaming(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+		`{"model":"jarvis","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	handler(jarvis(&model.Mock{Chunks: []string{"hel", "lo"}})).ServeHTTP(rec, req)
+
+	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("Content-Type = %q", ct)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"event: message_start", `"text":"hel"`, `"text":"lo"`, "event: message_stop"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("stream missing %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestMessagesSpeakerFromAPIKeyHeader(t *testing.T) {
+	var seen string
+	b := &brain.Brain{Name: "jarvis", Chat: []brain.Node{
+		brain.Func(func(_ context.Context, r *brain.Run) error {
+			seen = r.Speaker
+			r.Replied = true
+			return r.Emit(model.Chunk{Content: "ok"})
+		}),
+	}}
+	h := Handler(b, Deps{Speakers: map[string]string{"key-kid": "kid"}})
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"jarvis","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("x-api-key", "key-kid")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if seen != "kid" {
+		t.Fatalf("speaker = %q; want kid", seen)
+	}
+}
+
 func TestWebhookEnqueuesDurableJob(t *testing.T) {
 	var got job.Job
 	b := &brain.Brain{Webhooks: map[string]string{"door": "unknown-face"}}

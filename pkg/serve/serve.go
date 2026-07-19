@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 
+	anthropicwire "github.com/force1267/big-brain/internal/anthropic"
 	"github.com/force1267/big-brain/internal/config"
 	"github.com/force1267/big-brain/internal/logging"
 	openaiwire "github.com/force1267/big-brain/internal/openai"
@@ -221,6 +222,9 @@ func Handler(b *brain.Brain, deps Deps) http.Handler {
 	mux.HandleFunc("GET /v1/models", func(w http.ResponseWriter, _ *http.Request) {
 		openaiwire.WriteModels(w, b.Name)
 	})
+	mux.HandleFunc("POST /v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		messages(b, deps, w, r)
+	})
 	mux.HandleFunc("POST /triggers/{name}", func(w http.ResponseWriter, r *http.Request) {
 		webhook(b, deps, w, r)
 	})
@@ -264,7 +268,7 @@ func completions(b *brain.Brain, deps Deps, w http.ResponseWriter, r *http.Reque
 		Memory:  deps.Memory,
 		Notify:  deps.Notify,
 		Enqueue: deps.Enqueue,
-		Speaker: deps.Speakers[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")],
+		Speaker: speakerOf(deps, r),
 	}
 	for _, m := range req.Messages {
 		run.Messages = append(run.Messages, model.Message{Role: m.Role, Content: m.Content})
@@ -272,13 +276,18 @@ func completions(b *brain.Brain, deps Deps, w http.ResponseWriter, r *http.Reque
 
 	id := "chatcmpl-" + uuid.NewString()
 	var finish func() // completes the HTTP response once the reply is out
+	started := false  // once streaming has begun, error bodies must not be written
+	writeErr := func(w http.ResponseWriter, status int, msg string) {
+		if !started {
+			openaiwire.WriteError(w, status, msg)
+		}
+	}
 	if req.Stream {
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			openaiwire.WriteError(w, http.StatusInternalServerError, "streaming unsupported")
 			return
 		}
-		started := false
 		run.Emit = func(c model.Chunk) error {
 			if !started {
 				w.Header().Set("Content-Type", "text/event-stream")
@@ -306,14 +315,23 @@ func completions(b *brain.Brain, deps Deps, w http.ResponseWriter, r *http.Reque
 		finish = func() { openaiwire.WriteResponse(w, id, b.Name, full.String()) }
 	}
 
-	// Execute node by node so the response can close the moment the reply
-	// has streamed; nodes after Reply continue detached from the request —
-	// that is what "background" means in this engine.
+	executeChat(b, w, r, run, finish, writeErr)
+}
+
+// executeChat runs the chat pipeline node by node so the response can
+// close the moment the reply has streamed; nodes after Reply continue
+// detached from the request — that is what "background" means in this
+// engine. writeErr is the caller's protocol-shaped error writer; it must
+// be safe to skip once the response has started streaming.
+func executeChat(b *brain.Brain, w http.ResponseWriter, r *http.Request, run *brain.Run,
+	finish func(), writeErr func(http.ResponseWriter, int, string)) {
 	for i, n := range b.Chat {
 		if err := n.Run(r.Context(), run); err != nil {
 			logrus.WithError(fmt.Errorf("%w: node %d: %w", brain.ErrNode, i, err)).Error("chat run failed")
 			if !run.Replied {
-				openaiwire.WriteError(w, http.StatusInternalServerError, "brain run failed")
+				// mid-stream failures just truncate the stream; writeErr
+				// callers guard against writing onto started responses
+				writeErr(w, http.StatusInternalServerError, "brain run failed")
 			}
 			return
 		}
@@ -331,5 +349,83 @@ func completions(b *brain.Brain, deps Deps, w http.ResponseWriter, r *http.Reque
 	}
 	// the pipeline never replied — that is a brain bug, not a caller error
 	logrus.Error("chat pipeline finished without replying")
-	openaiwire.WriteError(w, http.StatusInternalServerError, "brain produced no reply")
+	writeErr(w, http.StatusInternalServerError, "brain produced no reply")
+}
+
+// messages serves the Anthropic-compatible endpoint over the same brain.
+func messages(b *brain.Brain, deps Deps, w http.ResponseWriter, r *http.Request) {
+	var req anthropicwire.MessagesRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		anthropicwire.WriteError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+
+	run := &brain.Run{
+		Params:  model.Params{Temperature: req.Temperature, MaxTokens: req.MaxTokens},
+		Models:  b.Models,
+		Memory:  deps.Memory,
+		Notify:  deps.Notify,
+		Enqueue: deps.Enqueue,
+		Speaker: speakerOf(deps, r),
+	}
+	if req.System != "" {
+		run.Messages = append(run.Messages, model.Message{Role: "system", Content: string(req.System)})
+	}
+	for _, m := range req.Messages {
+		run.Messages = append(run.Messages, model.Message{Role: m.Role, Content: string(m.Content)})
+	}
+
+	id := "msg_" + uuid.NewString()
+	var finish func()
+	started := false
+	writeErr := func(w http.ResponseWriter, status int, msg string) {
+		if !started {
+			anthropicwire.WriteError(w, status, msg)
+		}
+	}
+	if req.Stream {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			anthropicwire.WriteError(w, http.StatusInternalServerError, "streaming unsupported")
+			return
+		}
+		run.Emit = func(c model.Chunk) error {
+			if !started {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				if err := anthropicwire.WriteStart(w, id, b.Name); err != nil {
+					return err
+				}
+				started = true
+			}
+			if err := anthropicwire.WriteDelta(w, c.Content); err != nil {
+				return err
+			}
+			flusher.Flush()
+			return nil
+		}
+		finish = func() {
+			if started {
+				_ = anthropicwire.WriteStop(w)
+				flusher.Flush()
+			}
+		}
+	} else {
+		var full strings.Builder
+		run.Emit = func(c model.Chunk) error {
+			full.WriteString(c.Content)
+			return nil
+		}
+		finish = func() { anthropicwire.WriteResponse(w, id, b.Name, full.String()) }
+	}
+
+	executeChat(b, w, r, run, finish, writeErr)
+}
+
+func speakerOf(deps Deps, r *http.Request) string {
+	// Anthropic clients send x-api-key; OpenAI clients a bearer token
+	if k := r.Header.Get("x-api-key"); k != "" {
+		return deps.Speakers[k]
+	}
+	return deps.Speakers[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
 }

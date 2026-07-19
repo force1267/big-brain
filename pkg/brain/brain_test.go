@@ -150,6 +150,77 @@ func TestReplyPropagatesEmitError(t *testing.T) {
 	}
 }
 
+func TestParallelRunsAllAndJoins(t *testing.T) {
+	r := &Run{}
+	node := Parallel(
+		Func(func(_ context.Context, r *Run) error { r.SetVar("a", 1); return nil }),
+		Func(func(_ context.Context, r *Run) error { r.SetVar("b", 2); return nil }),
+		Func(func(_ context.Context, r *Run) error { r.SetVar("c", 3); return nil }),
+	)
+	if err := node.Run(context.Background(), r); err != nil {
+		t.Fatalf("Parallel: %v", err)
+	}
+	for _, k := range []string{"a", "b", "c"} {
+		if _, ok := Var[int](r, k); !ok {
+			t.Fatalf("branch %q result missing", k)
+		}
+	}
+}
+
+func TestParallelJoinsErrors(t *testing.T) {
+	boom1, boom2 := errors.New("boom1"), errors.New("boom2")
+	after := &MockNode{}
+	node := Parallel(
+		Func(func(context.Context, *Run) error { return boom1 }),
+		after,
+		Func(func(context.Context, *Run) error { return boom2 }),
+	)
+	err := node.Run(context.Background(), &Run{})
+	if !errors.Is(err, boom1) || !errors.Is(err, boom2) {
+		t.Fatalf("err = %v; want both booms", err)
+	}
+	if after.Ran != 1 {
+		t.Fatal("healthy branch did not run despite sibling failures")
+	}
+}
+
+func TestParallelConcurrentSetVar(t *testing.T) {
+	// run with -race: many branches hammering Vars must be safe
+	var nodes []Node
+	for i := 0; i < 50; i++ {
+		nodes = append(nodes, Func(func(_ context.Context, r *Run) error {
+			r.SetVar("k", 1)
+			_, _ = Var[int](r, "k")
+			return nil
+		}))
+	}
+	if err := Parallel(nodes...).Run(context.Background(), &Run{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSituationInjectsTimeSpeakerAndNotes(t *testing.T) {
+	r := &Run{
+		Messages: []model.Message{{Role: "user", Content: "dishwasher?"}},
+		Speaker:  "dad",
+	}
+	if err := Situation("Quiet hours are 22:00 to 07:00.").Run(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	sys := r.Messages[0]
+	if sys.Role != "system" {
+		t.Fatalf("first message = %+v", sys)
+	}
+	for _, want := range []string{"Current situation", "talking to dad", "Quiet hours are 22:00 to 07:00."} {
+		if !strings.Contains(sys.Content, want) {
+			t.Fatalf("missing %q in %q", want, sys.Content)
+		}
+	}
+	if r.Messages[1].Content != "dishwasher?" {
+		t.Fatal("user message lost")
+	}
+}
+
 func TestFuncAdaptsClosures(t *testing.T) {
 	ran := false
 	var n Node = Func(func(context.Context, *Run) error { ran = true; return nil })

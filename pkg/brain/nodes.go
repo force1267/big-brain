@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"text/template"
+	"time"
 
 	"github.com/force1267/big-brain/pkg/model"
 )
@@ -75,6 +77,48 @@ func If(cond func(*Run) bool, then, els Node) Node {
 			return nil
 		}
 		return n.Run(ctx, r)
+	})
+}
+
+// Parallel returns a node that fans its children out concurrently and
+// joins before continuing; every child runs, and their errors (if any) are
+// joined. Branches share the Run: they may read Messages and must write
+// results via SetVar under distinct keys — mutating Messages or streams
+// from a branch is a race.
+func Parallel(nodes ...Node) Node {
+	return Func(func(ctx context.Context, r *Run) error {
+		errs := make([]error, len(nodes))
+		var wg sync.WaitGroup
+		for i, n := range nodes {
+			wg.Add(1)
+			go func(i int, n Node) {
+				defer wg.Done()
+				errs[i] = n.Run(ctx, r)
+			}(i, n)
+		}
+		wg.Wait()
+		return errors.Join(errs...)
+	})
+}
+
+// Situation returns a node that injects time and situation awareness as a
+// system message: current date, time, weekday, timezone, who is speaking,
+// plus any standing notes the brain declares (quiet hours, house rules).
+// No hand-crafted prompt plumbing per request (story 8).
+func Situation(notes ...string) Node {
+	return Func(func(_ context.Context, r *Run) error {
+		now := time.Now()
+		var b strings.Builder
+		fmt.Fprintf(&b, "Current situation: it is %s, %s (%s).\n",
+			now.Format("Monday, 2 January 2006"), now.Format("15:04"), now.Format("MST"))
+		if r.Speaker != "" {
+			fmt.Fprintf(&b, "You are talking to %s.\n", r.Speaker)
+		}
+		for _, n := range notes {
+			b.WriteString(n + "\n")
+		}
+		r.Messages = append([]model.Message{{Role: "system", Content: b.String()}}, r.Messages...)
+		return nil
 	})
 }
 
