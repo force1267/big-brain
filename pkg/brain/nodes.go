@@ -17,6 +17,9 @@ var (
 	ErrNoModel = errors.New("no model bound to role")
 	// ErrNoStream is returned when Reply runs before any model call.
 	ErrNoStream = errors.New("no stream to reply with")
+	// ErrNoReply is returned when Reply runs with no caller to stream to,
+	// e.g. inside a background pipeline.
+	ErrNoReply = errors.New("no caller to reply to")
 )
 
 // Prompt returns a node that renders tmpl (text/template, executed against
@@ -80,6 +83,9 @@ func If(cond func(*Run) bool, then, els Node) Node {
 // means in this engine.
 func Reply() Node {
 	return Func(func(_ context.Context, r *Run) error {
+		if r.Emit == nil {
+			return ErrNoReply
+		}
 		if r.Stream == nil {
 			return ErrNoStream
 		}
@@ -92,6 +98,7 @@ func Reply() Node {
 			}
 		}
 		r.Stream = nil
+		r.Replied = true
 		return nil
 	})
 }

@@ -230,3 +230,43 @@ speaker identity from the API credential.
 
 Next: slice 4 (story 5) — post-reply continuation surviving the HTTP
 response, outgoing-webhook channel, durable-intent job store.
+
+## 2026-07-19 — Slice 4 built: story 5 passes end to end (session 4, continued)
+
+The hardest engine slice: initiative made real.
+
+- `pkg/job` — durable intent: `Job{ID, Pipeline, Speaker, Payload, At}`
+  names a registered pipeline plus a serializable payload; two-method
+  `Store` (Enqueue persists before acking; Sweep runs every pending job
+  and marks it done even on failure — the attempt is what at-least-once
+  promises, retry policy belongs to the brain). Zero-setup default:
+  append-only JSONL add/done log; pending = adds without done, re-run on
+  startup.
+- `pkg/notify` — one-method `Channel`; v1 built-in `Webhook(url)` (HTTP
+  POST of {speaker,text}); `Log()` fallback so an unconfigured channel
+  never drops silently.
+- `pkg/brain` — `Brain.Pipelines` (named pipelines: how durable jobs
+  reference code-built graphs); `Go(pipeline, payload)` node persists
+  intent; `Notify(tmpl)` node renders and sends; `Reply` now sets
+  `Run.Replied` and refuses to run with no caller (`ErrNoReply`).
+- `pkg/serve` — deps consolidated in `Deps`; the handler executes chat
+  node-by-node and **closes the HTTP response the moment Reply fires**,
+  detaching the remaining nodes (context.WithoutCancel) — "background"
+  is literally the pipeline continuing after the reply. Job runner:
+  startup sweep (crash recovery) + wake-on-enqueue; job failures logged,
+  never engine-notified (PRODUCT.md: the brain chooses).
+- Config: WRAPPER_JOBS_PATH (default jobs.jsonl), WRAPPER_NOTIFY_URL
+  (empty = log channel).
+- Reference brain: add-guest is now story 5 — chat replies "on it, I'll
+  text you" after `Go("register-guest", …)` persists the intent; the
+  background pipeline calls the door camera and notifies the outcome,
+  including on failure (this brain's choice).
+- Verified: all tests green (enqueue/sweep/reopen-recovery/failed-once,
+  webhook channel statuses, Go/Notify nodes, detached post-reply nodes,
+  runJob + startJobs recovery); live against gemma: "add Sarah…" →
+  instant persona reply promising a text, jobs.jsonl add+done records,
+  door camera got {"name":"Sarah"}, notify webhook got the completion
+  text addressed to dad.
+
+Next: slice 5 (stories 6+7) — webhook and cron triggers, self-installed
+triggers (durable, per the persistence promise).

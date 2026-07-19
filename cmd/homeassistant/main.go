@@ -33,33 +33,39 @@ type intent struct {
 	Guest  string `json:"guest"`
 }
 
-// addGuest is a tool: it registers the guest with the door-camera endpoint
-// and tells the model what happened so the reply can confirm it. A tool is
-// just a node body — plain Go, no framework.
-func addGuest(ctx context.Context, r *brain.Run) error {
-	it, _ := brain.Var[intent](r, "intent")
-	body, err := json.Marshal(map[string]string{"name": it.Guest})
-	if err != nil {
-		return err
-	}
+// registerGuest is the background tool (story 5): it calls the door-camera
+// endpoint with the guest from the job payload and records the outcome for
+// the Notify node. It never returns an error — this brain chooses to
+// notify on failure rather than fail silently (see PRODUCT.md).
+func registerGuest(ctx context.Context, r *brain.Run) error {
+	guest, _ := brain.Var[string](r, "guest")
+	body, _ := json.Marshal(map[string]string{"name": guest})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		os.Getenv("JARVIS_DOOR_URL"), bytes.NewReader(body))
 	if err != nil {
-		return err
+		r.SetVar("result", fmt.Sprintf("I couldn't add %s to the guest list: %v", guest, err))
+		return nil
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
-	result := "the door camera accepted the guest"
-	if err != nil {
-		result = "the door camera could not be reached: " + err.Error()
-	} else {
+	switch {
+	case err != nil:
+		r.SetVar("result", fmt.Sprintf("I couldn't reach the door camera to add %s — I'll need you to try again.", guest))
+	case resp.StatusCode >= 300:
 		resp.Body.Close()
-		if resp.StatusCode >= 300 {
-			result = fmt.Sprintf("the door camera refused (status %d)", resp.StatusCode)
-		}
+		r.SetVar("result", fmt.Sprintf("The door camera refused %s (status %d).", guest, resp.StatusCode))
+	default:
+		resp.Body.Close()
+		r.SetVar("result", fmt.Sprintf("Done — %s is on the guest list and the door camera will recognize them.", guest))
 	}
+	return nil
+}
+
+// queueGuest persists the intent and primes the reply to promise a text.
+func queueGuest(_ context.Context, r *brain.Run) error {
+	it, _ := brain.Var[intent](r, "intent")
 	r.Messages = append(r.Messages, model.Message{Role: "system",
-		Content: fmt.Sprintf("Tool result: tried to add %q to the guest list; %s. Confirm this to the user in one short sentence, in persona.", it.Guest, result)})
+		Content: fmt.Sprintf("You have queued adding %q to the guest list; it runs in the background. Tell the user, in persona and one short sentence, that you're on it and will text them when it's done.", it.Guest)})
 	return nil
 }
 
@@ -78,12 +84,25 @@ func main() {
 			brain.Prompt(persona),
 			brain.RecallFacts(50),
 			brain.Extract[intent]("fast", classify, "intent"),
-			brain.If(isAddGuest, brain.Func(addGuest), nil),
+			brain.If(isAddGuest, brain.Seq(
+				brain.Go("register-guest", func(r *brain.Run) map[string]any {
+					it, _ := brain.Var[intent](r, "intent")
+					return map[string]any{"guest": it.Guest}
+				}),
+				brain.Func(queueGuest),
+			), nil),
 			brain.Call("fast"),
 			brain.Reply(),
 			// after Reply: the caller already has the answer; ambient
 			// memory happens behind their back.
 			brain.Memorize("fast"),
+		},
+		Pipelines: map[string][]brain.Node{
+			// story 5: finish later, then reach out
+			"register-guest": {
+				brain.Func(registerGuest),
+				brain.Notify(`{{index .Vars "result"}}`),
+			},
 		},
 	}
 

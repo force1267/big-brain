@@ -59,6 +59,17 @@ type Config struct {
 		Path string
 	}
 
+	// Jobs is where the zero-setup durable job log lives.
+	Jobs struct {
+		Path string
+	}
+
+	// Notify configures the outgoing-webhook channel; empty URL means
+	// notifications are logged instead of delivered.
+	Notify struct {
+		URL string
+	}
+
 	// Speakers maps API keys to speaker names, parsed from
 	// WRAPPER_SPEAKERS, e.g. "key-dad=dad,key-kid=kid". Empty means all
 	// callers are anonymous.
@@ -111,6 +122,9 @@ func (envLoader) Load() (Config, error) {
 
 	v.SetDefault("memory.path", "memory.jsonl")
 	c.Memory.Path = v.GetString("memory.path")
+	v.SetDefault("jobs.path", "jobs.jsonl")
+	c.Jobs.Path = v.GetString("jobs.path")
+	c.Notify.URL = v.GetString("notify.url")
 
 	speakers, err := parsePairs(v.GetString("speakers"), ErrInvalidSpeakers)
 	if err != nil {

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/force1267/big-brain/pkg/job"
 	"github.com/force1267/big-brain/pkg/memory"
 	"github.com/force1267/big-brain/pkg/model"
+	"github.com/force1267/big-brain/pkg/notify"
 )
 
 // ErrNode wraps a node failure during a pipeline run.
@@ -15,22 +17,26 @@ var ErrNode = errors.New("pipeline node failed")
 // Brain is one assembled brain: what a big-brain process serves. The author
 // builds it in code; Models is bound at startup from deployment config.
 type Brain struct {
-	Name   string
-	Models model.Models
-	Chat   []Node // the pipeline the chat trigger runs
+	Name      string
+	Models    model.Models
+	Chat      []Node            // the pipeline the chat trigger runs
+	Pipelines map[string][]Node // named pipelines background jobs re-run by name
 }
 
 // Run is the state of one pipeline run, shared by its nodes. Nodes read and
 // write it in order; the engine creates it per trigger firing.
 type Run struct {
-	Messages []model.Message         // conversation so far; nodes may prepend/append
-	Params   model.Params            // caller's sampling params, as context
-	Models   model.Models            // role → model, bound from config
-	Stream   <-chan model.Chunk      // output of the last model call
-	Emit     func(model.Chunk) error // delivers reply chunks to the caller
-	Vars     map[string]any          // per-run state nodes pass to each other
-	Speaker  string                  // who is talking, from the API credential; empty if unknown
-	Memory   memory.Memory           // the brain's durable fact store
+	Messages []model.Message                      // conversation so far; nodes may prepend/append
+	Params   model.Params                         // caller's sampling params, as context
+	Models   model.Models                         // role → model, bound from config
+	Stream   <-chan model.Chunk                   // output of the last model call
+	Emit     func(model.Chunk) error              // delivers reply chunks to the caller
+	Vars     map[string]any                       // per-run state nodes pass to each other
+	Speaker  string                               // who is talking, from the API credential; empty if unknown
+	Memory   memory.Memory                        // the brain's durable fact store
+	Notify   notify.Channel                       // outgoing channel for brain-initiated contact
+	Enqueue  func(context.Context, job.Job) error // persists durable background intent
+	Replied  bool                                 // set by Reply once the caller has the answer
 }
 
 // SetVar stores a per-run value for later nodes. Per-run state must live

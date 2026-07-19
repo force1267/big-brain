@@ -115,8 +115,16 @@ func TestReplyStreamsToEmit(t *testing.T) {
 }
 
 func TestReplyWithoutStream(t *testing.T) {
-	if err := Reply().Run(context.Background(), &Run{}); !errors.Is(err, ErrNoStream) {
+	r := &Run{Emit: func(model.Chunk) error { return nil }}
+	if err := Reply().Run(context.Background(), r); !errors.Is(err, ErrNoStream) {
 		t.Fatalf("err = %v; want ErrNoStream", err)
+	}
+}
+
+func TestReplyWithoutCaller(t *testing.T) {
+	// background pipelines have no caller: Reply must refuse, not panic
+	if err := Reply().Run(context.Background(), &Run{}); !errors.Is(err, ErrNoReply) {
+		t.Fatalf("err = %v; want ErrNoReply", err)
 	}
 }
 
