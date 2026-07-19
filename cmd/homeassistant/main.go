@@ -76,10 +76,14 @@ func main() {
 		Name: "jarvis",
 		Chat: []brain.Node{
 			brain.Prompt(persona),
+			brain.RecallFacts(50),
 			brain.Extract[intent]("fast", classify, "intent"),
 			brain.If(isAddGuest, brain.Func(addGuest), nil),
 			brain.Call("fast"),
 			brain.Reply(),
+			// after Reply: the caller already has the answer; ambient
+			// memory happens behind their back.
+			brain.Memorize("fast"),
 		},
 	}
 

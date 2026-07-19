@@ -16,6 +16,7 @@ import (
 	"github.com/force1267/big-brain/internal/logging"
 	openaiwire "github.com/force1267/big-brain/internal/openai"
 	"github.com/force1267/big-brain/pkg/brain"
+	"github.com/force1267/big-brain/pkg/memory"
 	"github.com/force1267/big-brain/pkg/model"
 )
 
@@ -45,7 +46,12 @@ func Run(ctx context.Context, b *brain.Brain) error {
 		b.Models[model.Role(role)] = model.OpenAI(cfg.Upstream.BaseURL, cfg.Upstream.APIKey, name)
 	}
 
-	srv := &http.Server{Addr: cfg.HTTP.Addr, Handler: Handler(b)}
+	mem, err := memory.OpenFile(cfg.Memory.Path)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrConfig, err)
+	}
+
+	srv := &http.Server{Addr: cfg.HTTP.Addr, Handler: Handler(b, mem, cfg.Speakers)}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	logrus.WithFields(logrus.Fields{"brain": b.Name, "addr": cfg.HTTP.Addr}).Info("brain serving")
@@ -64,12 +70,13 @@ func Run(ctx context.Context, b *brain.Brain) error {
 	}
 }
 
-// Handler returns the OpenAI-compatible http.Handler for one brain.
-// Exported separately from Run so it is testable and embeddable.
-func Handler(b *brain.Brain) http.Handler {
+// Handler returns the OpenAI-compatible http.Handler for one brain, with
+// its memory and the API-key → speaker map. Exported separately from Run
+// so it is testable and embeddable.
+func Handler(b *brain.Brain, mem memory.Memory, speakers map[string]string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-		completions(b, w, r)
+		completions(b, mem, speakers, w, r)
 	})
 	mux.HandleFunc("GET /v1/models", func(w http.ResponseWriter, _ *http.Request) {
 		openaiwire.WriteModels(w, b.Name)
@@ -77,7 +84,7 @@ func Handler(b *brain.Brain) http.Handler {
 	return mux
 }
 
-func completions(b *brain.Brain, w http.ResponseWriter, r *http.Request) {
+func completions(b *brain.Brain, mem memory.Memory, speakers map[string]string, w http.ResponseWriter, r *http.Request) {
 	var req openaiwire.ChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		openaiwire.WriteError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
@@ -85,8 +92,10 @@ func completions(b *brain.Brain, w http.ResponseWriter, r *http.Request) {
 	}
 
 	run := &brain.Run{
-		Params: model.Params{Temperature: req.Temperature, MaxTokens: req.MaxTokens},
-		Models: b.Models,
+		Params:  model.Params{Temperature: req.Temperature, MaxTokens: req.MaxTokens},
+		Models:  b.Models,
+		Memory:  mem,
+		Speaker: speakers[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")],
 	}
 	for _, m := range req.Messages {
 		run.Messages = append(run.Messages, model.Message{Role: m.Role, Content: m.Content})

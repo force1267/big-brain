@@ -199,3 +199,34 @@ Next: slice 2 (story 4) — structured output, tool node, conditionals.
 
 Next: slice 3 (stories 2+3) — memory interface with zero-setup default,
 speaker identity from the API credential.
+
+## 2026-07-19 — Slice 3 built: stories 2+3 pass end to end (session 4, continued)
+
+- `pkg/memory` — the first persistence promise: two-method `Memory`
+  interface (Remember/Recall), `Fact{Speaker,Content,At}`, zero-setup
+  default `OpenFile` (append-only JSONL, fsync per fact, loaded on open;
+  recall = most-recent-N, model judges relevance — vector store is a
+  future second implementation). Mock included.
+- `pkg/brain` — `Run.Speaker` and `Run.Memory` (ambient context per the
+  taxonomy); `RecallFacts(limit)` injects tagged facts as a system
+  message; `Memorize(role)` — ambient memory: the pipeline decides what
+  is worth keeping (Extract under the hood), stores for the current
+  speaker. Reference brain places Memorize after Reply.
+- `pkg/serve` — Handler now takes memory + speakers; speaker resolved
+  from Authorization bearer key via WRAPPER_SPEAKERS (unknown/missing
+  key = anonymous, never an error). serve.Run opens the file store at
+  WRAPPER_MEMORY_PATH (default memory.jsonl).
+- `internal/config` — Memory.Path, Speakers; parseModels generalized to
+  parsePairs.
+- Verified: all tests green (persistence across reopen, corrupt file,
+  limits, speaker filtering, memorize decide/skip/fail paths, bearer
+  resolution); live against gemma-4-e4b: vegetarian fact remembered
+  ambiently and shaping dinner after a process restart; kid's dentist
+  appointment recalled per speaker.
+- Known limitation observed live: the e4b model skipped memorizing one
+  fact and blurred cross-speaker attribution once; wording of the
+  memorize/recall prompts tightened in response. Real deployments should
+  bind these stages to a stronger role (that is what roles are for).
+
+Next: slice 4 (story 5) — post-reply continuation surviving the HTTP
+response, outgoing-webhook channel, durable-intent job store.

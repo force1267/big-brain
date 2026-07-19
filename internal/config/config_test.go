@@ -72,6 +72,31 @@ func TestLoad_ModelsInvalid(t *testing.T) {
 	}
 }
 
+func TestLoad_SpeakersAndMemory(t *testing.T) {
+	t.Setenv("WRAPPER_SPEAKERS", "key-dad=dad,key-kid=kid")
+	t.Setenv("WRAPPER_MEMORY_PATH", "/data/m.jsonl")
+
+	c, err := New().Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.Speakers["key-dad"] != "dad" || c.Speakers["key-kid"] != "kid" {
+		t.Fatalf("speakers = %+v", c.Speakers)
+	}
+	if c.Memory.Path != "/data/m.jsonl" {
+		t.Fatalf("memory path = %q", c.Memory.Path)
+	}
+}
+
+func TestLoad_SpeakersInvalid(t *testing.T) {
+	t.Setenv("WRAPPER_SPEAKERS", "just-a-key")
+
+	_, err := New().Load()
+	if !errors.Is(err, ErrLoad) || !errors.Is(err, ErrInvalidSpeakers) {
+		t.Fatalf("expected ErrLoad wrapping ErrInvalidSpeakers, got: %v", err)
+	}
+}
+
 func TestMockLoader(t *testing.T) {
 	m := &MockLoader{Cfg: Config{Env: EnvLocal}, Err: nil}
 	c, err := m.Load()

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/force1267/big-brain/pkg/memory"
 	"github.com/force1267/big-brain/pkg/model"
 )
 
@@ -28,6 +29,8 @@ type Run struct {
 	Stream   <-chan model.Chunk      // output of the last model call
 	Emit     func(model.Chunk) error // delivers reply chunks to the caller
 	Vars     map[string]any          // per-run state nodes pass to each other
+	Speaker  string                  // who is talking, from the API credential; empty if unknown
+	Memory   memory.Memory           // the brain's durable fact store
 }
 
 // SetVar stores a per-run value for later nodes. Per-run state must live
