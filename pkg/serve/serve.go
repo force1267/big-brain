@@ -89,7 +89,7 @@ func Run(ctx context.Context, b *brain.Brain, opts ...Option) error {
 		b.Models[model.Role(role)] = model.OpenAI(cfg.Upstream.BaseURL, cfg.Upstream.APIKey, name)
 	}
 
-	mem, err := memory.OpenFile(cfg.Memory.Path)
+	mem, err := memory.OpenFile(cfg.Memory.Path, cfg.Memory.Limit)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrConfig, err)
 	}

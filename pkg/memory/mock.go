@@ -23,16 +23,12 @@ func (m *Mock) Remember(_ context.Context, f Fact) error {
 	return nil
 }
 
-// Recall implements Memory, ignoring relevance (like OpenFile: most
-// recent, capped at limit) since tests care about wiring, not ranking.
-func (m *Mock) Recall(_ context.Context, query string, limit int) ([]Fact, error) {
+// Recall implements Memory, ignoring relevance and returning every fact —
+// tests control exactly what comes back by seeding Facts.
+func (m *Mock) Recall(_ context.Context, query string) ([]Fact, error) {
 	m.LastQuery = query
 	if m.RecallErr != nil {
 		return nil, m.RecallErr
 	}
-	facts := m.Facts
-	if limit > 0 && len(facts) > limit {
-		facts = facts[len(facts)-limit:]
-	}
-	return append([]Fact{}, facts...), nil
+	return append([]Fact{}, m.Facts...), nil
 }

@@ -30,6 +30,10 @@ import (
 	"github.com/force1267/big-brain/pkg/serve"
 )
 
+const memorizeInstruction = `List durable facts worth remembering long-term
+from the user's latest message, each self-contained. Empty list for
+small talk or one-off requests.`
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -38,10 +42,10 @@ func main() {
 		Name: "jarvis",
 		Chat: []brain.Node{
 			brain.Prompt("You are Jarvis, warm, brief, lightly witty."),
-			brain.RecallFacts(50),   // remembers you, ambiently, across sessions
-			brain.Call("fast"),      // "fast" is a role — provider/model bound by config
-			brain.Reply(),           // streams the answer to the caller
-			brain.Memorize("fast"),  // decides on its own what's worth remembering
+			brain.RecallFacts(), // remembers you, ambiently, across sessions
+			brain.Call("fast"),  // "fast" is a role — provider/model bound by config
+			brain.Reply(),       // streams the answer to the caller
+			brain.Memorize("fast", memorizeInstruction), // decides what's worth remembering
 		},
 	}
 

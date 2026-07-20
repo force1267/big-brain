@@ -199,7 +199,7 @@ func checkWeather(_ context.Context, r *brain.Run) error {
 }
 
 func checkRSVPs(ctx context.Context, r *brain.Run) error {
-	facts, err := r.Memory.Recall(ctx, "", 0)
+	facts, err := r.Memory.Recall(ctx, "")
 	if err != nil {
 		return err
 	}
@@ -249,7 +249,7 @@ func main() {
 			// this brain's own composition of stdlib time and Run.Vars,
 			// not engine-provided nodes.
 			brain.Func(situation),
-			brain.RecallFacts(50, recallNote),
+			brain.RecallFacts(recallNote),
 			brain.Extract[intent]("fast", classify, "intent"),
 			brain.If(isAddGuest, brain.Seq(
 				brain.Go("register-guest", func(r *brain.Run) map[string]any {
@@ -288,7 +288,7 @@ func main() {
 			},
 			// story 6: reacting to the world, no human prompted this run
 			"unknown-face": {
-				brain.RecallFacts(50, recallNote),
+				brain.RecallFacts(recallNote),
 				brain.Func(describeFace),
 				brain.Extract[verdict]("fast",
 					`Someone is at the door. Based on the known facts (the guest
@@ -306,7 +306,7 @@ Give a one-sentence reason.`, "verdict"),
 				brain.Notify("Reminder: the party is coming up — time to sort the shopping and tidy up."),
 			},
 			"nightly-review": {
-				brain.RecallFacts(50, recallNote),
+				brain.RecallFacts(recallNote),
 				brain.Notify("Nightly check-in done — I reviewed the household facts; all quiet."),
 			},
 		},

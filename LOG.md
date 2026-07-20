@@ -522,3 +522,25 @@ misleading a reader about pkg/'s actual shape.
 Verified after each change: no import cycles (internal/ never imports
 pkg/; leaves never import each other except the new memory→model edge);
 full suite green under go vet + go test -race; gofmt clean.
+
+## 2026-07-20 — memory.Recall's limit moved out of the interface (session 9, continued)
+
+Follow-up correction: `limit` had been added to `Memory.Recall` in the
+previous session's redesign, but it's an implementation detail (how many
+facts a given backing keeps around) masquerading as an interface contract
+— OpenFile and OpenLLM both just capped a slice with it, nothing about
+"limit" is generic across arbitrary future backings the way `query` is.
+
+- `Memory.Recall(ctx, query string) ([]Fact, error)` — no limit.
+- `OpenFile(path string, limit int)` and `OpenLLM(path string, m
+  model.Model, limit int)` — each implementation takes its own cap at
+  construction time instead of per call.
+- `brain.RecallFacts(notes ...string) Node` — dropped its `limit int`
+  first argument; nothing left to pass through.
+- `internal/config`: new `Memory.Limit` (env `BIG_BRAIN_MEMORY_LIMIT`,
+  default 50), threaded into `serve.Run`'s `memory.OpenFile` call — the
+  zero-setup default's cap is now real deployment config, not a
+  hardcoded pipeline argument repeated at every `RecallFacts` call site.
+- cmd/jarvis-demo, README, docs/authoring-guide.md updated to match.
+
+Full suite green under go vet + go test -race; gofmt clean.

@@ -12,7 +12,7 @@ func TestMonitoredDelegates(t *testing.T) {
 	if err := m.Remember(context.Background(), Fact{Content: "x"}); err != nil {
 		t.Fatal(err)
 	}
-	facts, err := m.Recall(context.Background(), "", 10)
+	facts, err := m.Recall(context.Background(), "")
 	if err != nil || len(facts) != 1 || facts[0].Content != "x" {
 		t.Fatalf("delegation broken: %+v, %v", facts, err)
 	}
@@ -24,7 +24,7 @@ func TestMonitoredPropagatesErrors(t *testing.T) {
 	if err := m.Remember(context.Background(), Fact{}); !errors.Is(err, boom) {
 		t.Fatalf("remember err = %v", err)
 	}
-	if _, err := m.Recall(context.Background(), "", 1); !errors.Is(err, boom) {
+	if _, err := m.Recall(context.Background(), ""); !errors.Is(err, boom) {
 		t.Fatalf("recall err = %v", err)
 	}
 }

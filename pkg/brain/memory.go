@@ -20,14 +20,15 @@ var ErrNoMemory = errors.New("no memory bound to run")
 // should weigh the facts. If a fact's Content needs attribution (whose it
 // is, what it's about), encode that in Content when you Remember it — the
 // engine keeps no such concept. The query passed to Recall is the latest
-// message's content — how (or whether) that's used to judge relevance is
-// entirely the bound Memory implementation's choice.
-func RecallFacts(limit int, notes ...string) Node {
+// message's content; how many facts come back, and how (or whether) query
+// is used to judge relevance, is entirely the bound Memory implementation's
+// choice — RecallFacts takes no limit of its own.
+func RecallFacts(notes ...string) Node {
 	return Func(func(ctx context.Context, r *Run) error {
 		if r.Memory == nil {
 			return ErrNoMemory
 		}
-		facts, err := r.Memory.Recall(ctx, latestMessage(r.Messages), limit)
+		facts, err := r.Memory.Recall(ctx, latestMessage(r.Messages))
 		if err != nil {
 			return err
 		}

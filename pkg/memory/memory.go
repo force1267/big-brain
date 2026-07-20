@@ -15,13 +15,14 @@ type Fact struct {
 
 // Memory is the engine-owned durable fact store. Facts survive restarts
 // unconditionally — memory is the product (see PRODUCT.md persistence).
-// Recall returns up to limit facts the implementation judges relevant to
-// query (limit <= 0 means no cap; empty query means no particular focus).
-// How relevance is determined — recency, a language model reading the
-// log, similarity search, anything else — is entirely the implementation's
-// choice; the interface makes no promise about ordering or selection
-// strategy beyond the cap.
+// Recall returns the facts the implementation judges relevant to query
+// (empty query means no particular focus). How relevance is determined —
+// recency, a language model reading the log, similarity search, anything
+// else — is entirely the implementation's choice, and so is any cap on
+// how many come back: how many facts a backing keeps or returns is a
+// property of that backing (its constructor takes it as config), not a
+// promise this interface makes.
 type Memory interface {
 	Remember(ctx context.Context, f Fact) error
-	Recall(ctx context.Context, query string, limit int) ([]Fact, error)
+	Recall(ctx context.Context, query string) ([]Fact, error)
 }

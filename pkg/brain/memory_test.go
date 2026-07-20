@@ -20,7 +20,7 @@ func TestRecallFactsInjectsSystemMessage(t *testing.T) {
 		Messages: []model.Message{{Role: "user", Content: "plan dinner"}},
 		Memory:   mem,
 	}
-	if err := RecallFacts(10).Run(context.Background(), r); err != nil {
+	if err := RecallFacts().Run(context.Background(), r); err != nil {
 		t.Fatalf("RecallFacts: %v", err)
 	}
 	sys := r.Messages[0]
@@ -36,7 +36,7 @@ func TestRecallFactsInjectsSystemMessage(t *testing.T) {
 
 func TestRecallFactsNoFactsNoMessage(t *testing.T) {
 	r := &Run{Memory: &memory.Mock{}}
-	if err := RecallFacts(10).Run(context.Background(), r); err != nil {
+	if err := RecallFacts().Run(context.Background(), r); err != nil {
 		t.Fatal(err)
 	}
 	if len(r.Messages) != 0 {
@@ -45,11 +45,11 @@ func TestRecallFactsNoFactsNoMessage(t *testing.T) {
 }
 
 func TestRecallFactsErrors(t *testing.T) {
-	if err := RecallFacts(10).Run(context.Background(), &Run{}); !errors.Is(err, ErrNoMemory) {
+	if err := RecallFacts().Run(context.Background(), &Run{}); !errors.Is(err, ErrNoMemory) {
 		t.Fatalf("err = %v; want ErrNoMemory", err)
 	}
 	boom := errors.New("boom")
-	err := RecallFacts(10).Run(context.Background(), &Run{Memory: &memory.Mock{RecallErr: boom}})
+	err := RecallFacts().Run(context.Background(), &Run{Memory: &memory.Mock{RecallErr: boom}})
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v; want boom", err)
 	}

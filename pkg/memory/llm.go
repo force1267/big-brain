@@ -24,7 +24,7 @@ var ErrRecall = errors.New("recall failed")
 // second Memory implementation exercising the interface's real contract:
 // relevance is the implementation's choice, not a fixed policy (see
 // memory.go). Facts remain durable the same way OpenFile's are.
-func OpenLLM(path string, m model.Model) (Memory, error) {
+func OpenLLM(path string, m model.Model, limit int) (Memory, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrOpen, err)
@@ -44,7 +44,7 @@ func OpenLLM(path string, m model.Model) (Memory, error) {
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrOpen, err)
 	}
-	return Monitored(&llmMemory{file: f, facts: facts, model: m}), nil
+	return Monitored(&llmMemory{file: f, facts: facts, model: m, limit: limit}), nil
 }
 
 type llmMemory struct {
@@ -52,6 +52,7 @@ type llmMemory struct {
 	file  *os.File
 	facts []Fact
 	model model.Model
+	limit int
 }
 
 var _ Memory = (*llmMemory)(nil)
@@ -76,17 +77,17 @@ func (m *llmMemory) Remember(_ context.Context, f Fact) error {
 // Recall asks m, in one call, which stored facts are relevant to query.
 // With no query or no facts yet, it falls back to the most-recent-N
 // behavior OpenFile uses — there's nothing to judge relevance against.
-func (m *llmMemory) Recall(ctx context.Context, query string, limit int) ([]Fact, error) {
+func (m *llmMemory) Recall(ctx context.Context, query string) ([]Fact, error) {
 	m.mu.Lock()
 	facts := make([]Fact, len(m.facts))
 	copy(facts, m.facts)
 	m.mu.Unlock()
 
 	if len(facts) == 0 || query == "" {
-		return capFacts(facts, limit), nil
+		return capFacts(facts, m.limit), nil
 	}
 
-	prompt := buildRecallPrompt(facts, query, limit)
+	prompt := buildRecallPrompt(facts, query, m.limit)
 	stream, err := m.model.Stream(ctx, []model.Message{{Role: "system", Content: prompt}}, model.Params{})
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrRecall, err)
@@ -106,7 +107,7 @@ func (m *llmMemory) Recall(ctx context.Context, query string, limit int) ([]Fact
 			continue
 		}
 		out = append(out, facts[i])
-		if limit > 0 && len(out) >= limit {
+		if m.limit > 0 && len(out) >= m.limit {
 			break
 		}
 	}

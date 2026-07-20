@@ -20,10 +20,12 @@ var (
 // OpenFile returns the zero-setup default Memory: an append-only JSONL
 // file. Existing facts are loaded; each Remember is appended and synced
 // before it is acknowledged. Recall ignores query and returns the most
-// recent facts, newest last — relevance judging is left to the caller
-// (typically the model reading them). See OpenLLM for a Memory that
+// recent facts, newest last, capped at limit (limit <= 0 means no cap) —
+// relevance judging is left to the caller (typically the model reading
+// them). How many facts a backing keeps around is that backing's own
+// config, not part of the Memory contract; see OpenLLM for a Memory that
 // instead uses query to pick facts out of the full log with a model call.
-func OpenFile(path string) (Memory, error) {
+func OpenFile(path string, limit int) (Memory, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrOpen, err)
@@ -43,13 +45,14 @@ func OpenFile(path string) (Memory, error) {
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrOpen, err)
 	}
-	return Monitored(&fileMemory{file: f, facts: facts}), nil
+	return Monitored(&fileMemory{file: f, facts: facts, limit: limit}), nil
 }
 
 type fileMemory struct {
 	mu    sync.Mutex
 	file  *os.File
 	facts []Fact
+	limit int
 }
 
 var _ Memory = (*fileMemory)(nil)
@@ -71,14 +74,8 @@ func (m *fileMemory) Remember(_ context.Context, f Fact) error {
 	return nil
 }
 
-func (m *fileMemory) Recall(_ context.Context, _ string, limit int) ([]Fact, error) {
+func (m *fileMemory) Recall(_ context.Context, _ string) ([]Fact, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	facts := m.facts
-	if limit > 0 && len(facts) > limit {
-		facts = facts[len(facts)-limit:]
-	}
-	out := make([]Fact, len(facts))
-	copy(out, facts)
-	return out, nil
+	return capFacts(m.facts, m.limit), nil
 }

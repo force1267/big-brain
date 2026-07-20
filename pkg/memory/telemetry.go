@@ -44,8 +44,8 @@ func (m monitoredMemory) Remember(ctx context.Context, f Fact) error {
 }
 
 // Recall implements Memory, forwarding to the wrapped store.
-func (m monitoredMemory) Recall(ctx context.Context, query string, limit int) ([]Fact, error) {
-	facts, err := m.inner.Recall(ctx, query, limit)
+func (m monitoredMemory) Recall(ctx context.Context, query string) ([]Fact, error) {
+	facts, err := m.inner.Recall(ctx, query)
 	m.recalls.Add(ctx, 1, outcome(err))
 	return facts, err
 }

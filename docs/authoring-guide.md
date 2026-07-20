@@ -252,7 +252,7 @@ Grouped by what they do. All are in `pkg/brain` unless noted.
 | Node | Signature | What it does |
 |---|---|---|
 | `Prompt` | `Prompt(tmpl string) Node` | Renders `tmpl` (`text/template`, executed against `*Run`) and prepends it as a system message. |
-| `RecallFacts` | `RecallFacts(limit int, notes ...string) Node` | Recalls facts via `r.Memory.Recall(ctx, query, limit)` (`query` is the latest message's content) and injects them, tagged by when, as a system message, plus any `notes` you pass — domain guidance on how to weigh them. `limit <= 0` means no cap. Requires `r.Memory`. |
+| `RecallFacts` | `RecallFacts(notes ...string) Node` | Recalls facts via `r.Memory.Recall(ctx, query)` (`query` is the latest message's content) and injects them, tagged by when, as a system message, plus any `notes` you pass — domain guidance on how to weigh them. How many facts come back is the bound `Memory`'s own config, not a node parameter. Requires `r.Memory`. |
 
 There is no `Situation` node — time is already ambient via the stdlib
 (`time.Now()`), so the engine has nothing to inject; see [Time and
@@ -317,13 +317,20 @@ Chat: []brain.Node{
 `RecallFacts` and `Memorize` are domain-neutral primitives. `memory.Fact`
 holds only `Content` and `At` — no attribution field, on purpose: whose
 fact it is, if that matters to your brain, is something you encode into
-`Content` yourself. `Memory.Recall` also takes a `query` (`RecallFacts`
-passes the latest message's content) — the zero-setup `OpenFile`
-implementation ignores it and returns the most recent facts; `OpenLLM`
-(also in `pkg/memory`) uses it, handing the whole log plus the query to a
-model in one call to decide what's relevant — a second real implementation
-is what keeps `Memory`'s interface honest about not mandating "most
-recent." The simplest version needs nothing beyond the wiring:
+`Content` yourself. `Memory.Recall` takes a `query` (`RecallFacts` passes
+the latest message's content) but no limit — how many facts a backing
+keeps or returns is that backing's own config, set when it's constructed,
+not a call-time parameter every implementation is forced to support. The
+zero-setup `OpenFile(path, limit)` ignores query and returns the most
+recent `limit` facts; `OpenLLM(path, model, limit)` (also in
+`pkg/memory`) uses query, handing the whole log plus the query to a model
+in one call to decide what's relevant, capped at `limit`. A second real
+implementation with a genuinely different notion of "relevant" is what
+keeps `Memory`'s interface honest about not mandating "most recent" — or
+a fixed per-call cap. `serve.Run` builds the zero-setup `OpenFile` from
+`BIG_BRAIN_MEMORY_LIMIT` (default 50); swap in `OpenLLM` yourself if you
+build your own `serve.Handler` wiring instead of calling `serve.Run`. The
+simplest version needs nothing beyond the wiring:
 
 ```go
 const memorizeInstruction = `Does the user's latest message state durable
@@ -332,7 +339,7 @@ person. Leave the list empty for small talk, questions, or one-off requests.`
 
 Chat: []brain.Node{
 	brain.Prompt(persona),
-	brain.RecallFacts(50),
+	brain.RecallFacts(),
 	brain.Call("fast"),
 	brain.Reply(),
 	brain.Memorize("fast", memorizeInstruction),
@@ -451,7 +458,7 @@ Pipelines: map[string][]brain.Node{
 Webhooks: map[string]string{"door": "unknown-face"},
 Pipelines: map[string][]brain.Node{
 	"unknown-face": {
-		brain.RecallFacts(50),
+		brain.RecallFacts(),
 		brain.Func(describeEvent), // turns the webhook payload into a message
 		brain.Extract[verdict]("fast", verdictInstruction, "verdict"),
 		brain.If(openedOK,
@@ -554,6 +561,7 @@ None of this is brain code — it's how you deploy a given brain binary.
 | `BIG_BRAIN_UPSTREAM_API_KEY` | — | Upstream API key. |
 | `BIG_BRAIN_MODELS` | — | Role bindings, e.g. `fast=gpt-4o-mini,smart=gpt-4o`. |
 | `BIG_BRAIN_MEMORY_PATH` | `memory.jsonl` | Zero-setup memory store file. |
+| `BIG_BRAIN_MEMORY_LIMIT` | `50` | Facts `OpenFile` keeps in a single recall; 0 = no cap. Implementation-level config, not a `RecallFacts` parameter. |
 | `BIG_BRAIN_JOBS_PATH` | `jobs.jsonl` | Zero-setup durable job log. |
 | `BIG_BRAIN_NOTIFY_URL` | — | Outgoing webhook URL; empty logs notifications instead of sending them. |
 

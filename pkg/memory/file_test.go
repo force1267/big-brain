@@ -9,9 +9,9 @@ import (
 	"time"
 )
 
-func open(t *testing.T, path string) Memory {
+func open(t *testing.T, path string, limit int) Memory {
 	t.Helper()
-	m, err := OpenFile(path)
+	m, err := OpenFile(path, limit)
 	if err != nil {
 		t.Fatalf("OpenFile: %v", err)
 	}
@@ -22,7 +22,7 @@ func TestFileRememberRecallAndSurviveReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "memory.jsonl")
 	ctx := context.Background()
 
-	m := open(t, path)
+	m := open(t, path, 0)
 	facts := []Fact{
 		{Content: "[dad] dentist on Tuesday", At: time.Now().Truncate(time.Second)},
 		{Content: "the family is vegetarian", At: time.Now().Truncate(time.Second)},
@@ -34,8 +34,8 @@ func TestFileRememberRecallAndSurviveReopen(t *testing.T) {
 	}
 
 	// reopen: facts must survive — this is the persistence promise
-	m = open(t, path)
-	got, err := m.Recall(ctx, "", 0)
+	m = open(t, path, 0)
+	got, err := m.Recall(ctx, "")
 	if err != nil {
 		t.Fatalf("Recall: %v", err)
 	}
@@ -45,21 +45,21 @@ func TestFileRememberRecallAndSurviveReopen(t *testing.T) {
 }
 
 func TestFileRecallLimitReturnsNewest(t *testing.T) {
-	m := open(t, filepath.Join(t.TempDir(), "m.jsonl"))
+	m := open(t, filepath.Join(t.TempDir(), "m.jsonl"), 2)
 	ctx := context.Background()
 	for _, c := range []string{"one", "two", "three"} {
 		if err := m.Remember(ctx, Fact{Content: c}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	got, err := m.Recall(ctx, "", 2)
+	got, err := m.Recall(ctx, "")
 	if err != nil || len(got) != 2 || got[0].Content != "two" || got[1].Content != "three" {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 }
 
 func TestFileRecallEmpty(t *testing.T) {
-	got, err := open(t, filepath.Join(t.TempDir(), "m.jsonl")).Recall(context.Background(), "", 10)
+	got, err := open(t, filepath.Join(t.TempDir(), "m.jsonl"), 10).Recall(context.Background(), "")
 	if err != nil || len(got) != 0 {
 		t.Fatalf("got %+v, %v", got, err)
 	}
@@ -70,13 +70,13 @@ func TestOpenFileCorrupt(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{broken\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := OpenFile(path); !errors.Is(err, ErrOpen) {
+	if _, err := OpenFile(path, 0); !errors.Is(err, ErrOpen) {
 		t.Fatalf("err = %v; want ErrOpen", err)
 	}
 }
 
 func TestOpenFileBadPath(t *testing.T) {
-	if _, err := OpenFile(filepath.Join(t.TempDir(), "no", "such", "dir", "m.jsonl")); !errors.Is(err, ErrOpen) {
+	if _, err := OpenFile(filepath.Join(t.TempDir(), "no", "such", "dir", "m.jsonl"), 0); !errors.Is(err, ErrOpen) {
 		t.Fatalf("err = %v; want ErrOpen", err)
 	}
 }
@@ -86,7 +86,7 @@ func TestMockMemory(t *testing.T) {
 	if err := m.Remember(context.Background(), Fact{Content: "x"}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := m.Recall(context.Background(), "", 1)
+	got, err := m.Recall(context.Background(), "")
 	if err != nil || len(got) != 1 || got[0].Content != "x" {
 		t.Fatalf("got %+v, %v", got, err)
 	}

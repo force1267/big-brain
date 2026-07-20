@@ -54,7 +54,8 @@ type Config struct {
 
 	// Memory is where the zero-setup fact store lives.
 	Memory struct {
-		Path string
+		Path  string
+		Limit int // facts kept in context per recall; 0 = no cap
 	}
 
 	// Jobs is where the zero-setup durable job log lives.
@@ -115,6 +116,8 @@ func (envLoader) Load() (Config, error) {
 
 	v.SetDefault("memory.path", "memory.jsonl")
 	c.Memory.Path = v.GetString("memory.path")
+	v.SetDefault("memory.limit", 50)
+	c.Memory.Limit = v.GetInt("memory.limit")
 	v.SetDefault("jobs.path", "jobs.jsonl")
 	c.Jobs.Path = v.GetString("jobs.path")
 	c.Notify.URL = v.GetString("notify.url")
