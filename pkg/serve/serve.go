@@ -37,17 +37,33 @@ var (
 // Deps are the engine-owned ambient dependencies a run sees. Run builds
 // them from configuration; tests inject mocks.
 type Deps struct {
-	Memory         memory.Memory
-	Notify         notify.Channel
-	ResolveSpeaker func(*http.Request) string // nil means every caller is anonymous
-	Enqueue        func(context.Context, job.Job) error
+	Memory  memory.Memory
+	Notify  notify.Channel
+	Enqueue func(context.Context, job.Job) error
+	// Prepare, if set, runs once per incoming chat/messages request, right
+	// after the Run is built and before the pipeline executes, with the
+	// raw HTTP request. It lets the brain author inject whatever
+	// per-request context their brain needs — identity, locale, tracing,
+	// anything — via run.SetVar. The engine has no opinion on what
+	// belongs there.
+	Prepare func(*http.Request, *brain.Run)
+}
+
+// Option configures Deps beyond what deployment config supplies. Pass one
+// to Run for behavior only the brain author's code can provide, such as
+// Prepare.
+type Option func(*Deps)
+
+// WithPrepare sets Deps.Prepare.
+func WithPrepare(fn func(*http.Request, *brain.Run)) Option {
+	return func(d *Deps) { d.Prepare = fn }
 }
 
 // Run loads deployment configuration, binds the brain's model roles,
 // opens the durable stores, recovers pending background jobs, and serves
 // the brain over the OpenAI-compatible API until ctx is cancelled. It is
 // the one call a brain author's main makes.
-func Run(ctx context.Context, b *brain.Brain) error {
+func Run(ctx context.Context, b *brain.Brain, opts ...Option) error {
 	cfg, err := config.New().Load()
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrConfig, err)
@@ -85,7 +101,10 @@ func Run(ctx context.Context, b *brain.Brain) error {
 		channel = notify.Webhook(cfg.Notify.URL)
 	}
 
-	deps := Deps{Memory: mem, Notify: channel, ResolveSpeaker: b.ResolveSpeaker}
+	deps := Deps{Memory: mem, Notify: channel}
+	for _, opt := range opts {
+		opt(&deps)
+	}
 	deps.Enqueue = startJobs(ctx, b, store, &deps)
 	startCrons(ctx, b, deps.Enqueue)
 
@@ -209,7 +228,6 @@ func runJob(ctx context.Context, b *brain.Brain, deps *Deps, j job.Job) error {
 		Memory:  deps.Memory,
 		Notify:  deps.Notify,
 		Enqueue: deps.Enqueue,
-		Speaker: j.Speaker,
 		Vars:    j.Payload,
 	}
 	if err := brain.Execute(ctx, nodes, run); err != nil {
@@ -278,10 +296,12 @@ func completions(b *brain.Brain, deps Deps, w http.ResponseWriter, r *http.Reque
 		Memory:  deps.Memory,
 		Notify:  deps.Notify,
 		Enqueue: deps.Enqueue,
-		Speaker: speakerOf(deps, r),
 	}
 	for _, m := range req.Messages {
 		run.Messages = append(run.Messages, model.Message{Role: m.Role, Content: m.Content})
+	}
+	if deps.Prepare != nil {
+		deps.Prepare(r, run)
 	}
 
 	id := "chatcmpl-" + uuid.NewString()
@@ -376,13 +396,15 @@ func messages(b *brain.Brain, deps Deps, w http.ResponseWriter, r *http.Request)
 		Memory:  deps.Memory,
 		Notify:  deps.Notify,
 		Enqueue: deps.Enqueue,
-		Speaker: speakerOf(deps, r),
 	}
 	if req.System != "" {
 		run.Messages = append(run.Messages, model.Message{Role: "system", Content: string(req.System)})
 	}
 	for _, m := range req.Messages {
 		run.Messages = append(run.Messages, model.Message{Role: m.Role, Content: string(m.Content)})
+	}
+	if deps.Prepare != nil {
+		deps.Prepare(r, run)
 	}
 
 	id := "msg_" + uuid.NewString()
@@ -430,11 +452,4 @@ func messages(b *brain.Brain, deps Deps, w http.ResponseWriter, r *http.Request)
 	}
 
 	executeChat(b, w, r, run, finish, writeErr)
-}
-
-func speakerOf(deps Deps, r *http.Request) string {
-	if deps.ResolveSpeaker == nil {
-		return ""
-	}
-	return deps.ResolveSpeaker(r)
 }

@@ -106,37 +106,42 @@ func TestCompletionsStreamFailureBeforeOutput(t *testing.T) {
 	}
 }
 
-func TestSpeakerFromBearerKey(t *testing.T) {
-	// the brain sees the speaker resolved from the API credential
+func TestPrepareInjectsPerRequestContext(t *testing.T) {
+	// pkg/serve has no notion of "speaker" or identity — Prepare is the
+	// fully generic hook a brain author uses to inject whatever
+	// per-request context they want, via the same Vars any node uses.
 	var seen string
 	b := &brain.Brain{Name: "jarvis", Chat: []brain.Node{
 		brain.Func(func(_ context.Context, r *brain.Run) error {
-			seen = r.Speaker
+			seen, _ = brain.Var[string](r, "who")
 			r.Replied = true
 			return r.Emit(model.Chunk{Content: "ok"})
 		}),
 	}}
 	speakers := map[string]string{"key-dad": "dad"}
-	resolve := func(r *http.Request) string {
-		return speakers[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
+	prepare := func(r *http.Request, run *brain.Run) {
+		if name := speakers[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]; name != "" {
+			run.SetVar("who", name)
+		}
 	}
-	h := Handler(b, Deps{Memory: &memory.Mock{}, ResolveSpeaker: resolve})
+	h := Handler(b, Deps{Memory: &memory.Mock{}, Prepare: prepare})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"model":"jarvis","messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set("Authorization", "Bearer key-dad")
 	h.ServeHTTP(httptest.NewRecorder(), req)
 	if seen != "dad" {
-		t.Fatalf("speaker = %q; want dad", seen)
+		t.Fatalf("who = %q; want dad", seen)
 	}
 
-	// unknown or missing key → anonymous, never an error
+	// unknown or missing key → nothing injected, never an error
 	req = httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"model":"jarvis","messages":[{"role":"user","content":"hi"}]}`))
+	seen = "unset"
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || seen != "" {
-		t.Fatalf("status %d speaker %q; want 200 and anonymous", rec.Code, seen)
+		t.Fatalf("status %d who %q; want 200 and empty", rec.Code, seen)
 	}
 }
 
@@ -174,11 +179,11 @@ func TestRunJobExecutesNamedPipeline(t *testing.T) {
 		},
 	}}
 	deps := &Deps{Memory: &memory.Mock{}, Notify: ch}
-	j := job.Job{ID: "1", Pipeline: "register-guest", Speaker: "dad", Payload: map[string]any{"guest": "John"}}
+	j := job.Job{ID: "1", Pipeline: "register-guest", Payload: map[string]any{"guest": "John"}}
 	if err := runJob(context.Background(), b, deps, j); err != nil {
 		t.Fatalf("runJob: %v", err)
 	}
-	if got != "John" || len(ch.Sent) != 1 || ch.Sent[0].Text != "done: John" || ch.Sent[0].Speaker != "dad" {
+	if got != "John" || len(ch.Sent) != 1 || ch.Sent[0].Text != "done: John" {
 		t.Fatalf("got %q, sent %+v", got, ch.Sent)
 	}
 }
@@ -269,17 +274,22 @@ func TestMessagesStreaming(t *testing.T) {
 	}
 }
 
-func TestMessagesSpeakerFromAPIKeyHeader(t *testing.T) {
+func TestMessagesPrepareFromAPIKeyHeader(t *testing.T) {
 	var seen string
 	b := &brain.Brain{Name: "jarvis", Chat: []brain.Node{
 		brain.Func(func(_ context.Context, r *brain.Run) error {
-			seen = r.Speaker
+			seen, _ = brain.Var[string](r, "who")
 			r.Replied = true
 			return r.Emit(model.Chunk{Content: "ok"})
 		}),
 	}}
 	speakers := map[string]string{"key-kid": "kid"}
-	h := Handler(b, Deps{ResolveSpeaker: func(r *http.Request) string { return speakers[r.Header.Get("x-api-key")] }})
+	prepare := func(r *http.Request, run *brain.Run) {
+		if name := speakers[r.Header.Get("x-api-key")]; name != "" {
+			run.SetVar("who", name)
+		}
+	}
+	h := Handler(b, Deps{Prepare: prepare})
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
 		strings.NewReader(`{"model":"jarvis","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set("x-api-key", "key-kid")

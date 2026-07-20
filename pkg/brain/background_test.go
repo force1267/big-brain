@@ -12,7 +12,6 @@ import (
 func TestGoEnqueuesDurableIntent(t *testing.T) {
 	var got job.Job
 	r := &Run{
-		Speaker: "dad",
 		Enqueue: func(_ context.Context, j job.Job) error { got = j; return nil },
 	}
 	r.SetVar("guest", "John")
@@ -23,7 +22,7 @@ func TestGoEnqueuesDurableIntent(t *testing.T) {
 	if err := node.Run(context.Background(), r); err != nil {
 		t.Fatalf("Go: %v", err)
 	}
-	if got.ID == "" || got.Pipeline != "register-guest" || got.Speaker != "dad" || got.Payload["guest"] != "John" {
+	if got.ID == "" || got.Pipeline != "register-guest" || got.Payload["guest"] != "John" {
 		t.Fatalf("job = %+v", got)
 	}
 }
@@ -41,12 +40,12 @@ func TestGoNilPayloadAndErrors(t *testing.T) {
 
 func TestNotifyRendersAndSends(t *testing.T) {
 	ch := &notify.Mock{}
-	r := &Run{Speaker: "dad", Notify: ch}
+	r := &Run{Notify: ch}
 	r.SetVar("result", "Done — John is on the list.")
 	if err := Notify(`{{index .Vars "result"}}`).Run(context.Background(), r); err != nil {
 		t.Fatalf("Notify: %v", err)
 	}
-	if len(ch.Sent) != 1 || ch.Sent[0].Speaker != "dad" || ch.Sent[0].Text != "Done — John is on the list." {
+	if len(ch.Sent) != 1 || ch.Sent[0].Text != "Done — John is on the list." {
 		t.Fatalf("sent %+v", ch.Sent)
 	}
 }

@@ -11,7 +11,6 @@ import (
 type Job struct {
 	ID       string         `json:"id"`
 	Pipeline string         `json:"pipeline"`
-	Speaker  string         `json:"speaker,omitempty"`
 	Payload  map[string]any `json:"payload,omitempty"`
 	At       time.Time      `json:"at"`
 	// RunAt defers execution: zero means run now. A future RunAt is a

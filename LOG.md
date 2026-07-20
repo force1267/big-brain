@@ -436,3 +436,39 @@ the bearer/x-api-key + env-var map resolution now live in
 `cmd/jarvis-demo/main.go` only. Updated docs/authoring-guide.md (Brain
 struct, node reference, memory + speaker-identity recipes, config section)
 per CLAUDE.md rule 5. Full suite green.
+
+## 2026-07-20 — Speaker concept fully removed from pkg/ (session 8)
+
+Follow-up to the previous session's Speaker cleanup: removing the ability
+to customize speaker resolution wasn't enough — the concept itself
+(Run.Speaker, Brain.ResolveSpeaker, memory.Fact.Speaker, job.Job.Speaker,
+notify.Message.Speaker) still lived in pkg/, meaning every brain paid for
+it whether or not "speaker" made sense for its domain. Removed all of it:
+
+- pkg/brain: Run has no Speaker field; Situation no longer mentions who's
+  talking; RecallFacts lists Content/At only (no per-fact "who", no
+  "current speaker" line); Memorize stores plain Fact{Content, At}; Go/
+  GoAt/Notify no longer touch a Speaker field anywhere.
+- pkg/memory.Fact, pkg/job.Job, pkg/notify.Message: Speaker field dropped
+  from all three. Attribution, if a brain wants it, is the brain's
+  encoding inside Content/Text — not an engine concept.
+- pkg/serve: replaced Brain.ResolveSpeaker with a fully generic
+  serve.WithPrepare(func(*http.Request, *brain.Run)) Run option — the
+  engine calls it once per chat/messages request with the raw request and
+  nothing else; it carries no notion of identity, just lets the author
+  inject arbitrary context into Run.Vars via the same SetVar every node
+  already uses.
+
+cmd/jarvis-demo now owns the entire speaker concept: resolveSpeaker()
+(Prepare hook, parses JARVIS_DEMO_SPEAKERS, calls run.SetVar("speaker",
+name)), speakerOf() helper, announceSpeaker (replaces the old built-in
+"You are talking to X" line), and a local memorize() that reimplements
+brain.Memorize but tags fact Content with "[speaker] ..." — the household
+household-attribution behavior now lives only here. registerGuest carries
+speaker through job payload → Run.Vars, the same generic mechanism any
+background job would use for any per-run value.
+
+Updated docs/authoring-guide.md throughout (Brain/Run structs, Context &
+effects, Notify reference row, memory + speaker-identity recipes, config
+section) per CLAUDE.md rule 5. `grep -rn Speaker pkg/` now returns nothing.
+Full suite green under gofmt/vet/test.

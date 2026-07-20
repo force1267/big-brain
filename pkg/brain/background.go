@@ -42,7 +42,7 @@ func goNode(pipeline string, payload func(*Run) map[string]any, when func(*Run) 
 		if r.Enqueue == nil {
 			return ErrNoEnqueue
 		}
-		j := job.Job{ID: uuid.NewString(), Pipeline: pipeline, Speaker: r.Speaker, At: time.Now()}
+		j := job.Job{ID: uuid.NewString(), Pipeline: pipeline, At: time.Now()}
 		if payload != nil {
 			j.Payload = payload(r)
 		}
@@ -54,8 +54,9 @@ func goNode(pipeline string, payload func(*Run) map[string]any, when func(*Run) 
 }
 
 // Notify returns a node that renders tmpl (text/template, executed against
-// the Run) and sends it out the brain's channel, addressed to the current
-// speaker. This is the brain initiating contact — no request is waiting.
+// the Run) and sends it out the brain's channel. This is the brain
+// initiating contact — no request is waiting. Address the message to
+// whoever it concerns inside tmpl itself, e.g. from a value in r.Vars.
 func Notify(tmpl string) Node {
 	return Func(func(ctx context.Context, r *Run) error {
 		if r.Notify == nil {
@@ -69,6 +70,6 @@ func Notify(tmpl string) Node {
 		if err := t.Execute(&b, r); err != nil {
 			return fmt.Errorf("%w: %w", ErrNotify, err)
 		}
-		return r.Notify.Notify(ctx, notify.Message{Speaker: r.Speaker, Text: b.String()})
+		return r.Notify.Notify(ctx, notify.Message{Text: b.String()})
 	})
 }

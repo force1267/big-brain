@@ -18,11 +18,11 @@ func TestWebhookPostsMessage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := Webhook(srv.URL).Notify(context.Background(), Message{Speaker: "dad", Text: "done"})
+	err := Webhook(srv.URL).Notify(context.Background(), Message{Text: "done"})
 	if err != nil {
 		t.Fatalf("Notify: %v", err)
 	}
-	if got.Speaker != "dad" || got.Text != "done" {
+	if got.Text != "done" {
 		t.Fatalf("got %+v", got)
 	}
 }

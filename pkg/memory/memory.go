@@ -5,10 +5,10 @@ import (
 	"time"
 )
 
-// Fact is one durable thing the brain chose to remember. Speaker is who it
-// belongs to; empty means the whole household/team.
+// Fact is one durable thing the brain chose to remember. Content is
+// free-form; any attribution (whose fact it is, what it's about) is the
+// brain author's convention to encode in Content, not an engine concept.
 type Fact struct {
-	Speaker string    `json:"speaker,omitempty"`
 	Content string    `json:"content"`
 	At      time.Time `json:"at"`
 }

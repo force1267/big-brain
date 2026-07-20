@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"sync"
 	"time"
 
@@ -26,12 +25,6 @@ type Brain struct {
 	Pipelines map[string][]Node // named pipelines background jobs re-run by name
 	Webhooks  map[string]string // webhook trigger name → pipeline (POST /triggers/{name})
 	Crons     []Cron            // scheduled triggers defined by brain code
-	// ResolveSpeaker, if set, is called once per incoming request to decide
-	// who is talking (e.g. by reading an API key or bearer token header and
-	// looking it up somewhere). Nil means every caller is anonymous. Both
-	// the credential scheme and where identities live are entirely the
-	// brain author's choice — the engine only calls the function.
-	ResolveSpeaker func(*http.Request) string
 }
 
 // Cron is a recurring trigger: Every for intervals, or Daily ("15:04",
@@ -52,7 +45,6 @@ type Run struct {
 	Stream   <-chan model.Chunk                   // output of the last model call
 	Emit     func(model.Chunk) error              // delivers reply chunks to the caller
 	Vars     map[string]any                       // per-run state nodes pass to each other
-	Speaker  string                               // who is talking, from the API credential; empty if unknown
 	Memory   memory.Memory                        // the brain's durable fact store
 	Notify   notify.Channel                       // outgoing channel for brain-initiated contact
 	Enqueue  func(context.Context, job.Job) error // persists durable background intent

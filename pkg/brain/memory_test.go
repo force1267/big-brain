@@ -13,13 +13,12 @@ import (
 
 func TestRecallFactsInjectsSystemMessage(t *testing.T) {
 	mem := &memory.Mock{Facts: []memory.Fact{
-		{Speaker: "dad", Content: "dentist on Tuesday", At: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)},
+		{Content: "[dad] dentist on Tuesday", At: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)},
 		{Content: "the family is vegetarian", At: time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC)},
 	}}
 	r := &Run{
 		Messages: []model.Message{{Role: "user", Content: "plan dinner"}},
 		Memory:   mem,
-		Speaker:  "dad",
 	}
 	if err := RecallFacts(10).Run(context.Background(), r); err != nil {
 		t.Fatalf("RecallFacts: %v", err)
@@ -28,7 +27,7 @@ func TestRecallFactsInjectsSystemMessage(t *testing.T) {
 	if sys.Role != "system" {
 		t.Fatalf("first message = %+v", sys)
 	}
-	for _, want := range []string{"[dad, 2026-07-01] dentist on Tuesday", "[shared, 2026-07-02] the family is vegetarian", "current speaker is dad"} {
+	for _, want := range []string{"[2026-07-01] [dad] dentist on Tuesday", "[2026-07-02] the family is vegetarian"} {
 		if !strings.Contains(sys.Content, want) {
 			t.Fatalf("missing %q in %q", want, sys.Content)
 		}
@@ -56,19 +55,18 @@ func TestRecallFactsErrors(t *testing.T) {
 	}
 }
 
-func TestMemorizeStoresFactsForSpeaker(t *testing.T) {
+func TestMemorizeStoresFacts(t *testing.T) {
 	mem := &memory.Mock{}
 	mock := &model.Mock{Script: []string{`{"facts":["the family is vegetarian now"]}`}}
 	r := &Run{
 		Messages: []model.Message{{Role: "user", Content: "btw we're vegetarian now"}},
 		Models:   model.Models{"fast": mock},
 		Memory:   mem,
-		Speaker:  "mom",
 	}
 	if err := Memorize("fast", "list durable facts").Run(context.Background(), r); err != nil {
 		t.Fatalf("Memorize: %v", err)
 	}
-	if len(mem.Facts) != 1 || mem.Facts[0].Speaker != "mom" ||
+	if len(mem.Facts) != 1 ||
 		mem.Facts[0].Content != "the family is vegetarian now" || mem.Facts[0].At.IsZero() {
 		t.Fatalf("facts = %+v", mem.Facts)
 	}

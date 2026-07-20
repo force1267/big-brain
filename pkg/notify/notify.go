@@ -14,10 +14,11 @@ import (
 // ErrSend wraps failures delivering a notification.
 var ErrSend = errors.New("notification send failed")
 
-// Message is one outgoing notification the brain initiates.
+// Message is one outgoing notification the brain initiates. Text is
+// free-form; any addressing (who it's for) belongs in Text, the brain
+// author's convention, not an engine concept.
 type Message struct {
-	Speaker string `json:"speaker,omitempty"` // whom it concerns, if anyone
-	Text    string `json:"text"`
+	Text string `json:"text"`
 }
 
 // Channel delivers notifications to the outside world. Channels are an
@@ -65,7 +66,6 @@ type logChannel struct{}
 var _ Channel = logChannel{}
 
 func (logChannel) Notify(_ context.Context, m Message) error {
-	logrus.WithFields(logrus.Fields{"speaker": m.Speaker, "text": m.Text}).
-		Info("notification (no channel configured)")
+	logrus.WithField("text", m.Text).Info("notification (no channel configured)")
 	return nil
 }

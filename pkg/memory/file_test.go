@@ -24,7 +24,7 @@ func TestFileRememberRecallAndSurviveReopen(t *testing.T) {
 
 	m := open(t, path)
 	facts := []Fact{
-		{Speaker: "dad", Content: "dentist on Tuesday", At: time.Now().Truncate(time.Second)},
+		{Content: "[dad] dentist on Tuesday", At: time.Now().Truncate(time.Second)},
 		{Content: "the family is vegetarian", At: time.Now().Truncate(time.Second)},
 	}
 	for _, f := range facts {
@@ -39,7 +39,7 @@ func TestFileRememberRecallAndSurviveReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Recall: %v", err)
 	}
-	if len(got) != 2 || got[0].Speaker != "dad" || got[1].Content != "the family is vegetarian" {
+	if len(got) != 2 || got[0].Content != "[dad] dentist on Tuesday" || got[1].Content != "the family is vegetarian" {
 		t.Fatalf("recalled %+v", got)
 	}
 }

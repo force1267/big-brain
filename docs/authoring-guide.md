@@ -106,7 +106,6 @@ type Brain struct {
 	Pipelines map[string][]Node   // named graphs background jobs and triggers run by name
 	Webhooks  map[string]string   // trigger name → pipeline, exposed at POST /triggers/{name}
 	Crons     []Cron              // schedules your brain runs on its own
-	ResolveSpeaker func(*http.Request) string // resolves who's talking; nil = anonymous
 }
 ```
 
@@ -152,7 +151,6 @@ type Run struct {
 	Stream   <-chan model.Chunk
 	Emit     func(model.Chunk) error // wired by serve; Reply() uses it
 	Vars     map[string]any    // per-run scratch space, node-to-node
-	Speaker  string            // who's talking, resolved from the API credential
 	Memory   memory.Memory
 	Notify   notify.Channel
 	Enqueue  func(context.Context, job.Job) error
@@ -191,10 +189,18 @@ error` is a `Node`.
 
 ### Context & effects (ambient, not steps)
 
-`Memory`, `Speaker`, `Notify`, `Enqueue`, and `Models` are not things you
-wire into each node — they're already sitting on `*Run`, injected by
-`serve.Run` from configuration (or by your tests, if you build a `*Run`
-directly). Nodes that need them just read `r.Memory`, `r.Speaker`, etc.
+`Memory`, `Notify`, `Enqueue`, and `Models` are not things you wire into
+each node — they're already sitting on `*Run`, injected by `serve.Run`
+from configuration (or by your tests, if you build a `*Run` directly).
+Nodes that need them just read `r.Memory`, `r.Notify`, etc.
+
+Notice `Run` has no `Speaker`, no identity field of any kind, no notion of
+"who is talking." The engine deliberately carries no such concept — it's a
+pipeline runtime, not a household assistant. If your brain needs to know
+who's calling, that's context *you* inject, the same way any node injects
+anything: into `Vars`, via `Run.SetVar`/`brain.Var[T]`. See [Speaker
+identity](#speaker-identity-story-3) for how `cmd/jarvis-demo` does this
+with zero engine involvement beyond the generic `serve.WithPrepare` hook.
 
 ### Model roles
 
@@ -276,7 +282,7 @@ Grouped by what they do. All are in `pkg/brain` unless noted.
 |---|---|---|
 | `Go` | `Go(pipeline string, payload func(*Run) map[string]any) Node` | Persists durable intent to run `pipeline` (from `Brain.Pipelines`) with a payload built from the current run, then returns immediately. Survives a crash — re-runs from the start (at-least-once), never silently lost. |
 | `GoAt` | `GoAt(when func(*Run) time.Time, pipeline string, payload func(*Run) map[string]any) Node` | `Go`, deferred until `when(r)` — a trigger the brain installs for itself. Durable like any other job. |
-| `Notify` | `Notify(tmpl string) Node` | Renders `tmpl` (`text/template` against `*Run`) and sends it out `r.Notify`, addressed to `r.Speaker`. This is the brain *initiating* contact — no request is waiting for the answer. |
+| `Notify` | `Notify(tmpl string) Node` | Renders `tmpl` (`text/template` against `*Run`) and sends it out `r.Notify`. This is the brain *initiating* contact — no request is waiting for the answer. Address it to whoever it concerns from inside `tmpl` itself, e.g. `{{index .Vars "speaker"}}` if that's a key your brain sets. |
 
 ### Writing your own
 
@@ -298,8 +304,10 @@ Chat: []brain.Node{
 
 ### Ambient memory (story 2)
 
-Recall before the model call, memorize after the reply so it never adds
-latency to the user-facing answer:
+`RecallFacts` and `Memorize` are domain-neutral primitives. `memory.Fact`
+holds only `Content` and `At` — no attribution field, on purpose: whose
+fact it is, if that matters to your brain, is something you encode into
+`Content` yourself. The simplest version needs nothing beyond the wiring:
 
 ```go
 const memorizeInstruction = `Does the user's latest message state durable
@@ -315,25 +323,47 @@ Chat: []brain.Node{
 },
 ```
 
-`RecallFacts` and `Memorize` are domain-neutral primitives — the wording is
-yours, the same way `Extract`'s `instruction` is. `cmd/jarvis-demo` passes
-household-flavored instruction text and a household-flavored guidance note
-(`recallNote`) as ordinary string arguments; a research-lab brain would
-pass its own instead.
+If facts need per-speaker attribution (see [Speaker
+identity](#speaker-identity-story-3) below), `Memorize`'s generic version
+can't do that — it has no idea what a "speaker" is. Write your own small
+node instead, reusing the generic pieces (`Extract`, `r.Memory`) directly.
+This is what `cmd/jarvis-demo` does: its own `memorize` function extracts
+facts exactly like `brain.Memorize` does internally, then tags each one
+with `fmt.Sprintf("[%s] %s", speaker, content)` before calling
+`r.Memory.Remember`. `RecallFacts` needs no change at all — it just prints
+`Content` back out, tag and all.
 
 ### Speaker identity (story 3)
 
-Nothing to add to the pipeline — `r.Speaker` is already resolved by
-`serve.Run`, once per request, by calling `Brain.ResolveSpeaker(r
-*http.Request) string` if you set one. Nil means every caller is anonymous,
-never an error. Both the credential scheme (bearer token, `x-api-key`, a
-cookie, mTLS) and where identities live (env, a config file, a database)
-are entirely up to you — the engine only calls the function you provide.
-`cmd/jarvis-demo` builds one that parses its own `JARVIS_DEMO_SPEAKERS` env
-var (`key-dad=dad,key-kid=kid`) into a map once at startup, then looks up
-the bearer token or `x-api-key` header on each call — that whole scheme is
-demo policy, not an engine concern. Once resolved, just use `r.Speaker`,
-e.g. inside `Prompt`'s template (`{{.Speaker}}`) or in a `brain.Func`.
+`pkg/` has no concept of a speaker, a caller, or identity of any kind —
+`*Run` doesn't carry one. If your brain needs to know who's talking, that
+is entirely your own mechanism, built from two fully generic pieces the
+engine does provide:
+
+- `serve.WithPrepare(fn func(*http.Request, *brain.Run))`, an option to
+  `serve.Run` that calls `fn` once per incoming chat/messages request,
+  before the pipeline runs, with the raw request. The engine has no
+  opinion on what `fn` does with it.
+- `Run.Vars` (via `run.SetVar` / `brain.Var[T]`), the same per-run scratch
+  space every node already uses.
+
+`cmd/jarvis-demo` combines them: `resolveSpeaker()` parses its own
+`JARVIS_DEMO_SPEAKERS` env var (`key-dad=dad,key-kid=kid`) into a map once
+at startup, and returns a `func(*http.Request, *brain.Run)` that looks up
+the bearer token or `x-api-key` header and calls `run.SetVar("speaker",
+name)`. That function is passed to `serve.Run(ctx, jarvis,
+serve.WithPrepare(resolveSpeaker()))`. Every credential scheme choice
+(bearer vs. `x-api-key`, a flat map vs. a database, the very key name
+`"speaker"`) lives in `cmd/jarvis-demo/main.go` only — swap any of it, or
+drop the concept entirely, without touching `pkg/`.
+
+Downstream, the demo reads it back with a small `speakerOf(r *brain.Run)
+string` helper wherever it needs it: to tell the model who it's talking to
+(a custom `announceSpeaker` node, since `Situation` doesn't know about
+speakers either), to tag memorized facts, and to carry identity into
+background jobs by adding `"speaker": speakerOf(r)` to the payload map
+`Go`/`GoAt` already take — `Run.Vars` is seeded from that payload when the
+background pipeline runs, so no extra plumbing is needed there either.
 
 ### Intent → structured tool call (story 4)
 
@@ -496,11 +526,10 @@ None of this is brain code — it's how you deploy a given brain binary.
 | `BIG_BRAIN_JOBS_PATH` | `jobs.jsonl` | Zero-setup durable job log. |
 | `BIG_BRAIN_NOTIFY_URL` | — | Outgoing webhook URL; empty logs notifications instead of sending them. |
 
-Speaker identity (`Brain.ResolveSpeaker`) is *not* engine config — it's a
-function you set on your `Brain` value however you like. `cmd/jarvis-demo`
-builds one from `JARVIS_DEMO_SPEAKERS` with `os.Getenv`, entirely outside
-the engine's config package; see [Speaker identity](#speaker-identity-story-3)
-above.
+Speaker identity has no engine config at all — `pkg/` has no concept of a
+speaker. `cmd/jarvis-demo` reads its own `JARVIS_DEMO_SPEAKERS` with
+`os.Getenv`, entirely outside the engine's config package; see [Speaker
+identity](#speaker-identity-story-3) above.
 
 `memory`, `job`, and `notify` are all interfaces (`pkg/memory.Memory`,
 `pkg/job.Store`, `pkg/notify.Channel`); the JSONL files above are the

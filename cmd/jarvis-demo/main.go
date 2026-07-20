@@ -36,7 +36,7 @@ leave it empty.`
 const recallNote = `Facts tagged with a name belong to that person only; prefer the current speaker's and the shared household facts.`
 
 // memorizeInstruction is household-flavored wording for what's worth
-// remembering, passed to the generic brain.Memorize node.
+// remembering, fed to the model by this brain's own memorize node (below).
 const memorizeInstruction = `Does the user's latest message state durable
 facts worth remembering long-term (preferences, appointments, dates,
 relationships, standing household rules)? List them, each self-contained,
@@ -54,6 +54,87 @@ type intent struct {
 type verdict struct {
 	Open   bool   `json:"open"`
 	Reason string `json:"reason"`
+}
+
+// memorized is the structured output of the memorize stage.
+type memorized struct {
+	Facts []string `json:"facts"`
+}
+
+// --- speaker identity (household-specific; pkg/ has no notion of this) ---
+//
+// pkg/brain and pkg/serve carry no concept of "who is talking" — that is
+// entirely this brain's business. Identity flows in one direction: an
+// api-key/bearer-token header is resolved to a name once per request (via
+// serve.WithPrepare) and stashed in Run.Vars["speaker"], the same generic
+// per-run scratch space any node uses. Everything downstream — prompting,
+// fact tagging, addressing background jobs and notifications — reads it
+// back out of Vars like any other value.
+
+// resolveSpeaker parses JARVIS_DEMO_SPEAKERS ("key-dad=dad,key-kid=kid")
+// into an API-key → speaker-name map once, then looks up the bearer token
+// (OpenAI clients) or x-api-key (Anthropic clients) on each request and
+// stores the result via serve's generic Prepare hook. The whole scheme —
+// env-var config, header choice, flat-map lookup, and the very idea of a
+// "speaker" — is this demo's policy; pkg/serve just calls the function.
+func resolveSpeaker() func(*http.Request, *brain.Run) {
+	m := map[string]string{}
+	for _, pair := range strings.Split(os.Getenv("JARVIS_DEMO_SPEAKERS"), ",") {
+		if k, v, ok := strings.Cut(strings.TrimSpace(pair), "="); ok {
+			m[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	return func(req *http.Request, run *brain.Run) {
+		key := req.Header.Get("x-api-key")
+		if key == "" {
+			key = strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+		}
+		if name := m[key]; name != "" {
+			run.SetVar("speaker", name)
+		}
+	}
+}
+
+// speakerOf reads the current speaker stashed by resolveSpeaker, or "" for
+// an anonymous caller or a background run with none set.
+func speakerOf(r *brain.Run) string {
+	s, _ := brain.Var[string](r, "speaker")
+	return s
+}
+
+// announceSpeaker tells the model who it's talking to, the way pkg/brain's
+// Situation node used to before speaker identity moved out of pkg/.
+func announceSpeaker(_ context.Context, r *brain.Run) error {
+	if spk := speakerOf(r); spk != "" {
+		r.Messages = append([]model.Message{{Role: "system",
+			Content: "You are talking to " + spk + "."}}, r.Messages...)
+	}
+	return nil
+}
+
+// memorize is this brain's speaker-aware fact-keeping node: pkg/brain's
+// generic Memorize takes plain facts with no attribution, so tagging each
+// fact with who said it is done here, by embedding the tag in Content —
+// the engine keeps no separate concept for it.
+func memorize(role model.Role, instruction string) brain.Node {
+	extract := brain.Extract[memorized](role, instruction, "_memorize")
+	return brain.Func(func(ctx context.Context, r *brain.Run) error {
+		if err := extract.Run(ctx, r); err != nil {
+			return err
+		}
+		got, _ := brain.Var[memorized](r, "_memorize")
+		spk := speakerOf(r)
+		for _, content := range got.Facts {
+			tagged := content
+			if spk != "" {
+				tagged = fmt.Sprintf("[%s] %s", spk, content)
+			}
+			if err := r.Memory.Remember(ctx, memory.Fact{Content: tagged, At: time.Now()}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // registerGuest is the background tool (story 5): it calls the door-camera
@@ -81,8 +162,11 @@ func registerGuest(ctx context.Context, r *brain.Run) error {
 		resp.Body.Close()
 		r.SetVar("result", fmt.Sprintf("Done — %s is on the guest list and the door camera will recognize them.", guest))
 		// the guest list is a durable fact the unknown-face pipeline reads
-		_ = r.Memory.Remember(ctx, memory.Fact{Speaker: r.Speaker,
-			Content: fmt.Sprintf("%s is on the door guest list.", guest), At: time.Now()})
+		content := fmt.Sprintf("%s is on the door guest list.", guest)
+		if spk := speakerOf(r); spk != "" {
+			content = fmt.Sprintf("[%s] %s", spk, content)
+		}
+		_ = r.Memory.Remember(ctx, memory.Fact{Content: content, At: time.Now()})
 	}
 	return nil
 }
@@ -144,36 +228,15 @@ func isAddGuest(r *brain.Run) bool {
 	return ok && it.Action == "add_guest" && it.Guest != ""
 }
 
-// resolveSpeaker parses JARVIS_DEMO_SPEAKERS ("key-dad=dad,key-kid=kid")
-// into an API-key → speaker-name map once, then looks up the bearer token
-// (OpenAI clients) or x-api-key (Anthropic clients) on each request. This
-// whole scheme — env-var config, header choice, flat-map lookup — is a
-// demo policy; brain.Brain.ResolveSpeaker lets any brain author plug in
-// something else entirely (JWTs, mTLS, a database).
-func resolveSpeaker() func(*http.Request) string {
-	m := map[string]string{}
-	for _, pair := range strings.Split(os.Getenv("JARVIS_DEMO_SPEAKERS"), ",") {
-		if k, v, ok := strings.Cut(strings.TrimSpace(pair), "="); ok {
-			m[strings.TrimSpace(k)] = strings.TrimSpace(v)
-		}
-	}
-	return func(r *http.Request) string {
-		if k := r.Header.Get("x-api-key"); k != "" {
-			return m[k]
-		}
-		return m[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
-	}
-}
-
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	jarvis := &brain.Brain{
-		Name:           "jarvis",
-		ResolveSpeaker: resolveSpeaker(),
+		Name: "jarvis",
 		Chat: []brain.Node{
 			brain.Prompt(persona),
+			brain.Func(announceSpeaker),
 			// story 8: time/situation awareness, no per-request plumbing
 			brain.Situation("House quiet hours are 22:00 to 07:00; avoid noisy appliances then."),
 			brain.RecallFacts(50, recallNote),
@@ -181,7 +244,7 @@ func main() {
 			brain.If(isAddGuest, brain.Seq(
 				brain.Go("register-guest", func(r *brain.Run) map[string]any {
 					it, _ := brain.Var[intent](r, "intent")
-					return map[string]any{"guest": it.Guest}
+					return map[string]any{"guest": it.Guest, "speaker": speakerOf(r)}
 				}),
 				brain.Func(queueGuest),
 			), nil),
@@ -205,7 +268,7 @@ func main() {
 			brain.Reply(),
 			// after Reply: the caller already has the answer; ambient
 			// memory happens behind their back.
-			brain.Memorize("fast", memorizeInstruction),
+			memorize("fast", memorizeInstruction),
 		},
 		Pipelines: map[string][]brain.Node{
 			// story 5: finish later, then reach out
@@ -241,7 +304,7 @@ Give a one-sentence reason.`, "verdict"),
 		Crons:    []brain.Cron{{Daily: "21:00", Pipeline: "nightly-review"}},
 	}
 
-	if err := serve.Run(ctx, jarvis); err != nil {
+	if err := serve.Run(ctx, jarvis, serve.WithPrepare(resolveSpeaker())); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
