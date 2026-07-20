@@ -18,6 +18,7 @@ import (
 	openaiwire "github.com/force1267/big-brain/internal/openai"
 	"github.com/force1267/big-brain/internal/telemetry"
 	"github.com/force1267/big-brain/pkg/brain"
+	"github.com/force1267/big-brain/pkg/cron"
 	"github.com/force1267/big-brain/pkg/job"
 	"github.com/force1267/big-brain/pkg/memory"
 	"github.com/force1267/big-brain/pkg/model"
@@ -179,40 +180,21 @@ func startJobs(ctx context.Context, b *brain.Brain, store job.Store, deps *Deps)
 // Recurring schedules need no durability: they reappear from brain code.
 func startCrons(ctx context.Context, b *brain.Brain, enqueue func(context.Context, job.Job) error) {
 	for _, c := range b.Crons {
-		go func(c brain.Cron) {
+		go func(c cron.Cron) {
 			for {
-				next := nextCron(c, time.Now())
+				next := cron.Next(c, time.Now())
 				select {
 				case <-ctx.Done():
 					return
 				case <-time.After(time.Until(next)):
 				}
-				j := job.Job{ID: uuid.NewString(), Pipeline: c.Pipeline, At: time.Now()}
+				j := job.Job{ID: uuid.NewString(), Pipeline: c.Pipeline, At: time.Now(), Source: "cron"}
 				if err := enqueue(ctx, j); err != nil {
 					logrus.WithError(err).WithField("pipeline", c.Pipeline).Error("cron enqueue failed")
 				}
 			}
 		}(c)
 	}
-}
-
-// nextCron returns the next firing after now.
-// ponytail: Every + Daily cover the reference stories; a cron-expression
-// library slots in here if a brain ever needs one.
-func nextCron(c brain.Cron, now time.Time) time.Time {
-	if c.Every > 0 {
-		return now.Add(c.Every)
-	}
-	t, err := time.ParseInLocation("15:04", c.Daily, now.Location())
-	if err != nil {
-		logrus.WithField("daily", c.Daily).Error("invalid daily schedule; firing in 24h")
-		return now.Add(24 * time.Hour)
-	}
-	next := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
-	if !next.After(now) {
-		next = next.AddDate(0, 0, 1)
-	}
-	return next
 }
 
 // runJob executes one background job against its named pipeline.
@@ -273,7 +255,7 @@ func webhook(b *brain.Brain, deps Deps, w http.ResponseWriter, r *http.Request) 
 		openaiwire.WriteError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
-	j := job.Job{ID: uuid.NewString(), Pipeline: pipeline, At: time.Now(),
+	j := job.Job{ID: uuid.NewString(), Pipeline: pipeline, At: time.Now(), Source: "webhook:" + name,
 		Payload: map[string]any{"payload": payload}}
 	if err := deps.Enqueue(r.Context(), j); err != nil {
 		logrus.WithError(err).Error("webhook enqueue failed")

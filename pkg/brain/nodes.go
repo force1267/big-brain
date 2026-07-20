@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 	"text/template"
-	"time"
 
 	"github.com/force1267/big-brain/pkg/model"
 )
@@ -98,25 +97,6 @@ func Parallel(nodes ...Node) Node {
 		}
 		wg.Wait()
 		return errors.Join(errs...)
-	})
-}
-
-// Situation returns a node that injects time and situation awareness as a
-// system message: current date, time, weekday, timezone, plus any standing
-// notes the brain declares (quiet hours, house rules, who's speaking —
-// whatever context the brain has). No hand-crafted prompt plumbing per
-// request (story 8).
-func Situation(notes ...string) Node {
-	return Func(func(_ context.Context, r *Run) error {
-		now := time.Now()
-		var b strings.Builder
-		fmt.Fprintf(&b, "Current situation: it is %s, %s (%s).\n",
-			now.Format("Monday, 2 January 2006"), now.Format("15:04"), now.Format("MST"))
-		for _, n := range notes {
-			b.WriteString(n + "\n")
-		}
-		r.Messages = append([]model.Message{{Role: "system", Content: b.String()}}, r.Messages...)
-		return nil
 	})
 }
 

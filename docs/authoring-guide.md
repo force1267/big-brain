@@ -105,7 +105,7 @@ type Brain struct {
 	Chat      []Node              // runs once per incoming chat/messages request
 	Pipelines map[string][]Node   // named graphs background jobs and triggers run by name
 	Webhooks  map[string]string   // trigger name → pipeline, exposed at POST /triggers/{name}
-	Crons     []Cron              // schedules your brain runs on its own
+	Crons     []cron.Cron         // schedules your brain runs on its own
 }
 ```
 
@@ -115,6 +115,12 @@ webhooks, crons, self-scheduled follow-ups — runs a *named* pipeline from
 initiative possible: a pipeline doesn't care whether it was triggered by a
 person typing or a job firing at 3am.
 
+`cron.Cron` (package `pkg/cron`) lives outside `pkg/brain` on purpose:
+computing when a schedule next fires (interval math, daily-of-day
+wraparound) is infrastructure, the same kind of thing as `pkg/model` or
+`pkg/memory` — `Brain` declares crons the way it declares `Webhooks`, it
+doesn't own the scheduling type or algorithm.
+
 ### Triggers
 
 A trigger is whatever starts a pipeline run. There are three:
@@ -123,7 +129,8 @@ A trigger is whatever starts a pipeline run. There are three:
   just the most common way a pipeline starts.
 - **webhook** — an external system POSTs to `/triggers/{name}`; you declare
   the mapping in `Brain.Webhooks`.
-- **cron** — a schedule you declare in `Brain.Crons` (`Every` or `Daily`).
+- **cron** — a schedule you declare in `Brain.Crons` (`cron.Cron{Every: ...}`
+  or `cron.Cron{Daily: "21:00", ...}`).
 
 A fourth "trigger" is really a *capability*, not a wiring you declare
 upfront: **self-installed**. Any node, mid-run, can call `brain.Go` or
@@ -245,8 +252,11 @@ Grouped by what they do. All are in `pkg/brain` unless noted.
 | Node | Signature | What it does |
 |---|---|---|
 | `Prompt` | `Prompt(tmpl string) Node` | Renders `tmpl` (`text/template`, executed against `*Run`) and prepends it as a system message. |
-| `Situation` | `Situation(notes ...string) Node` | Injects current date/time/weekday/timezone, the speaker, and any standing notes you pass (quiet hours, house rules) as a system message. No manual prompt plumbing per request. |
-| `RecallFacts` | `RecallFacts(limit int, notes ...string) Node` | Injects the brain's remembered facts (tagged by whose and when, "shared" if no speaker) as a system message, plus any `notes` you pass — domain guidance on how to weigh them. `limit <= 0` means all. Requires `r.Memory`. |
+| `RecallFacts` | `RecallFacts(limit int, notes ...string) Node` | Recalls facts via `r.Memory.Recall(ctx, query, limit)` (`query` is the latest message's content) and injects them, tagged by when, as a system message, plus any `notes` you pass — domain guidance on how to weigh them. `limit <= 0` means no cap. Requires `r.Memory`. |
+
+There is no `Situation` node — time is already ambient via the stdlib
+(`time.Now()`), so the engine has nothing to inject; see [Time and
+situation awareness](#time-and-situation-awareness-story-8) below.
 
 ### Model calls
 
@@ -274,7 +284,7 @@ Grouped by what they do. All are in `pkg/brain` unless noted.
 | Node | Signature | What it does |
 |---|---|---|
 | `RecallFacts` | see above | Reads memory into context. |
-| `Memorize` | `Memorize(role model.Role, instruction string) Node` | Asks the model, following `instruction`, whether the latest exchange contains durable facts worth keeping; if so, stores each for the current speaker. Ambient — the caller never says "remember this." Place after `Reply()` so it doesn't add latency to the answer. |
+| `Memorize` | `Memorize(role model.Role, instruction string) Node` | Asks the model, following `instruction`, whether the latest exchange contains durable facts worth keeping; if so, stores each via `r.Memory.Remember`. Ambient — the caller never says "remember this." Place after `Reply()` so it doesn't add latency to the answer. |
 
 ### Background work & notification
 
@@ -307,7 +317,13 @@ Chat: []brain.Node{
 `RecallFacts` and `Memorize` are domain-neutral primitives. `memory.Fact`
 holds only `Content` and `At` — no attribution field, on purpose: whose
 fact it is, if that matters to your brain, is something you encode into
-`Content` yourself. The simplest version needs nothing beyond the wiring:
+`Content` yourself. `Memory.Recall` also takes a `query` (`RecallFacts`
+passes the latest message's content) — the zero-setup `OpenFile`
+implementation ignores it and returns the most recent facts; `OpenLLM`
+(also in `pkg/memory`) uses it, handing the whole log plus the query to a
+model in one call to decide what's relevant — a second real implementation
+is what keeps `Memory`'s interface honest about not mandating "most
+recent." The simplest version needs nothing beyond the wiring:
 
 ```go
 const memorizeInstruction = `Does the user's latest message state durable
@@ -359,9 +375,10 @@ drop the concept entirely, without touching `pkg/`.
 
 Downstream, the demo reads it back with a small `speakerOf(r *brain.Run)
 string` helper wherever it needs it: to tell the model who it's talking to
-(a custom `announceSpeaker` node, since `Situation` doesn't know about
-speakers either), to tag memorized facts, and to carry identity into
-background jobs by adding `"speaker": speakerOf(r)` to the payload map
+(inside its own `situation` node — see [Time and situation
+awareness](#time-and-situation-awareness-story-8)), to tag memorized
+facts, and to carry identity into background jobs by adding `"speaker":
+speakerOf(r)` to the payload map
 `Go`/`GoAt` already take — `Run.Vars` is seeded from that payload when the
 background pipeline runs, so no extra plumbing is needed there either.
 
@@ -453,7 +470,7 @@ run.
 Config-defined, fires forever without any durability of its own:
 
 ```go
-Crons: []brain.Cron{{Daily: "21:00", Pipeline: "nightly-review"}},
+Crons: []cron.Cron{{Daily: "21:00", Pipeline: "nightly-review"}},
 ```
 
 Self-installed, one-shot, decided by the brain mid-conversation:
@@ -466,12 +483,26 @@ brain.GoAt(func(r *brain.Run) time.Time {
 
 ### Time and situation awareness (story 8)
 
+No engine node for this — `time.Now()` is already ambient via the stdlib,
+so there's nothing for `pkg/brain` to inject. Write a plain `brain.Func`:
+
 ```go
-brain.Situation("House quiet hours are 22:00 to 07:00; avoid noisy appliances then."),
+func situation(_ context.Context, r *brain.Run) error {
+	now := time.Now()
+	msg := fmt.Sprintf("Current situation: it is %s, %s (%s).\n"+
+		"House quiet hours are 22:00 to 07:00; avoid noisy appliances then.\n",
+		now.Format("Monday, 2 January 2006"), now.Format("15:04"), now.Format("MST"))
+	r.Messages = append([]model.Message{{Role: "system", Content: msg}}, r.Messages...)
+	return nil
+}
 ```
 
-Put it early in `Chat`, right after `Prompt`, so every downstream node and
-the final reply sees it.
+Put `brain.Func(situation)` early in `Chat`, right after `Prompt`, so every
+downstream node and the final reply sees it. This is exactly what
+`cmd/jarvis-demo`'s `situation` function does — and since it's a plain
+`Func`, it can freely read anything else on `Run` (speaker identity from
+`Vars`, whatever else the brain tracks) in the same message, which the old
+engine-owned `Situation` node never could.
 
 ### Choosing the right model for the job (story 9)
 

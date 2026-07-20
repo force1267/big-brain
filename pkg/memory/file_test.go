@@ -35,7 +35,7 @@ func TestFileRememberRecallAndSurviveReopen(t *testing.T) {
 
 	// reopen: facts must survive — this is the persistence promise
 	m = open(t, path)
-	got, err := m.Recall(ctx, 0)
+	got, err := m.Recall(ctx, "", 0)
 	if err != nil {
 		t.Fatalf("Recall: %v", err)
 	}
@@ -52,14 +52,14 @@ func TestFileRecallLimitReturnsNewest(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got, err := m.Recall(ctx, 2)
+	got, err := m.Recall(ctx, "", 2)
 	if err != nil || len(got) != 2 || got[0].Content != "two" || got[1].Content != "three" {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 }
 
 func TestFileRecallEmpty(t *testing.T) {
-	got, err := open(t, filepath.Join(t.TempDir(), "m.jsonl")).Recall(context.Background(), 10)
+	got, err := open(t, filepath.Join(t.TempDir(), "m.jsonl")).Recall(context.Background(), "", 10)
 	if err != nil || len(got) != 0 {
 		t.Fatalf("got %+v, %v", got, err)
 	}
@@ -86,7 +86,7 @@ func TestMockMemory(t *testing.T) {
 	if err := m.Remember(context.Background(), Fact{Content: "x"}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := m.Recall(context.Background(), 1)
+	got, err := m.Recall(context.Background(), "", 1)
 	if err != nil || len(got) != 1 || got[0].Content != "x" {
 		t.Fatalf("got %+v, %v", got, err)
 	}

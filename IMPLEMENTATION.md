@@ -51,6 +51,50 @@ cmd/jarvis-demo/   reference brain; pkg-only; ~30 lines
 Naming per Effective Go: short lower-case package names, no stutter —
 `brain.Graph`, `model.Role`, `serve.Serve` (call sites read well).
 
+This box is the slice-1 snapshot, kept for history — later slices grew
+`pkg/` well past it. Current layout, and why each package exists:
+
+```
+pkg/brain/    graph runtime: Node, Run, Brain, control flow, model calls,
+              memory/background nodes. Composes the four leaf packages
+              below; owns none of their types.
+pkg/model/    Role indirection + Model interface + OpenAI client. Leaf:
+              no deps on any other pkg/ package.
+pkg/memory/   Memory interface + two implementations (OpenFile: recency;
+              OpenLLM: one model call judges relevance over the full log).
+              Leaf except for OpenLLM's dependency on pkg/model — the one
+              interface→implementation edge that isn't a pure leaf,
+              because judging relevance requires a model call.
+pkg/job/      Store interface (durable, at-least-once) + Job (envelope +
+              RunAt readiness gate + a free-form Source provenance tag).
+              Leaf: no deps.
+pkg/notify/   Channel interface (notify.go) + one file per implementation
+              (webhook.go; Log lives with the interface as the always-
+              available fallback). Leaf: no deps.
+pkg/cron/     Cron declaration + Next(now) — pure schedule math, split out
+              once it became clear "when does this fire" is infrastructure
+              like model/memory/job/notify, not brain plumbing. Leaf: no
+              deps.
+pkg/serve/    HTTP serving, config loading, job runner, cron runner. The
+              only pkg/ package that reaches into internal/ (wire formats,
+              config, logging, telemetry) and the only one that picks
+              concrete implementations (OpenFile, Webhook, OpenAI) from
+              env config.
+internal/     openai, anthropic (wire formats + SSE), config, logging,
+              telemetry — invisible to brain authors, reachable only from
+              pkg/serve and internal/app.
+cmd/jarvis-demo/  reference brain; pkg-only.
+cmd/cli/          thin entrypoint bridging internal/app to the OS.
+```
+
+No cycles: every edge points from `brain`/`serve` down to a leaf, never
+back up, and `internal/` never imports `pkg/`. `pkg/brain` composing all
+five leaf packages (`model`, `memory`, `job`, `notify`, `cron`) — and
+nothing composing `brain` except `serve` — is the deliberate shape:
+infrastructure stays ignorant of pipelines, business logic (`brain`) stays
+ignorant of HTTP and config, and only `serve` is allowed to know about
+both.
+
 ## Build order (decided in PRODUCT.md)
 
 Vertical slices in story order: 1 → 4 → 2+3 → 5 → 6+7 → 8+10. Each slice

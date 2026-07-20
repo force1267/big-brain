@@ -472,3 +472,53 @@ Updated docs/authoring-guide.md throughout (Brain/Run structs, Context &
 effects, Notify reference row, memory + speaker-identity recipes, config
 section) per CLAUDE.md rule 5. `grep -rn Speaker pkg/` now returns nothing.
 Full suite green under gofmt/vet/test.
+
+## 2026-07-20 — Dependency-graph audit acted on: 5 findings fixed (session 9)
+
+Analyzed pkg/'s import graph and reasoned through five specific concerns
+raised about package ownership and interface shape (not deferring to
+IMPLEMENTATION.md — updated it where it was stale instead). Agreed and
+implemented four; pushed back on a fifth with a lighter alternative:
+
+1. **pkg/cron extracted.** `Cron{Every,Daily,Pipeline}` and the next-fire
+   algorithm (`nextCron`, previously split across pkg/brain's type and
+   pkg/serve's logic) now live together in a new leaf package, `pkg/cron`
+   (`Cron`, `Next`). `Brain.Crons []cron.Cron` — brain declares crons the
+   way it declares Webhooks, doesn't own the scheduling type.
+2. **brain.Situation removed.** PRODUCT.md always classified time/system
+   awareness as ambient *context*, not a *node* — the Node implementation
+   was already a taxonomy mismatch, and its static `notes ...string` could
+   never carry per-request dynamic content (the exact bug behind last
+   session's speaker workaround). time.Now() needs no engine help; deleted
+   the node, documented the five-line brain.Func recipe instead.
+   cmd/jarvis-demo's `situation` function replaces it, folded together
+   with the (already-custom) speaker announcement.
+3. **job.Job.Source added** (partial agreement): rejected a `Trigger`
+   interface as premature — every current trigger reduces to "run now" or
+   "run at time T," and an interface with one implementation is exactly
+   the speculative-generality trap. Added a plain `Source string`
+   provenance tag instead ("cron", "webhook:door", "self") for
+   logs/debugging, set at each enqueue site, no scheduling role.
+4. **pkg/memory redesigned around a second implementation.** `Memory`'s
+   doc no longer mandates "most recent, newest last" (that policy moved to
+   OpenFile's own doc); `Recall` gained a `query string` param. Built
+   `OpenLLM(path, model.Model)` — same append-only JSONL log as OpenFile,
+   but Recall hands the whole log plus query to one model call that
+   decides relevance (JSON array of fact indices, tolerant of
+   prose-wrapped output like brain.Extract). This is the first pkg/
+   leaf-to-leaf edge (memory → model) — justified because judging
+   relevance genuinely requires a model call, unlike the other leaves.
+   RecallFacts now passes the latest message's content as query.
+5. **pkg/notify split.** notify.go keeps Message/Channel/ErrSend/Log;
+   webhook.go holds the Webhook implementation — mirrors the file.go split
+   pkg/memory and pkg/job already used, so multiple implementation files
+   next to a slim interface file signal "extensible" on sight.
+
+IMPLEMENTATION.md's package-layout section (frozen at slice 1) got a
+"current layout" addendum instead of being rewritten — it's meant as
+history, but was silently missing every package added since, which risked
+misleading a reader about pkg/'s actual shape.
+
+Verified after each change: no import cycles (internal/ never imports
+pkg/; leaves never import each other except the new memory→model edge);
+full suite green under go vet + go test -race; gofmt clean.

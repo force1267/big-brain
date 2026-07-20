@@ -199,27 +199,6 @@ func TestParallelConcurrentSetVar(t *testing.T) {
 	}
 }
 
-func TestSituationInjectsTimeAndNotes(t *testing.T) {
-	r := &Run{
-		Messages: []model.Message{{Role: "user", Content: "dishwasher?"}},
-	}
-	if err := Situation("Quiet hours are 22:00 to 07:00.").Run(context.Background(), r); err != nil {
-		t.Fatal(err)
-	}
-	sys := r.Messages[0]
-	if sys.Role != "system" {
-		t.Fatalf("first message = %+v", sys)
-	}
-	for _, want := range []string{"Current situation", "Quiet hours are 22:00 to 07:00."} {
-		if !strings.Contains(sys.Content, want) {
-			t.Fatalf("missing %q in %q", want, sys.Content)
-		}
-	}
-	if r.Messages[1].Content != "dishwasher?" {
-		t.Fatal("user message lost")
-	}
-}
-
 func TestFuncAdaptsClosures(t *testing.T) {
 	ran := false
 	var n Node = Func(func(context.Context, *Run) error { ran = true; return nil })

@@ -333,26 +333,6 @@ func TestWebhookEnqueuesDurableJob(t *testing.T) {
 	}
 }
 
-func TestNextCron(t *testing.T) {
-	now := time.Date(2026, 7, 19, 20, 0, 0, 0, time.UTC)
-
-	if got := nextCron(brain.Cron{Every: 5 * time.Minute}, now); !got.Equal(now.Add(5 * time.Minute)) {
-		t.Fatalf("every: %v", got)
-	}
-	// daily later today
-	if got := nextCron(brain.Cron{Daily: "21:00"}, now); !got.Equal(time.Date(2026, 7, 19, 21, 0, 0, 0, time.UTC)) {
-		t.Fatalf("daily today: %v", got)
-	}
-	// daily already passed → tomorrow
-	if got := nextCron(brain.Cron{Daily: "19:00"}, now); !got.Equal(time.Date(2026, 7, 20, 19, 0, 0, 0, time.UTC)) {
-		t.Fatalf("daily tomorrow: %v", got)
-	}
-	// invalid spec falls back to +24h instead of spinning
-	if got := nextCron(brain.Cron{Daily: "not-a-time"}, now); !got.Equal(now.Add(24 * time.Hour)) {
-		t.Fatalf("invalid: %v", got)
-	}
-}
-
 func TestStartJobsRunsDeferredJobWhenDue(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

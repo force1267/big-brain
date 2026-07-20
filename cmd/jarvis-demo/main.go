@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/force1267/big-brain/pkg/brain"
+	"github.com/force1267/big-brain/pkg/cron"
 	"github.com/force1267/big-brain/pkg/memory"
 	"github.com/force1267/big-brain/pkg/model"
 	"github.com/force1267/big-brain/pkg/serve"
@@ -102,13 +103,21 @@ func speakerOf(r *brain.Run) string {
 	return s
 }
 
-// announceSpeaker tells the model who it's talking to, the way pkg/brain's
-// Situation node used to before speaker identity moved out of pkg/.
-func announceSpeaker(_ context.Context, r *brain.Run) error {
+// situation gives the model time/system awareness (story 8) plus, when
+// known, who it's talking to. Neither needs engine help: time.Now() is
+// already ambient via the stdlib, and speaker identity is this brain's
+// own concept — pkg/brain provides no Situation node, on purpose (see
+// docs/authoring-guide.md).
+func situation(_ context.Context, r *brain.Run) error {
+	now := time.Now()
+	var b strings.Builder
+	fmt.Fprintf(&b, "Current situation: it is %s, %s (%s).\n",
+		now.Format("Monday, 2 January 2006"), now.Format("15:04"), now.Format("MST"))
+	b.WriteString("House quiet hours are 22:00 to 07:00; avoid noisy appliances then.\n")
 	if spk := speakerOf(r); spk != "" {
-		r.Messages = append([]model.Message{{Role: "system",
-			Content: "You are talking to " + spk + "."}}, r.Messages...)
+		b.WriteString("You are talking to " + spk + ".\n")
 	}
+	r.Messages = append([]model.Message{{Role: "system", Content: b.String()}}, r.Messages...)
 	return nil
 }
 
@@ -190,7 +199,7 @@ func checkWeather(_ context.Context, r *brain.Run) error {
 }
 
 func checkRSVPs(ctx context.Context, r *brain.Run) error {
-	facts, err := r.Memory.Recall(ctx, 0)
+	facts, err := r.Memory.Recall(ctx, "", 0)
 	if err != nil {
 		return err
 	}
@@ -236,9 +245,10 @@ func main() {
 		Name: "jarvis",
 		Chat: []brain.Node{
 			brain.Prompt(persona),
-			brain.Func(announceSpeaker),
-			// story 8: time/situation awareness, no per-request plumbing
-			brain.Situation("House quiet hours are 22:00 to 07:00; avoid noisy appliances then."),
+			// story 8: time/situation awareness + speaker identity — both
+			// this brain's own composition of stdlib time and Run.Vars,
+			// not engine-provided nodes.
+			brain.Func(situation),
 			brain.RecallFacts(50, recallNote),
 			brain.Extract[intent]("fast", classify, "intent"),
 			brain.If(isAddGuest, brain.Seq(
@@ -301,7 +311,7 @@ Give a one-sentence reason.`, "verdict"),
 			},
 		},
 		Webhooks: map[string]string{"door": "unknown-face"},
-		Crons:    []brain.Cron{{Daily: "21:00", Pipeline: "nightly-review"}},
+		Crons:    []cron.Cron{{Daily: "21:00", Pipeline: "nightly-review"}},
 	}
 
 	if err := serve.Run(ctx, jarvis, serve.WithPrepare(resolveSpeaker())); err != nil {

@@ -42,7 +42,7 @@ func goNode(pipeline string, payload func(*Run) map[string]any, when func(*Run) 
 		if r.Enqueue == nil {
 			return ErrNoEnqueue
 		}
-		j := job.Job{ID: uuid.NewString(), Pipeline: pipeline, At: time.Now()}
+		j := job.Job{ID: uuid.NewString(), Pipeline: pipeline, At: time.Now(), Source: "self"}
 		if payload != nil {
 			j.Payload = payload(r)
 		}

@@ -19,13 +19,15 @@ var ErrNoMemory = errors.New("no memory bound to run")
 // verbatim, one per line — use them for domain guidance on how the model
 // should weigh the facts. If a fact's Content needs attribution (whose it
 // is, what it's about), encode that in Content when you Remember it — the
-// engine keeps no such concept. The model judges relevance itself.
+// engine keeps no such concept. The query passed to Recall is the latest
+// message's content — how (or whether) that's used to judge relevance is
+// entirely the bound Memory implementation's choice.
 func RecallFacts(limit int, notes ...string) Node {
 	return Func(func(ctx context.Context, r *Run) error {
 		if r.Memory == nil {
 			return ErrNoMemory
 		}
-		facts, err := r.Memory.Recall(ctx, limit)
+		facts, err := r.Memory.Recall(ctx, latestMessage(r.Messages), limit)
 		if err != nil {
 			return err
 		}
@@ -43,6 +45,16 @@ func RecallFacts(limit int, notes ...string) Node {
 		r.Messages = append([]model.Message{{Role: "system", Content: b.String()}}, r.Messages...)
 		return nil
 	})
+}
+
+// latestMessage returns the content of the last message in msgs, or "" if
+// there are none. Nodes prepend system messages, so the last entry is
+// always the most recent actual turn regardless of pipeline shape.
+func latestMessage(msgs []model.Message) string {
+	if len(msgs) == 0 {
+		return ""
+	}
+	return msgs[len(msgs)-1].Content
 }
 
 type memorized struct {

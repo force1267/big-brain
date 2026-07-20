@@ -7,6 +7,9 @@ type Mock struct {
 	Facts       []Fact
 	RememberErr error
 	RecallErr   error
+	// LastQuery records the query Recall was last called with, for tests
+	// that assert on what a node passed.
+	LastQuery string
 }
 
 var _ Memory = (*Mock)(nil)
@@ -20,8 +23,10 @@ func (m *Mock) Remember(_ context.Context, f Fact) error {
 	return nil
 }
 
-// Recall implements Memory.
-func (m *Mock) Recall(_ context.Context, limit int) ([]Fact, error) {
+// Recall implements Memory, ignoring relevance (like OpenFile: most
+// recent, capped at limit) since tests care about wiring, not ranking.
+func (m *Mock) Recall(_ context.Context, query string, limit int) ([]Fact, error) {
+	m.LastQuery = query
 	if m.RecallErr != nil {
 		return nil, m.RecallErr
 	}

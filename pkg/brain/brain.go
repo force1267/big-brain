@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 
+	"github.com/force1267/big-brain/pkg/cron"
 	"github.com/force1267/big-brain/pkg/job"
 	"github.com/force1267/big-brain/pkg/memory"
 	"github.com/force1267/big-brain/pkg/model"
@@ -24,16 +24,7 @@ type Brain struct {
 	Chat      []Node            // the pipeline the chat trigger runs
 	Pipelines map[string][]Node // named pipelines background jobs re-run by name
 	Webhooks  map[string]string // webhook trigger name → pipeline (POST /triggers/{name})
-	Crons     []Cron            // scheduled triggers defined by brain code
-}
-
-// Cron is a recurring trigger: Every for intervals, or Daily ("15:04",
-// local time) for once-a-day. Config-defined crons need no durability —
-// they reappear from brain code on startup.
-type Cron struct {
-	Every    time.Duration
-	Daily    string
-	Pipeline string
+	Crons     []cron.Cron       // scheduled triggers defined by brain code
 }
 
 // Run is the state of one pipeline run, shared by its nodes. Nodes read and

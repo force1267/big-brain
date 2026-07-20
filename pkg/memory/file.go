@@ -19,11 +19,10 @@ var (
 
 // OpenFile returns the zero-setup default Memory: an append-only JSONL
 // file. Existing facts are loaded; each Remember is appended and synced
-// before it is acknowledged.
-//
-// ponytail: recall is "most recent N", no relevance ranking — the model
-// reads the facts and judges relevance itself. A vector store becomes a
-// second Memory implementation when memories outgrow a context window.
+// before it is acknowledged. Recall ignores query and returns the most
+// recent facts, newest last — relevance judging is left to the caller
+// (typically the model reading them). See OpenLLM for a Memory that
+// instead uses query to pick facts out of the full log with a model call.
 func OpenFile(path string) (Memory, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
 	if err != nil {
@@ -72,7 +71,7 @@ func (m *fileMemory) Remember(_ context.Context, f Fact) error {
 	return nil
 }
 
-func (m *fileMemory) Recall(_ context.Context, limit int) ([]Fact, error) {
+func (m *fileMemory) Recall(_ context.Context, _ string, limit int) ([]Fact, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	facts := m.facts

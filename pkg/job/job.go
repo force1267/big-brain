@@ -16,6 +16,12 @@ type Job struct {
 	// RunAt defers execution: zero means run now. A future RunAt is a
 	// self-installed trigger — durable intent to act later.
 	RunAt time.Time `json:"run_at,omitzero"`
+	// Source is a free-form provenance tag ("cron", "webhook:door",
+	// "self") set by whoever enqueues the job. It plays no role in
+	// scheduling or execution — it exists purely so logs can answer "why
+	// did this job run" without the store caring what kinds of triggers
+	// exist.
+	Source string `json:"source,omitempty"`
 }
 
 // Due reports whether the job should run now.

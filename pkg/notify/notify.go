@@ -1,12 +1,8 @@
 package notify
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"net/http"
 
 	"github.com/sirupsen/logrus"
 )
@@ -22,43 +18,16 @@ type Message struct {
 }
 
 // Channel delivers notifications to the outside world. Channels are an
-// extensible family (see PRODUCT.md); the outgoing webhook is v1's one
-// built-in member.
+// extensible family (see PRODUCT.md); this file holds only the interface
+// and the always-available Log fallback — each real implementation gets
+// its own file (see webhook.go), so the package listing itself shows what
+// "extensible" means here.
 type Channel interface {
 	Notify(ctx context.Context, m Message) error
 }
 
-// Webhook returns the v1 built-in Channel: an HTTP POST of the Message as
-// JSON to url. It composes with any relay (Telegram bots, ntfy, ...).
-func Webhook(url string) Channel { return Monitored(webhook(url)) }
-
-type webhook string
-
-var _ Channel = webhook("")
-
-func (u webhook) Notify(ctx context.Context, m Message) error {
-	body, err := json.Marshal(m)
-	if err != nil {
-		return fmt.Errorf("%w: %w", ErrSend, err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, string(u), bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("%w: %w", ErrSend, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("%w: %w", ErrSend, err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("%w: status %d", ErrSend, resp.StatusCode)
-	}
-	return nil
-}
-
-// Log returns the fallback Channel used when no webhook is configured: it
-// logs the notification so nothing is silently dropped.
+// Log returns the fallback Channel used when no other channel is
+// configured: it logs the notification so nothing is silently dropped.
 func Log() Channel { return logChannel{} }
 
 type logChannel struct{}
