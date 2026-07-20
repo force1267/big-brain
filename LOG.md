@@ -567,3 +567,48 @@ been dead config. Wired proper backend selection instead:
 Updated docs/authoring-guide.md's config table and memory recipe. Full
 suite green (added config tests for the llm-backend path and invalid
 backend rejection).
+
+## 2026-07-20 — Live test against local gemma-4-e4b via LM Studio (session 10)
+
+Ran cmd/jarvis-demo against a real local model (LM Studio, google/gemma-4-e4b,
+http://localhost:1234) to smoke-test everything built/refactored this
+session. All ten reference stories passed, both protocols verified:
+
+- Story 1 (persona chat): passed, stream and non-stream.
+- Story 2 (ambient memory): "we're vegetarian now" → memorized, tagged
+  [dad] → later "what's for dinner" shaped a vegetarian answer unprompted.
+- Story 3 (speaker identity): dad and kid each set a dentist appointment;
+  each recalled only their own on asking, no cross-contamination.
+- Story 4+5 (intent → tool call, finish later): "add John" → instant "on
+  it" reply, background job (Source: "self"), door-camera call, fact
+  recorded, completion notification delivered.
+- Story 6 (reacting to the world): POST /triggers/door for a listed guest
+  → "Door opened"; for a stranger → "Alert" — verdict correctly grounded
+  in recalled guest-list facts.
+- Story 7 (acting on schedule): self-installed reminder fired on schedule
+  (Source: "self"); daily cron wiring confirmed structurally (not
+  live-waited — 21:00 daily).
+- Story 8 (time/situation awareness): correct real-world time reported,
+  reasoned about quiet hours via the demo's own situation func.
+- Story 9 (model roles): implicit throughout — "fast" role bound to gemma,
+  no provider name in brain code.
+- Story 10 (parallel fan-out): weather + RSVP checks ran concurrently,
+  wove into one reply.
+- Both protocols: /v1/chat/completions and /v1/messages, stream and
+  non-stream, correct SSE event sequences on both.
+
+One environmental quirk reproduced (already documented, not a bug):
+gemma spends a small max_tokens budget entirely on hidden reasoning over
+the Anthropic path, returning empty content — resolved by raising
+max_tokens; sampling params pass through faithfully by design.
+
+Follow-up from live-testing friction: the demo needed two hand-rolled
+Python HTTP servers (door camera, notify relay) to exercise stories 4-6
+meaningfully. Fixed by making cmd/jarvis-demo fully self-contained:
+startDummyWorld serves both stand-ins on a second port
+(JARVIS_DEMO_DUMMY_ADDR, default :8090), logged inline in the brain's own
+log; JARVIS_DOOR_URL and BIG_BRAIN_NOTIFY_URL default to it unless a
+deployer overrides them with real endpoints. `go run ./cmd/jarvis-demo`
+now exercises every story with nothing else to stand up. Verified live
+again against gemma after the change: same story-4/5 flow worked with
+zero manual servers, both dummy hits logged inline.

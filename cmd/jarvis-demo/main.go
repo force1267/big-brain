@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -237,7 +239,57 @@ func isAddGuest(r *brain.Run) bool {
 	return ok && it.Action == "add_guest" && it.Guest != ""
 }
 
+// --- dummy world: this brain's own two external dependencies -------------
+//
+// jarvis calls out to two things that don't exist in a laptop demo: a
+// door-camera actuator (JARVIS_DOOR_URL, hit by registerGuest) and a
+// notification relay (BIG_BRAIN_NOTIFY_URL, the engine's own outgoing
+// webhook channel). Standing up a real door lock and a real Telegram bot
+// isn't reasonable for "try the demo" — so this brain runs a tiny stand-in
+// for both on its own, on a second port, and points itself at it by
+// default. A real deployment overrides JARVIS_DOOR_URL and
+// BIG_BRAIN_NOTIFY_URL with the real endpoints; nothing here is pkg/'s
+// concern, it's this brain's own fixture.
+
+// startDummyWorld serves the door-camera and notify-relay stand-ins on
+// addr, logging whatever they receive so a live demo is visible end to
+// end without a second terminal.
+func startDummyWorld(addr string) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /door", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		log.Printf("[dummy door camera] %s", body)
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("POST /notify", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		log.Printf("[dummy notify relay] %s", body)
+		w.WriteHeader(http.StatusOK)
+	})
+	go func() {
+		if err := http.ListenAndServe(addr, mux); err != nil {
+			log.Printf("dummy world server: %v", err)
+		}
+	}()
+}
+
+// setDefaultEnv sets key to value unless the deployer already set it —
+// env vars remain the escape hatch to point at a real door lock or relay.
+func setDefaultEnv(key, value string) {
+	if os.Getenv(key) == "" {
+		os.Setenv(key, value)
+	}
+}
+
 func main() {
+	dummyAddr := os.Getenv("JARVIS_DEMO_DUMMY_ADDR")
+	if dummyAddr == "" {
+		dummyAddr = ":8090"
+	}
+	startDummyWorld(dummyAddr)
+	setDefaultEnv("JARVIS_DOOR_URL", "http://localhost"+dummyAddr+"/door")
+	setDefaultEnv("BIG_BRAIN_NOTIFY_URL", "http://localhost"+dummyAddr+"/notify")
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
