@@ -11,15 +11,15 @@ func TestLoad_Defaults(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if c.Env != EnvLocal || c.HTTP.Addr != ":8080" || c.Log.Level != "info" ||
-		c.Log.Format != "text" || c.Telemetry.Enabled || c.Telemetry.ServiceName != "wrapper" {
+		c.Log.Format != "text" || c.Telemetry.Enabled || c.Telemetry.ServiceName != "big-brain" {
 		t.Fatalf("unexpected defaults: %+v", c)
 	}
 }
 
 func TestLoad_EnvOverride(t *testing.T) {
-	t.Setenv("WRAPPER_ENV", EnvProduction)
-	t.Setenv("WRAPPER_HTTP_ADDR", ":9999")
-	t.Setenv("WRAPPER_TELEMETRY_ENABLED", "true")
+	t.Setenv("BIG_BRAIN_ENV", EnvProduction)
+	t.Setenv("BIG_BRAIN_HTTP_ADDR", ":9999")
+	t.Setenv("BIG_BRAIN_TELEMETRY_ENABLED", "true")
 
 	c, err := New().Load()
 	if err != nil {
@@ -31,7 +31,7 @@ func TestLoad_EnvOverride(t *testing.T) {
 }
 
 func TestLoad_InvalidEnv(t *testing.T) {
-	t.Setenv("WRAPPER_ENV", "staging")
+	t.Setenv("BIG_BRAIN_ENV", "staging")
 
 	_, err := New().Load()
 	if !errors.Is(err, ErrLoad) || !errors.Is(err, ErrInvalidEnv) {
@@ -40,9 +40,9 @@ func TestLoad_InvalidEnv(t *testing.T) {
 }
 
 func TestLoad_Models(t *testing.T) {
-	t.Setenv("WRAPPER_MODELS", "fast=gpt-4o-mini, smart = gpt-4o")
-	t.Setenv("WRAPPER_UPSTREAM_BASE_URL", "http://up")
-	t.Setenv("WRAPPER_UPSTREAM_API_KEY", "k")
+	t.Setenv("BIG_BRAIN_MODELS", "fast=gpt-4o-mini, smart = gpt-4o")
+	t.Setenv("BIG_BRAIN_UPSTREAM_BASE_URL", "http://up")
+	t.Setenv("BIG_BRAIN_UPSTREAM_API_KEY", "k")
 
 	c, err := New().Load()
 	if err != nil {
@@ -64,7 +64,7 @@ func TestLoad_ModelsEmpty(t *testing.T) {
 }
 
 func TestLoad_ModelsInvalid(t *testing.T) {
-	t.Setenv("WRAPPER_MODELS", "fast")
+	t.Setenv("BIG_BRAIN_MODELS", "fast")
 
 	_, err := New().Load()
 	if !errors.Is(err, ErrLoad) || !errors.Is(err, ErrInvalidModels) {
@@ -73,8 +73,8 @@ func TestLoad_ModelsInvalid(t *testing.T) {
 }
 
 func TestLoad_SpeakersAndMemory(t *testing.T) {
-	t.Setenv("WRAPPER_SPEAKERS", "key-dad=dad,key-kid=kid")
-	t.Setenv("WRAPPER_MEMORY_PATH", "/data/m.jsonl")
+	t.Setenv("BIG_BRAIN_SPEAKERS", "key-dad=dad,key-kid=kid")
+	t.Setenv("BIG_BRAIN_MEMORY_PATH", "/data/m.jsonl")
 
 	c, err := New().Load()
 	if err != nil {
@@ -89,7 +89,7 @@ func TestLoad_SpeakersAndMemory(t *testing.T) {
 }
 
 func TestLoad_SpeakersInvalid(t *testing.T) {
-	t.Setenv("WRAPPER_SPEAKERS", "just-a-key")
+	t.Setenv("BIG_BRAIN_SPEAKERS", "just-a-key")
 
 	_, err := New().Load()
 	if !errors.Is(err, ErrLoad) || !errors.Is(err, ErrInvalidSpeakers) {

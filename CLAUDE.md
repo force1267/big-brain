@@ -14,6 +14,11 @@ Anthropic-compatible APIs and is also embeddable as a library.
 4. **Every package has an `effective.go`** file: no imports, comments only,
    explaining what the package is, does, and how Effective Go justifies its
    existence.
+5. **Docs move with the code.** Any change to a `pkg/` interface, exported
+   function/type signature, or core concept (trigger, node, brain, dynamism
+   ladder, persistence promise) must update `docs/authoring-guide.md` in the
+   same change — not a follow-up. If the guide would be wrong after your
+   diff, the diff isn't done.
 
 ## Architecture rules
 
@@ -27,7 +32,7 @@ Anthropic-compatible APIs and is also embeddable as a library.
 - Tests cover happy, unhappy, edge cases and every branch. Test quality over
   coverage numbers.
 - Cross-cutting: `logrus` for logs, `viper` for config, 12-factor — anything
-  environment-dependent comes from env vars (prefix `WRAPPER_`).
+  environment-dependent comes from env vars (prefix `BIG_BRAIN_`).
 - Errors: each package defines sentinel errors (`var ErrX = errors.New(...)`)
   and wraps causes: `fmt.Errorf("%w: %w", ErrX, err)`. Every layer adds its
   own context on the way up.

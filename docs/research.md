@@ -36,7 +36,7 @@ exact wire format). Endpoints are plain HTTP + SSE streaming.
 ## Cross-cutting
 
 - Logs: `sirupsen/logrus` (MIT) — required by project rules, matches gateway.
-- Config: `spf13/viper` (MIT) — required; env-first, 12-factor, prefix `WRAPPER_`.
+- Config: `spf13/viper` (MIT) — required; env-first, 12-factor, prefix `BIG_BRAIN_`.
 - Metrics/traces: `go.opentelemetry.io/otel` (Apache-2.0) — noop locally, OTLP gRPC in production.
 
 All choices are permissive (MIT/Apache-2.0/ISC/BSD) with no paid tier behind them.

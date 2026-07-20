@@ -1,4 +1,4 @@
-// Command homeassistant is the reference brain. It deliberately uses only
+// Command jarvis-demo is the reference brain. It deliberately uses only
 // pkg/ — it is executable documentation for external brain authors, so it
 // must not reach anything they cannot (see IMPLEMENTATION.md).
 package main

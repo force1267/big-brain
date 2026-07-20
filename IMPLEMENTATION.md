@@ -30,7 +30,7 @@ brain author's main.go
   pkg package outgrows its home — extraction later is mechanical, a
   premature boundary is not.
 - **Deliberate deviation from CLAUDE.md's "initialization lives in
-  `internal/`":** the reference brain `cmd/homeassistant` uses only
+  `internal/`":** the reference brain `cmd/jarvis-demo` uses only
   `pkg/`, exactly like an external author would. It is executable
   documentation; if it needs private wiring, the pkg API is defective —
   fix the API. (Logged in `LOG.md`.)
@@ -45,7 +45,7 @@ pkg/model/         model roles (fast/smart/cheap...) + provider clients
 pkg/serve/         Serve(brain): OpenAI-compatible chat completions +
                    streaming + /models
 internal/openai/   wire types + SSE — authors never see these
-cmd/homeassistant/ reference brain; pkg-only; ~30 lines
+cmd/jarvis-demo/   reference brain; pkg-only; ~30 lines
 ```
 
 Naming per Effective Go: short lower-case package names, no stutter —
@@ -58,13 +58,13 @@ is done when its story passes end to end against a real off-the-shelf
 client. Never build a layer (all nodes, all triggers) ahead of the slice
 that needs it.
 
-**Slice-1 definition of done:** `cmd/homeassistant` compiles from `pkg/`
+**Slice-1 definition of done:** `cmd/jarvis-demo` compiles from `pkg/`
 alone; `curl` (or any OpenAI SDK) against it returns a streamed persona
 reply; `/models` lists the one brain; `gofmt` clean, `go vet` clean,
 tests green.
 
 **Write the author code first.** Each slice starts by writing (or
-extending) `cmd/homeassistant` as the spec the engine must satisfy, then
+extending) `cmd/jarvis-demo` as the spec the engine must satisfy, then
 building the pkg surface until it compiles and the story passes.
 
 ## Requirements carried from product decisions
@@ -97,7 +97,7 @@ building the pkg surface until it compiles and the story passes.
 - Sentinel errors per package (`var ErrX = errors.New(...)`), wrap with
   `fmt.Errorf("%w: %w", ErrX, err)`, context added at every layer.
 - `logrus` for logs; `viper` for config; all environment-dependent
-  values from env vars prefixed `WRAPPER_` (12-factor). Role→model
+  values from env vars prefixed `BIG_BRAIN_` (12-factor). Role→model
   binding is the first such config.
 - OTel metrics: noop/stdout locally, OTLP in production, selected by
   env; metric-bearing interfaces get `MonitoredX` wrappers in the

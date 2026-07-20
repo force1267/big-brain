@@ -1,5 +1,5 @@
 // Package config loads all runtime configuration from environment
-// variables (12-factor, prefix WRAPPER_) via viper and exposes it as a
+// variables (12-factor, prefix BIG_BRAIN_) via viper and exposes it as a
 // plain Config value behind the Loader interface.
 //
 // What it is: the single source of truth for environment-derived settings.

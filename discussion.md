@@ -231,7 +231,7 @@ roles, streaming, serving) while staying thin. Then: 4 (structured
 output/tools/conditionals), 2+3 (memory + speaker identity), 5
 (continuation + notify + durable intent — hardest engine work, done after
 the run model is proven), 6+7 (more triggers), 8+10 (context, fan-out).
-The slice-1 author code (`cmd/homeassistant`) is written *first*, as the
+The slice-1 author code (`cmd/jarvis-demo`) is written *first*, as the
 spec the engine must satisfy.
 
 ## Engine internals — pkg/ vs internal/

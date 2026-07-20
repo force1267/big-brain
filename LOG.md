@@ -370,3 +370,38 @@ plumbed into pkg/.
   cleanup restores a noop global provider (nil panics — learned by
   test). Full suite green under -race; live smoke with telemetry
   disabled unchanged.
+
+## 2026-07-20 — Rename cleanup: jarvis-demo, cmd/cli (session 5)
+
+Cosmetic cleanup, no behavior change: `cmd/homeassistant` → `cmd/jarvis-demo`
+(it's a proof-of-concept reference brain, name should say so) and
+`cmd/wrapper` → `cmd/cli` (generic entrypoint name). Updated all references
+in code comments, README, IMPLEMENTATION.md, discussion.md. `go build ./...`
+clean. Historical LOG.md entries above keep the old names as written — log is
+append-only history, not live documentation.
+
+## 2026-07-20 — Authoring guide + README overhaul (session 5, continued)
+
+- `docs/authoring-guide.md` — the developer-facing manual for brain authors:
+  mental model, quickstart, concepts (Brain, triggers, nodes/Run, ad-hoc
+  Func nodes, ambient context, model roles, dynamism ladder), a full node
+  reference table, one worked recipe per reference story, the WRAPPER_ env
+  var table, testing guidance (mocks, direct Run construction, Handler +
+  httptest), and a pointer to `cmd/jarvis-demo` as the end-to-end example.
+- `CLAUDE.md` — added absolute rule 5: any change to a `pkg/` interface,
+  exported signature, or core concept must update the authoring guide in
+  the same change, not a follow-up.
+- `README.md` — rewritten: product framing, a runnable 60-second demo
+  (persona + ambient memory brain, curl against it, memory surviving across
+  sessions), a faculties summary, build/run commands including both
+  binaries, and a documentation map linking the new guide, PRODUCT.md,
+  IMPLEMENTATION.md, LOG.md, CLAUDE.md, docs/research.md.
+
+## 2026-07-20 — Env prefix WRAPPER_ → BIG_BRAIN_ (session 5, continued)
+
+Renamed the 12-factor env prefix everywhere: `internal/config/config.go`
+(`v.SetEnvPrefix`, comments), default `telemetry.service_name` from
+"wrapper" to "big-brain", `config_test.go` (Setenv calls + default
+assertion), and all doc references (README, CLAUDE.md, IMPLEMENTATION.md,
+docs/authoring-guide.md, docs/research.md). Historical LOG.md entries above
+keep the old name — append-only history. Full suite green.

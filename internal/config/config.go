@@ -17,11 +17,11 @@ const (
 var (
 	// ErrLoad wraps any failure while reading configuration.
 	ErrLoad = errors.New("config load failed")
-	// ErrInvalidEnv is returned when WRAPPER_ENV is not a known environment.
+	// ErrInvalidEnv is returned when BIG_BRAIN_ENV is not a known environment.
 	ErrInvalidEnv = errors.New("invalid environment")
-	// ErrInvalidModels is returned when WRAPPER_MODELS is not role=model pairs.
+	// ErrInvalidModels is returned when BIG_BRAIN_MODELS is not role=model pairs.
 	ErrInvalidModels = errors.New("invalid models binding")
-	// ErrInvalidSpeakers is returned when WRAPPER_SPEAKERS is not key=name pairs.
+	// ErrInvalidSpeakers is returned when BIG_BRAIN_SPEAKERS is not key=name pairs.
 	ErrInvalidSpeakers = errors.New("invalid speakers binding")
 )
 
@@ -51,7 +51,7 @@ type Config struct {
 	}
 
 	// Models binds brain-declared roles to upstream model names, parsed
-	// from WRAPPER_MODELS, e.g. "fast=gpt-4o-mini,smart=gpt-4o".
+	// from BIG_BRAIN_MODELS, e.g. "fast=gpt-4o-mini,smart=gpt-4o".
 	Models map[string]string
 
 	// Memory is where the zero-setup fact store lives.
@@ -71,7 +71,7 @@ type Config struct {
 	}
 
 	// Speakers maps API keys to speaker names, parsed from
-	// WRAPPER_SPEAKERS, e.g. "key-dad=dad,key-kid=kid". Empty means all
+	// BIG_BRAIN_SPEAKERS, e.g. "key-dad=dad,key-kid=kid". Empty means all
 	// callers are anonymous.
 	Speakers map[string]string
 }
@@ -91,7 +91,7 @@ var _ Loader = envLoader{}
 
 func (envLoader) Load() (Config, error) {
 	v := viper.New()
-	v.SetEnvPrefix("WRAPPER")
+	v.SetEnvPrefix("BIG_BRAIN")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
 
@@ -101,7 +101,7 @@ func (envLoader) Load() (Config, error) {
 	v.SetDefault("log.format", "text")
 	v.SetDefault("telemetry.enabled", false)
 	v.SetDefault("telemetry.endpoint", "localhost:4317")
-	v.SetDefault("telemetry.service_name", "wrapper")
+	v.SetDefault("telemetry.service_name", "big-brain")
 
 	var c Config
 	c.Env = v.GetString("env")
