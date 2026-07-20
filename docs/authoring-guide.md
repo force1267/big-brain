@@ -101,38 +101,59 @@ happens off the request path.
 ```go
 type Brain struct {
 	Name      string
-	Models    model.Models        // usually left nil; serve.Run binds it from config
-	Chat      []Node              // runs once per incoming chat/messages request
-	Pipelines map[string][]Node   // named graphs background jobs and triggers run by name
-	Webhooks  map[string]string   // trigger name → pipeline, exposed at POST /triggers/{name}
-	Crons     []cron.Cron         // schedules your brain runs on its own
+	Models    model.Models      // usually left nil; serve.Run binds it from config
+	Chat      []Node            // runs once per incoming chat/messages request
+	Pipelines map[string][]Node // named graphs background jobs and triggers run by name
 }
 ```
 
 `Chat` is the only pipeline the HTTP request itself runs. Everything else —
-webhooks, crons, self-scheduled follow-ups — runs a *named* pipeline from
-`Pipelines`, looked up by string. This is the one indirection that makes
-initiative possible: a pipeline doesn't care whether it was triggered by a
-person typing or a job firing at 3am.
+webhook triggers, scheduled triggers, self-scheduled follow-ups — runs a
+*named* pipeline from `Pipelines`, looked up by string. This is the one
+indirection that makes initiative possible: a pipeline doesn't care
+whether it was triggered by a person typing or a job firing at 3am.
 
-`cron.Cron` (package `pkg/cron`) lives outside `pkg/brain` on purpose:
-computing when a schedule next fires (interval math, daily-of-day
-wraparound) is infrastructure, the same kind of thing as `pkg/model` or
-`pkg/memory` — `Brain` declares crons the way it declares `Webhooks`, it
-doesn't own the scheduling type or algorithm.
+Notice `Brain` declares no triggers of its own beyond `Chat`. Earlier
+drafts of this engine had `Brain.Webhooks`/`Brain.Crons` fields — both
+were removed, because a "webhook trigger" and a "cron trigger" turned out
+to have no shared shape worth an interface, and hardcoding exactly two
+trigger kinds into `Brain` meant a third kind (a poller, a queue
+consumer, anything) had no way in without changing `pkg/`. See
+[Triggers](#triggers) below for what replaced them.
 
 ### Triggers
 
-A trigger is whatever starts a pipeline run. There are three:
+A trigger is whatever starts a pipeline run. There is exactly one thing
+every trigger, of any kind, ultimately does: call `Enqueue` to persist
+durable intent to run a named pipeline. `pkg/serve` exposes that single
+primitive and nothing else — it has no concept of "webhook" or "cron" as
+special cases, so there's no closed list of trigger kinds to pick from:
 
-- **chat** — the API request itself (`Chat`). Not a special case internally;
-  just the most common way a pipeline starts.
-- **webhook** — an external system POSTs to `/triggers/{name}`; you declare
-  the mapping in `Brain.Webhooks`.
-- **cron** — a schedule you declare in `Brain.Crons` (`cron.Cron{Every: ...}`
-  or `cron.Cron{Daily: "21:00", ...}`).
+- **chat** — the API request itself (`Chat`). Not a special case
+  internally; just the most common way a pipeline starts, and the one
+  case that doesn't go through `Enqueue` at all (it runs synchronously in
+  the request).
+- **anything else** — composed from two options passed to `serve.Run`:
 
-A fourth "trigger" is really a *capability*, not a wiring you declare
+  - `serve.WithEndpoint(pattern string, build func(enqueue serve.Enqueue) http.HandlerFunc) Option`
+    adds a route to the engine's own shared HTTP server. `build` runs once,
+    after `Enqueue` exists, and returns the actual per-request handler —
+    this is how a webhook-style trigger is built: decode the request,
+    call `enqueue`.
+  - `serve.WithBackground(fn func(ctx context.Context, enqueue serve.Enqueue)) Option`
+    runs `fn` once at startup, after `Enqueue` exists, to drive any
+    background trigger source — a schedule, a poller, a queue consumer —
+    using nothing but `fn`'s own goroutines, the stdlib, and `enqueue`.
+    This is how a cron-style trigger is built, using the plain,
+    dependency-free `cron.Next` utility from `pkg/cron`.
+
+  Both options exist specifically so `pkg/serve` never needs to know what
+  kinds of triggers exist — see the [Reacting to the
+  world](#reacting-to-the-world-story-6) and [Acting on
+  schedule](#acting-on-schedule-story-7) recipes for both built from these
+  two primitives.
+
+A further "trigger" is really a *capability*, not a wiring you declare
 upfront: **self-installed**. Any node, mid-run, can call `brain.Go` or
 `brain.GoAt` to schedule a pipeline to run later, on its own initiative.
 That's how "I'll text you when it's done" becomes real instead of a lie the
@@ -456,8 +477,9 @@ Pipelines: map[string][]brain.Node{
 
 ### Reacting to the world (story 6)
 
+The pipeline itself looks exactly like before — `Pipelines` is unchanged:
+
 ```go
-Webhooks: map[string]string{"door": "unknown-face"},
 Pipelines: map[string][]brain.Node{
 	"unknown-face": {
 		brain.RecallFacts(),
@@ -470,19 +492,61 @@ Pipelines: map[string][]brain.Node{
 },
 ```
 
+What changed is how the pipeline gets triggered — no `Brain.Webhooks`
+field anymore. Instead, compose the route and the enqueue yourself, and
+pass it to `serve.Run` as an option:
+
+```go
+func doorWebhook(enqueue serve.Enqueue) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var payload any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		j := job.Job{ID: uuid.NewString(), Pipeline: "unknown-face",
+			Payload: map[string]any{"payload": payload}}
+		if err := enqueue(r.Context(), j); err != nil {
+			http.Error(w, "could not accept event", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}
+}
+
+// in main():
+serve.Run(ctx, jarvis, serve.WithEndpoint("POST /triggers/door", doorWebhook))
+```
+
 An external system does `POST /triggers/door` with a JSON body; the body
-lands in `r.Vars["payload"]` when the pipeline runs. No person prompted this
-run.
+lands in `r.Vars["payload"]` when the pipeline runs (`runJob` seeds
+`Run.Vars` from the job's `Payload`). No person prompted this run.
 
 ### Acting on schedule (story 7)
 
-Config-defined, fires forever without any durability of its own:
+No `Brain.Crons` field either — compose `cron.Next` (a plain, dependency-free
+utility function, not part of any interface) with `Enqueue` yourself:
 
 ```go
-Crons: []cron.Cron{{Daily: "21:00", Pipeline: "nightly-review"}},
+func nightlyReview(ctx context.Context, enqueue serve.Enqueue) {
+	for {
+		next := cron.Next(cron.Cron{Daily: "21:00"}, time.Now())
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Until(next)):
+		}
+		enqueue(ctx, job.Job{ID: uuid.NewString(), Pipeline: "nightly-review"})
+	}
+}
+
+// in main():
+serve.Run(ctx, jarvis, serve.WithBackground(nightlyReview))
 ```
 
-Self-installed, one-shot, decided by the brain mid-conversation:
+Self-installed, one-shot, decided by the brain mid-conversation — this
+part is unchanged, since `Go`/`GoAt` were never declared on `Brain` in the
+first place:
 
 ```go
 brain.GoAt(func(r *brain.Run) time.Time {

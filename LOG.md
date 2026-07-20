@@ -612,3 +612,52 @@ deployer overrides them with real endpoints. `go run ./cmd/jarvis-demo`
 now exercises every story with nothing else to stand up. Verified live
 again against gemma after the change: same story-4/5 flow worked with
 zero manual servers, both dummy hits logged inline.
+
+## 2026-07-20 — Triggers decomposed into composable primitives, no Trigger interface (session 11)
+
+Multi-round design discussion (full narrative in discussion.md's new
+"Post-build: dependency-graph audit and the trigger redesign" section).
+Two Trigger-interface designs were proposed and rejected in review — one
+for putting ctx-blocking responsibility on implementers with no
+enforcement, the other for forcing an empty no-op Start on webhook
+triggers (a design smell: the interface's primary method had no business
+logic for that shape). Landed instead on: there's no need for a Trigger
+interface at all. "Start a pipeline" was already a primitive (Enqueue),
+just never exposed outside serve.Run.
+
+- `pkg/brain`: removed `Brain.Webhooks map[string]string` and `Brain.Crons
+  []cron.Cron`. `Brain` no longer imports pkg/cron at all — it carries no
+  trigger concept beyond `Chat` and named `Pipelines`.
+- `pkg/serve`: exported `Enqueue` as a named type; added `WithBackground(fn
+  func(ctx, enqueue))` (runs fn once at startup, for any non-HTTP trigger
+  source) and `WithEndpoint(pattern, build func(enqueue) http.HandlerFunc)`
+  (adds a route to the shared server, handler built once Enqueue exists).
+  Removed `startCrons` and the dedicated `/triggers/{name}` handler —
+  pkg/serve now has zero concept of "webhook" or "cron" as trigger kinds.
+- `pkg/cron` untouched (still a pure `Cron` + `Next`, zero deps) but no
+  longer imported by the engine anywhere — confirmed via `go list`: only
+  `cmd/jarvis-demo` imports it now.
+- `cmd/jarvis-demo`: door-camera webhook and nightly-review cron rebuilt
+  as `doorWebhook`/`nightlyReview` — a few lines of the brain's own code
+  composing `Enqueue` with an HTTP route or `cron.Next`, passed to
+  `serve.Run` via `WithEndpoint`/`WithBackground`. Live-verified against
+  gemma-4-e4b again: door webhook trigger still fires the unknown-face
+  pipeline correctly end to end.
+- Separately: resolved the "is notify.Webhook misnamed" question by
+  checking how Stripe/GitHub/Slack actually use the term (an outgoing
+  event-POST to a subscriber URL is the textbook use, not the atypical
+  one) — decided to keep the name and disambiguate in prose only
+  ("incoming"/"outgoing"), the same move Slack made for its own Incoming/
+  Outgoing Webhooks. PRODUCT.md already did this correctly;
+  docs/authoring-guide.md's trigger sections rewritten to match and to
+  drop all Brain.Webhooks/Brain.Crons references.
+- A third primitive — a node pausing mid-pipeline for an inbound HTTP
+  callback (`Run.Await`) — surfaced but deliberately deferred to its own
+  design pass; it's a different problem (dynamic route registration/
+  demuxing against a static `http.ServeMux`), not a trigger variant.
+
+Updated IMPLEMENTATION.md's "current layout" addendum (pkg/serve's
+description, pkg/cron's now-zero engine dependents) and
+docs/authoring-guide.md's Triggers section, Brain struct, and story 6/7
+recipes. Full suite green under gofmt/vet/test -race; live door-webhook
+trigger re-verified against a real model.

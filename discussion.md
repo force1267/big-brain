@@ -251,3 +251,83 @@ Decisions locked in `PRODUCT.md`: code-first authoring, one brain per
 process, the home assistant as the reference brain, the
 trigger/node/context taxonomy, and the dynamism ladder with levels 1–3 in
 v1 scope.
+
+## Post-build: dependency-graph audit and the trigger redesign (2026-07-20)
+
+After the ten reference stories shipped and were live-tested against a
+real local model, a dependency-graph review of `pkg/` surfaced five
+ownership questions, four of which were acted on directly (`pkg/cron`
+extracted from `pkg/brain`; `brain.Situation` removed as a taxonomy
+mismatch — PRODUCT.md always called time/system awareness ambient
+*context*, not a node; `job.Job` gained a plain `Source` provenance
+string instead of a `Trigger` interface, rejected as premature with only
+one readiness shape; `pkg/memory.Recall` lost its `limit` param, moved
+into each implementation's own constructor). The fifth — `pkg/notify`
+holding its webhook implementation inline instead of in its own file —
+was applied along with a full pass to make `cmd/jarvis-demo`
+self-contained (a built-in dummy door-camera/notify server) after live
+testing showed the demo otherwise needed two hand-rolled Python servers
+to exercise stories 4–6.
+
+That live test also reopened a terminology question: is `notify.Webhook`
+misnamed, since a "webhook" should mean something *else* calls *us*? The
+resolution, after checking how Stripe/GitHub/Slack actually use the term:
+the industry sense is looser than that — an outgoing event-POST to a
+subscriber-configured URL (exactly what `notify.Webhook` does) is the
+more textbook use, not the less textbook one. Slack resolved the same
+ambiguity years ago by keeping the word and qualifying it — "Incoming
+Webhooks" vs "Outgoing Webhooks" — rather than renaming one side.
+Decision: do the same. No identifier renames; fix the *prose* wherever
+both concepts appear together (`PRODUCT.md` already did this correctly —
+"incoming webhooks" / "outgoing webhook" — `docs/authoring-guide.md` did
+not, and was fixed).
+
+That reopened whether `Brain.Webhooks`/`Brain.Crons` should be owned by a
+`Trigger` interface instead of `Brain` — the same move as the `Cron`
+extraction, generalized. Two designs were proposed and both rejected on
+inspection:
+
+- **`Trigger.Start(ctx, enqueue) error`, blocking until `ctx` is done.**
+  Rejected: nothing enforces the "must block" contract, so a forgetful
+  implementer's trigger silently stops working with no error. The fix
+  isn't a better-documented contract — it's the engine owning the one
+  loop that waits on `ctx`, so implementers never write that code and
+  can't forget it.
+- **`Scheduled`/`Requested`, splitting by trigger shape.** Rejected on a
+  sharper diagnosis: webhook's `Start` had to be an empty no-op, because
+  all of its real logic lived in a `Mount`-returned HTTP handler. An
+  interface whose primary method routinely sits empty is telling you the
+  method is wrong, not that the implementation is trivial. Traced further
+  ("what business logic does a trigger actually have?"): a trigger isn't
+  a process with a lifecycle, it's a pure decision — "when do I next
+  fire" (cron) or "what does this request produce" (webhook) — neither of
+  which needs to know `ctx` exists.
+
+The actual fix, reached by decomposing further with three concrete
+examples (a node pausing mid-pipeline for an HTTP callback; a webhook
+trigger defined as "the HTTP part and the graph part, separately"; a
+nightly cron trigger where "time and trigger are separate concepts"):
+**there is no need for a `Trigger` interface at all.** "Starting a
+pipeline" was already a primitive — `Enqueue` — just never exposed outside
+`serve.Run`. Once it is, every trigger kind (existing or future) is a few
+lines of the brain author's own code composing `Enqueue` with either a
+timer (`pkg/cron`'s already-pure `Next` function, stdlib `time`) or an
+HTTP route (a new `serve.WithEndpoint` option, mirroring the equally new
+`serve.WithBackground` for non-HTTP sources). No interface to implement,
+no empty methods, and a genuinely new trigger kind (a Kafka consumer, a
+file watcher) needs zero `pkg/` changes — it's just more code calling
+`Enqueue`.
+
+A third, distinct primitive surfaced along the way — a *node*, not a
+top-level trigger, pausing a running pipeline until an inbound HTTP
+request arrives (`Run.Await`) — needed for "wait for a database write a
+human confirms via callback." Deliberately deferred: it's a different
+problem (dynamic per-run route registration/demuxing against Go's
+`http.ServeMux`, which supports neither), not a variant of the trigger
+question, and deserves its own focused design pass.
+
+Outcome: `Brain.Webhooks`/`Brain.Crons` removed; `serve.WithEndpoint` and
+`serve.WithBackground` added as the two composable primitives; `pkg/cron`
+kept exactly as it already was (a pure `Cron` + `Next`, zero deps) and is
+no longer imported by the engine at all — only by whatever brain code
+chooses to use it.

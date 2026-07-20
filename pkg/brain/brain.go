@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/force1267/big-brain/pkg/cron"
 	"github.com/force1267/big-brain/pkg/job"
 	"github.com/force1267/big-brain/pkg/memory"
 	"github.com/force1267/big-brain/pkg/model"
@@ -16,15 +15,18 @@ import (
 // ErrNode wraps a node failure during a pipeline run.
 var ErrNode = errors.New("pipeline node failed")
 
-// Brain is one assembled brain: what a big-brain process serves. The author
-// builds it in code; Models is bound at startup from deployment config.
+// Brain is one assembled brain: what a big-brain process serves. The
+// author builds it in code; Models is bound at startup from deployment
+// config. Brain carries no notion of triggers beyond Chat and the named
+// Pipelines background jobs reference — cron, webhooks, and any other way
+// to start a pipeline run are composed by the author using serve's
+// WithBackground/WithEndpoint, not declared here (see
+// docs/authoring-guide.md).
 type Brain struct {
 	Name      string
 	Models    model.Models
 	Chat      []Node            // the pipeline the chat trigger runs
 	Pipelines map[string][]Node // named pipelines background jobs re-run by name
-	Webhooks  map[string]string // webhook trigger name → pipeline (POST /triggers/{name})
-	Crons     []cron.Cron       // scheduled triggers defined by brain code
 }
 
 // Run is the state of one pipeline run, shared by its nodes. Nodes read and

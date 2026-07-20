@@ -56,8 +56,10 @@ This box is the slice-1 snapshot, kept for history — later slices grew
 
 ```
 pkg/brain/    graph runtime: Node, Run, Brain, control flow, model calls,
-              memory/background nodes. Composes the four leaf packages
-              below; owns none of their types.
+              memory/background nodes. Composes model/memory/job/notify;
+              owns none of their types. Carries no trigger concept beyond
+              Chat and named Pipelines — no Webhooks/Crons fields; see
+              pkg/serve below for how triggers actually get wired.
 pkg/model/    Role indirection + Model interface + OpenAI client. Leaf:
               no deps on any other pkg/ package.
 pkg/memory/   Memory interface + two implementations (OpenFile: recency;
@@ -71,15 +73,24 @@ pkg/job/      Store interface (durable, at-least-once) + Job (envelope +
 pkg/notify/   Channel interface (notify.go) + one file per implementation
               (webhook.go; Log lives with the interface as the always-
               available fallback). Leaf: no deps.
-pkg/cron/     Cron declaration + Next(now) — pure schedule math, split out
-              once it became clear "when does this fire" is infrastructure
-              like model/memory/job/notify, not brain plumbing. Leaf: no
-              deps.
-pkg/serve/    HTTP serving, config loading, job runner, cron runner. The
-              only pkg/ package that reaches into internal/ (wire formats,
-              config, logging, telemetry) and the only one that picks
-              concrete implementations (OpenFile, Webhook, OpenAI) from
-              env config.
+pkg/cron/     Cron declaration + Next(now) — pure schedule math. A plain
+              utility function, not part of any interface; brain authors
+              call it directly when composing their own scheduled
+              triggers (see pkg/serve). Leaf: no deps, and no longer
+              imported by pkg/brain or pkg/serve — only by whatever brain
+              code chooses to use it.
+pkg/serve/    HTTP serving, config loading, job runner. Exposes Enqueue —
+              the one primitive every trigger, of any kind, ultimately
+              calls — via two composable options: WithEndpoint (adds a
+              route to the shared server) and WithBackground (runs a
+              func at startup with Enqueue in hand). Webhook- and
+              cron-shaped triggers are brain-author code built from
+              these two primitives plus pkg/cron, not engine-owned
+              trigger kinds — pkg/serve has no concept of either. The
+              only pkg/ package that reaches into internal/ (wire
+              formats, config, logging, telemetry) and the only one that
+              picks concrete implementations (OpenFile, Webhook, OpenAI)
+              from env config.
 internal/     openai, anthropic (wire formats + SSE), config, logging,
               telemetry — invisible to brain authors, reachable only from
               pkg/serve and internal/app.
@@ -88,12 +99,13 @@ cmd/cli/          thin entrypoint bridging internal/app to the OS.
 ```
 
 No cycles: every edge points from `brain`/`serve` down to a leaf, never
-back up, and `internal/` never imports `pkg/`. `pkg/brain` composing all
-five leaf packages (`model`, `memory`, `job`, `notify`, `cron`) — and
-nothing composing `brain` except `serve` — is the deliberate shape:
-infrastructure stays ignorant of pipelines, business logic (`brain`) stays
-ignorant of HTTP and config, and only `serve` is allowed to know about
-both.
+back up, and `internal/` never imports `pkg/`. `pkg/brain` composing
+model/memory/job/notify — and nothing composing `brain` except `serve` —
+is the deliberate shape: infrastructure stays ignorant of pipelines,
+business logic (`brain`) stays ignorant of HTTP and config, and only
+`serve` is allowed to know about both. `pkg/cron` sits outside this
+composition entirely now — it's a utility any brain author's own code may
+import, not a dependency of the engine.
 
 ## Build order (decided in PRODUCT.md)
 

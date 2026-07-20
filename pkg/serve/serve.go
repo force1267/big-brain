@@ -18,7 +18,6 @@ import (
 	openaiwire "github.com/force1267/big-brain/internal/openai"
 	"github.com/force1267/big-brain/internal/telemetry"
 	"github.com/force1267/big-brain/pkg/brain"
-	"github.com/force1267/big-brain/pkg/cron"
 	"github.com/force1267/big-brain/pkg/job"
 	"github.com/force1267/big-brain/pkg/memory"
 	"github.com/force1267/big-brain/pkg/model"
@@ -38,12 +37,19 @@ var (
 	ErrNoMemoryModel = errors.New("no model bound to memory llm role")
 )
 
+// Enqueue persists durable intent to run a named pipeline — the one
+// primitive every trigger, of any kind, ultimately calls. Handed to
+// WithBackground and WithEndpoint once it exists, so brain author code
+// can compose its own trigger sources from it without pkg/serve needing
+// to know what kinds of triggers exist.
+type Enqueue func(context.Context, job.Job) error
+
 // Deps are the engine-owned ambient dependencies a run sees. Run builds
 // them from configuration; tests inject mocks.
 type Deps struct {
 	Memory  memory.Memory
 	Notify  notify.Channel
-	Enqueue func(context.Context, job.Job) error
+	Enqueue Enqueue
 	// Prepare, if set, runs once per incoming chat/messages request, right
 	// after the Run is built and before the pipeline executes, with the
 	// raw HTTP request. It lets the brain author inject whatever
@@ -51,16 +57,45 @@ type Deps struct {
 	// anything — via run.SetVar. The engine has no opinion on what
 	// belongs there.
 	Prepare func(*http.Request, *brain.Run)
+	// Background holds functions registered via WithBackground, each
+	// started once at startup, after Enqueue exists.
+	Background []func(context.Context, Enqueue)
+	// Endpoints holds routes registered via WithEndpoint, mounted onto
+	// the same shared server the chat/messages endpoints use.
+	Endpoints []endpoint
+}
+
+type endpoint struct {
+	pattern string
+	build   func(Enqueue) http.HandlerFunc
 }
 
 // Option configures Deps beyond what deployment config supplies. Pass one
-// to Run for behavior only the brain author's code can provide, such as
-// Prepare.
+// to Run for behavior only the brain author's code can provide.
 type Option func(*Deps)
 
 // WithPrepare sets Deps.Prepare.
 func WithPrepare(fn func(*http.Request, *brain.Run)) Option {
 	return func(d *Deps) { d.Prepare = fn }
+}
+
+// WithBackground registers fn to run once at startup, after Enqueue
+// exists, so it can drive any trigger source it likes — a schedule, a
+// poller, a queue consumer — using nothing but fn's own goroutines, the
+// stdlib, and enqueue. The engine has no concept of "trigger kinds"; this
+// is the whole extension point.
+func WithBackground(fn func(ctx context.Context, enqueue Enqueue)) Option {
+	return func(d *Deps) { d.Background = append(d.Background, fn) }
+}
+
+// WithEndpoint registers pattern on the engine's own shared HTTP server.
+// build runs once, after Enqueue exists, and returns the actual
+// per-request handler — so an HTTP-driven trigger always has a working
+// Enqueue to call, expressed entirely in the brain author's own code: the
+// route is one line, what it does to the graph is another, and neither
+// needs pkg/serve to know anything about "webhook triggers" as a concept.
+func WithEndpoint(pattern string, build func(enqueue Enqueue) http.HandlerFunc) Option {
+	return func(d *Deps) { d.Endpoints = append(d.Endpoints, endpoint{pattern: pattern, build: build}) }
 }
 
 // Run loads deployment configuration, binds the brain's model roles,
@@ -120,7 +155,9 @@ func Run(ctx context.Context, b *brain.Brain, opts ...Option) error {
 		opt(&deps)
 	}
 	deps.Enqueue = startJobs(ctx, b, store, &deps)
-	startCrons(ctx, b, deps.Enqueue)
+	for _, fn := range deps.Background {
+		go fn(ctx, deps.Enqueue)
+	}
 
 	srv := &http.Server{Addr: cfg.HTTP.Addr, Handler: Handler(b, deps)}
 	errc := make(chan error, 1)
@@ -144,7 +181,7 @@ func Run(ctx context.Context, b *brain.Brain, opts ...Option) error {
 // startJobs recovers pending jobs, then runs newly enqueued ones as they
 // arrive; deferred jobs (self-installed triggers) fire when due. The
 // returned enqueue persists intent before waking the runner.
-func startJobs(ctx context.Context, b *brain.Brain, store job.Store, deps *Deps) func(context.Context, job.Job) error {
+func startJobs(ctx context.Context, b *brain.Brain, store job.Store, deps *Deps) Enqueue {
 	wake := make(chan struct{}, 1)
 	sweep := func() time.Time {
 		next, err := store.Sweep(ctx, func(ctx context.Context, j job.Job) error {
@@ -189,27 +226,6 @@ func startJobs(ctx context.Context, b *brain.Brain, store job.Store, deps *Deps)
 	}
 }
 
-// startCrons enqueues a job every time a brain-defined schedule fires.
-// Recurring schedules need no durability: they reappear from brain code.
-func startCrons(ctx context.Context, b *brain.Brain, enqueue func(context.Context, job.Job) error) {
-	for _, c := range b.Crons {
-		go func(c cron.Cron) {
-			for {
-				next := cron.Next(c, time.Now())
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(time.Until(next)):
-				}
-				j := job.Job{ID: uuid.NewString(), Pipeline: c.Pipeline, At: time.Now(), Source: "cron"}
-				if err := enqueue(ctx, j); err != nil {
-					logrus.WithError(err).WithField("pipeline", c.Pipeline).Error("cron enqueue failed")
-				}
-			}
-		}(c)
-	}
-}
-
 // runJob executes one background job against its named pipeline.
 func runJob(ctx context.Context, b *brain.Brain, deps *Deps, j job.Job) error {
 	log := logrus.WithFields(logrus.Fields{"job": j.ID, "pipeline": j.Pipeline})
@@ -248,34 +264,10 @@ func Handler(b *brain.Brain, deps Deps) http.Handler {
 	mux.HandleFunc("POST /v1/messages", func(w http.ResponseWriter, r *http.Request) {
 		messages(b, deps, w, r)
 	})
-	mux.HandleFunc("POST /triggers/{name}", func(w http.ResponseWriter, r *http.Request) {
-		webhook(b, deps, w, r)
-	})
+	for _, ep := range deps.Endpoints {
+		mux.HandleFunc(ep.pattern, ep.build(deps.Enqueue))
+	}
 	return mux
-}
-
-// webhook fires a webhook trigger (story 6): the event becomes a durable
-// job, so a crash after 202 still runs the pipeline.
-func webhook(b *brain.Brain, deps Deps, w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	pipeline, ok := b.Webhooks[name]
-	if !ok {
-		openaiwire.WriteError(w, http.StatusNotFound, "no such trigger: "+name)
-		return
-	}
-	var payload any
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		openaiwire.WriteError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
-		return
-	}
-	j := job.Job{ID: uuid.NewString(), Pipeline: pipeline, At: time.Now(), Source: "webhook:" + name,
-		Payload: map[string]any{"payload": payload}}
-	if err := deps.Enqueue(r.Context(), j); err != nil {
-		logrus.WithError(err).Error("webhook enqueue failed")
-		openaiwire.WriteError(w, http.StatusInternalServerError, "could not accept event")
-		return
-	}
-	w.WriteHeader(http.StatusAccepted)
 }
 
 func completions(b *brain.Brain, deps Deps, w http.ResponseWriter, r *http.Request) {

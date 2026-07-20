@@ -299,11 +299,33 @@ func TestMessagesPrepareFromAPIKeyHeader(t *testing.T) {
 	}
 }
 
-func TestWebhookEnqueuesDurableJob(t *testing.T) {
+// webhookEndpoint is the shape a brain author composes with WithEndpoint
+// for an HTTP-driven trigger — the same pattern cmd/jarvis-demo uses for
+// its door-camera webhook. Kept local to this test: pkg/serve has no
+// concept of "webhook trigger" of its own to test.
+func webhookEndpoint(pipeline string) func(Enqueue) http.HandlerFunc {
+	return func(enqueue Enqueue) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			var payload any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			j := job.Job{Pipeline: pipeline, Payload: map[string]any{"payload": payload}}
+			if err := enqueue(r.Context(), j); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+		}
+	}
+}
+
+func TestWithEndpointEnqueuesDurableJob(t *testing.T) {
 	var got job.Job
-	b := &brain.Brain{Webhooks: map[string]string{"door": "unknown-face"}}
 	deps := Deps{Enqueue: func(_ context.Context, j job.Job) error { got = j; return nil }}
-	h := Handler(b, deps)
+	WithEndpoint("POST /triggers/door", webhookEndpoint("unknown-face"))(&deps)
+	h := Handler(&brain.Brain{}, deps)
 
 	req := httptest.NewRequest(http.MethodPost, "/triggers/door",
 		strings.NewReader(`{"event":"unrecognized_face","confidence":0.92}`))
@@ -320,16 +342,32 @@ func TestWebhookEnqueuesDurableJob(t *testing.T) {
 		t.Fatalf("payload = %+v", payload)
 	}
 
-	// unknown trigger and bad body
+	// unregistered route and bad body
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/triggers/nope", strings.NewReader(`{}`)))
 	if rec.Code != http.StatusNotFound {
-		t.Fatalf("unknown trigger status = %d", rec.Code)
+		t.Fatalf("unregistered route status = %d", rec.Code)
 	}
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/triggers/door", strings.NewReader(`{bad`)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad body status = %d", rec.Code)
+	}
+}
+
+func TestWithBackgroundRunsAtStartup(t *testing.T) {
+	ran := make(chan Enqueue, 1)
+	var deps Deps
+	WithBackground(func(_ context.Context, enqueue Enqueue) { ran <- enqueue })(&deps)
+	if len(deps.Background) != 1 {
+		t.Fatalf("Background = %+v", deps.Background)
+	}
+	deps.Background[0](context.Background(), deps.Enqueue)
+	select {
+	case got := <-ran:
+		_ = got
+	default:
+		t.Fatal("background func never ran")
 	}
 }
 

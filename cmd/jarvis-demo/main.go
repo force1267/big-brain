@@ -17,8 +17,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/force1267/big-brain/pkg/brain"
 	"github.com/force1267/big-brain/pkg/cron"
+	"github.com/force1267/big-brain/pkg/job"
 	"github.com/force1267/big-brain/pkg/memory"
 	"github.com/force1267/big-brain/pkg/model"
 	"github.com/force1267/big-brain/pkg/serve"
@@ -281,6 +284,56 @@ func setDefaultEnv(key, value string) {
 	}
 }
 
+// --- triggers: composed from serve's generic primitives, not declared --
+//
+// pkg/serve has no concept of "webhook trigger" or "cron trigger" — it
+// only exposes Enqueue (via WithEndpoint/WithBackground). What follows is
+// this brain's own composition of that primitive with an HTTP route (for
+// the door camera) and with cron.Next, a plain stdlib-style utility
+// function (for the nightly review), respectively.
+
+// doorWebhook is story 6's trigger: the door camera POSTs an event here,
+// and it becomes a durable job, so a crash after 202 still runs the
+// pipeline. The route ("POST /triggers/door") and this handler are the
+// entire "webhook trigger" — nothing else in the brain declares it.
+func doorWebhook(enqueue serve.Enqueue) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var payload any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		j := job.Job{ID: uuid.NewString(), Pipeline: "unknown-face", At: time.Now(),
+			Source: "webhook:door", Payload: map[string]any{"payload": payload}}
+		if err := enqueue(r.Context(), j); err != nil {
+			log.Printf("door webhook enqueue failed: %v", err)
+			http.Error(w, "could not accept event", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}
+}
+
+// nightlyReview is story 7's trigger: a plain goroutine driving
+// cron.Next, with no engine help beyond Enqueue. cron.Cron and cron.Next
+// are exported exactly so any brain can build a schedule like this one
+// without pkg/serve needing to know schedules exist.
+func nightlyReview(ctx context.Context, enqueue serve.Enqueue) {
+	schedule := cron.Cron{Daily: "21:00"}
+	for {
+		next := cron.Next(schedule, time.Now())
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Until(next)):
+		}
+		j := job.Job{ID: uuid.NewString(), Pipeline: "nightly-review", At: time.Now(), Source: "cron"}
+		if err := enqueue(ctx, j); err != nil {
+			log.Printf("nightly-review enqueue failed: %v", err)
+		}
+	}
+}
+
 func main() {
 	dummyAddr := os.Getenv("JARVIS_DEMO_DUMMY_ADDR")
 	if dummyAddr == "" {
@@ -362,11 +415,21 @@ Give a one-sentence reason.`, "verdict"),
 				brain.Notify("Nightly check-in done — I reviewed the household facts; all quiet."),
 			},
 		},
-		Webhooks: map[string]string{"door": "unknown-face"},
-		Crons:    []cron.Cron{{Daily: "21:00", Pipeline: "nightly-review"}},
 	}
 
-	if err := serve.Run(ctx, jarvis, serve.WithPrepare(resolveSpeaker())); err != nil {
+	err := serve.Run(ctx, jarvis,
+		serve.WithPrepare(resolveSpeaker()),
+		// story 6: reacting to the world — an HTTP endpoint composed from
+		// two things, in this brain's own code: the route, and where it
+		// lands in the graph. pkg/serve knows nothing about "webhook
+		// triggers" as a concept; this is all ordinary Go.
+		serve.WithEndpoint("POST /triggers/door", doorWebhook),
+		// story 7: acting on schedule — likewise composed from the
+		// stdlib-plain cron.Next utility and Enqueue; no engine concept
+		// of "cron triggers" either.
+		serve.WithBackground(nightlyReview),
+	)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
