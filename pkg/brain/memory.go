@@ -14,10 +14,13 @@ import (
 // ErrNoMemory is returned when a memory node runs without a Memory bound.
 var ErrNoMemory = errors.New("no memory bound to run")
 
-// RecallFacts returns a node that injects the brain's remembered facts as
-// a system message, tagged with whose fact each is and who is speaking
-// now. The model judges relevance itself.
-func RecallFacts(limit int) Node {
+// RecallFacts returns a node that injects the brain's remembered facts as a
+// system message, tagged with whose fact each is (or "shared" if no
+// speaker) and when, plus who is currently speaking. notes are appended
+// verbatim, one per line — use them for domain guidance on how the model
+// should weigh the facts (whose take priority, how to handle conflicts).
+// The model judges relevance itself.
+func RecallFacts(limit int, notes ...string) Node {
 	return Func(func(ctx context.Context, r *Run) error {
 		if r.Memory == nil {
 			return ErrNoMemory
@@ -34,11 +37,14 @@ func RecallFacts(limit int) Node {
 		for _, f := range facts {
 			who := f.Speaker
 			if who == "" {
-				who = "household"
+				who = "shared"
 			}
 			fmt.Fprintf(&b, "- [%s, %s] %s\n", who, f.At.Format("2006-01-02"), f.Content)
 		}
-		b.WriteString("Each fact is tagged [whose, when]. Facts tagged with a name belong to that person only; prefer the current speaker's and the household's facts.\n")
+		b.WriteString("Each fact is tagged [whose, when].\n")
+		for _, n := range notes {
+			b.WriteString(n + "\n")
+		}
 		if r.Speaker != "" {
 			fmt.Fprintf(&b, "The current speaker is %s.", r.Speaker)
 		}
@@ -51,20 +57,15 @@ type memorized struct {
 	Facts []string `json:"facts"`
 }
 
-const memorizeInstruction = `Does the user's latest message state durable
-facts worth remembering long-term (preferences, appointments, dates,
-relationships, standing household rules)? List them, each self-contained,
-in third person, saying "the speaker" for the person talking (never "the
-user"). Leave the list empty for small talk, questions, or one-off
-requests.`
-
-// Memorize returns a node that decides — via the model bound to role —
-// whether the latest exchange contains facts worth keeping, and remembers
-// them for the current speaker. This is ambient memory: the pipeline
-// decides, the user never says "remember this". Place it after Reply; the
-// pipeline keeps running once the reply has streamed.
-func Memorize(role model.Role) Node {
-	extract := Extract[memorized](role, memorizeInstruction, "_memorize")
+// Memorize returns a node that decides — via the model bound to role,
+// following instruction — whether the latest exchange contains facts worth
+// keeping, and remembers each one for the current speaker. instruction
+// must ask for a list of self-contained facts; the model's answer is
+// decoded into that list, nothing more. This is ambient memory: the
+// pipeline decides, the caller never says "remember this". Place it after
+// Reply; the pipeline keeps running once the reply has streamed.
+func Memorize(role model.Role, instruction string) Node {
+	extract := Extract[memorized](role, instruction, "_memorize")
 	return Func(func(ctx context.Context, r *Run) error {
 		if r.Memory == nil {
 			return ErrNoMemory

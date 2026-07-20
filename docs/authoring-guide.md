@@ -106,7 +106,7 @@ type Brain struct {
 	Pipelines map[string][]Node   // named graphs background jobs and triggers run by name
 	Webhooks  map[string]string   // trigger name → pipeline, exposed at POST /triggers/{name}
 	Crons     []Cron              // schedules your brain runs on its own
-	Speakers  map[string]string   // API key → speaker name; you populate this however you like
+	ResolveSpeaker func(*http.Request) string // resolves who's talking; nil = anonymous
 }
 ```
 
@@ -240,7 +240,7 @@ Grouped by what they do. All are in `pkg/brain` unless noted.
 |---|---|---|
 | `Prompt` | `Prompt(tmpl string) Node` | Renders `tmpl` (`text/template`, executed against `*Run`) and prepends it as a system message. |
 | `Situation` | `Situation(notes ...string) Node` | Injects current date/time/weekday/timezone, the speaker, and any standing notes you pass (quiet hours, house rules) as a system message. No manual prompt plumbing per request. |
-| `RecallFacts` | `RecallFacts(limit int) Node` | Injects the brain's remembered facts (tagged by whose and when) as a system message. `limit <= 0` means all. Requires `r.Memory`. |
+| `RecallFacts` | `RecallFacts(limit int, notes ...string) Node` | Injects the brain's remembered facts (tagged by whose and when, "shared" if no speaker) as a system message, plus any `notes` you pass — domain guidance on how to weigh them. `limit <= 0` means all. Requires `r.Memory`. |
 
 ### Model calls
 
@@ -268,7 +268,7 @@ Grouped by what they do. All are in `pkg/brain` unless noted.
 | Node | Signature | What it does |
 |---|---|---|
 | `RecallFacts` | see above | Reads memory into context. |
-| `Memorize` | `Memorize(role model.Role) Node` | Asks the model whether the latest exchange contains durable facts worth keeping; if so, stores each for the current speaker. Ambient — the user never says "remember this." Place after `Reply()` so it doesn't add latency to the answer. |
+| `Memorize` | `Memorize(role model.Role, instruction string) Node` | Asks the model, following `instruction`, whether the latest exchange contains durable facts worth keeping; if so, stores each for the current speaker. Ambient — the caller never says "remember this." Place after `Reply()` so it doesn't add latency to the answer. |
 
 ### Background work & notification
 
@@ -302,28 +302,38 @@ Recall before the model call, memorize after the reply so it never adds
 latency to the user-facing answer:
 
 ```go
+const memorizeInstruction = `Does the user's latest message state durable
+facts worth remembering long-term? List them, each self-contained, in third
+person. Leave the list empty for small talk, questions, or one-off requests.`
+
 Chat: []brain.Node{
 	brain.Prompt(persona),
 	brain.RecallFacts(50),
 	brain.Call("fast"),
 	brain.Reply(),
-	brain.Memorize("fast"),
+	brain.Memorize("fast", memorizeInstruction),
 },
 ```
+
+`RecallFacts` and `Memorize` are domain-neutral primitives — the wording is
+yours, the same way `Extract`'s `instruction` is. `cmd/jarvis-demo` passes
+household-flavored instruction text and a household-flavored guidance note
+(`recallNote`) as ordinary string arguments; a research-lab brain would
+pass its own instead.
 
 ### Speaker identity (story 3)
 
 Nothing to add to the pipeline — `r.Speaker` is already resolved by
-`serve.Run` from the caller's API credential, looked up in the
-`Brain.Speakers` map (`map[string]string`, API key → speaker name) you set
-when you build your `brain.Brain`. How you populate that map is entirely up
-to you — env vars, a config file, a database — the engine only resolves the
-header against whatever map you provide. Unknown or missing key resolves to
-an anonymous speaker, never an error. `cmd/jarvis-demo` reads its own
-`JARVIS_DEMO_SPEAKERS` env var (`key-dad=dad,key-kid=kid`) with plain
-`os.Getenv`, since that binding is demo-specific, not an engine concern.
-Just use `r.Speaker`, e.g. inside `Prompt`'s template (`{{.Speaker}}`) or in
-a `brain.Func`.
+`serve.Run`, once per request, by calling `Brain.ResolveSpeaker(r
+*http.Request) string` if you set one. Nil means every caller is anonymous,
+never an error. Both the credential scheme (bearer token, `x-api-key`, a
+cookie, mTLS) and where identities live (env, a config file, a database)
+are entirely up to you — the engine only calls the function you provide.
+`cmd/jarvis-demo` builds one that parses its own `JARVIS_DEMO_SPEAKERS` env
+var (`key-dad=dad,key-kid=kid`) into a map once at startup, then looks up
+the bearer token or `x-api-key` header on each call — that whole scheme is
+demo policy, not an engine concern. Once resolved, just use `r.Speaker`,
+e.g. inside `Prompt`'s template (`{{.Speaker}}`) or in a `brain.Func`.
 
 ### Intent → structured tool call (story 4)
 
@@ -486,10 +496,11 @@ None of this is brain code — it's how you deploy a given brain binary.
 | `BIG_BRAIN_JOBS_PATH` | `jobs.jsonl` | Zero-setup durable job log. |
 | `BIG_BRAIN_NOTIFY_URL` | — | Outgoing webhook URL; empty logs notifications instead of sending them. |
 
-Speaker identity (`Brain.Speakers`) is *not* engine config — it's a field
-you set on your `Brain` value however you like. `cmd/jarvis-demo` binds it
-from `JARVIS_DEMO_SPEAKERS` with `os.Getenv`, entirely outside the engine's
-config package; see [Speaker identity](#speaker-identity-story-3) above.
+Speaker identity (`Brain.ResolveSpeaker`) is *not* engine config — it's a
+function you set on your `Brain` value however you like. `cmd/jarvis-demo`
+builds one from `JARVIS_DEMO_SPEAKERS` with `os.Getenv`, entirely outside
+the engine's config package; see [Speaker identity](#speaker-identity-story-3)
+above.
 
 `memory`, `job`, and `notify` are all interfaces (`pkg/memory.Memory`,
 `pkg/job.Store`, `pkg/notify.Channel`); the JSONL files above are the

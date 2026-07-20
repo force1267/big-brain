@@ -31,6 +31,19 @@ Actions: "add_guest" (they want someone added to the door guest list),
 (anything else). For add_guest, "guest" is the person's name; otherwise
 leave it empty.`
 
+// recallNote is household-specific guidance on how to weigh recalled facts,
+// passed to the generic brain.RecallFacts node.
+const recallNote = `Facts tagged with a name belong to that person only; prefer the current speaker's and the shared household facts.`
+
+// memorizeInstruction is household-flavored wording for what's worth
+// remembering, passed to the generic brain.Memorize node.
+const memorizeInstruction = `Does the user's latest message state durable
+facts worth remembering long-term (preferences, appointments, dates,
+relationships, standing household rules)? List them, each self-contained,
+in third person, saying "the speaker" for the person talking (never "the
+user"). Leave the list empty for small talk, questions, or one-off
+requests.`
+
 // intent is the structured output of the classification stage (story 4).
 type intent struct {
 	Action string `json:"action"`
@@ -131,17 +144,25 @@ func isAddGuest(r *brain.Run) bool {
 	return ok && it.Action == "add_guest" && it.Guest != ""
 }
 
-// speakers parses JARVIS_DEMO_SPEAKERS ("key-dad=dad,key-kid=kid") into an
-// API-key → speaker-name map. This is demo-specific config, so it's read
-// locally with os.Getenv rather than through the engine's config package.
-func speakers() map[string]string {
+// resolveSpeaker parses JARVIS_DEMO_SPEAKERS ("key-dad=dad,key-kid=kid")
+// into an API-key → speaker-name map once, then looks up the bearer token
+// (OpenAI clients) or x-api-key (Anthropic clients) on each request. This
+// whole scheme — env-var config, header choice, flat-map lookup — is a
+// demo policy; brain.Brain.ResolveSpeaker lets any brain author plug in
+// something else entirely (JWTs, mTLS, a database).
+func resolveSpeaker() func(*http.Request) string {
 	m := map[string]string{}
 	for _, pair := range strings.Split(os.Getenv("JARVIS_DEMO_SPEAKERS"), ",") {
 		if k, v, ok := strings.Cut(strings.TrimSpace(pair), "="); ok {
 			m[strings.TrimSpace(k)] = strings.TrimSpace(v)
 		}
 	}
-	return m
+	return func(r *http.Request) string {
+		if k := r.Header.Get("x-api-key"); k != "" {
+			return m[k]
+		}
+		return m[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
+	}
 }
 
 func main() {
@@ -149,13 +170,13 @@ func main() {
 	defer stop()
 
 	jarvis := &brain.Brain{
-		Name:     "jarvis",
-		Speakers: speakers(),
+		Name:           "jarvis",
+		ResolveSpeaker: resolveSpeaker(),
 		Chat: []brain.Node{
 			brain.Prompt(persona),
 			// story 8: time/situation awareness, no per-request plumbing
 			brain.Situation("House quiet hours are 22:00 to 07:00; avoid noisy appliances then."),
-			brain.RecallFacts(50),
+			brain.RecallFacts(50, recallNote),
 			brain.Extract[intent]("fast", classify, "intent"),
 			brain.If(isAddGuest, brain.Seq(
 				brain.Go("register-guest", func(r *brain.Run) map[string]any {
@@ -184,7 +205,7 @@ func main() {
 			brain.Reply(),
 			// after Reply: the caller already has the answer; ambient
 			// memory happens behind their back.
-			brain.Memorize("fast"),
+			brain.Memorize("fast", memorizeInstruction),
 		},
 		Pipelines: map[string][]brain.Node{
 			// story 5: finish later, then reach out
@@ -194,7 +215,7 @@ func main() {
 			},
 			// story 6: reacting to the world, no human prompted this run
 			"unknown-face": {
-				brain.RecallFacts(50),
+				brain.RecallFacts(50, recallNote),
 				brain.Func(describeFace),
 				brain.Extract[verdict]("fast",
 					`Someone is at the door. Based on the known facts (the guest
@@ -212,7 +233,7 @@ Give a one-sentence reason.`, "verdict"),
 				brain.Notify("Reminder: the party is coming up — time to sort the shopping and tidy up."),
 			},
 			"nightly-review": {
-				brain.RecallFacts(50),
+				brain.RecallFacts(50, recallNote),
 				brain.Notify("Nightly check-in done — I reviewed the household facts; all quiet."),
 			},
 		},

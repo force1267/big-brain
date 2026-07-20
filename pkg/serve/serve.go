@@ -37,10 +37,10 @@ var (
 // Deps are the engine-owned ambient dependencies a run sees. Run builds
 // them from configuration; tests inject mocks.
 type Deps struct {
-	Memory   memory.Memory
-	Notify   notify.Channel
-	Speakers map[string]string // API key → speaker name
-	Enqueue  func(context.Context, job.Job) error
+	Memory         memory.Memory
+	Notify         notify.Channel
+	ResolveSpeaker func(*http.Request) string // nil means every caller is anonymous
+	Enqueue        func(context.Context, job.Job) error
 }
 
 // Run loads deployment configuration, binds the brain's model roles,
@@ -85,7 +85,7 @@ func Run(ctx context.Context, b *brain.Brain) error {
 		channel = notify.Webhook(cfg.Notify.URL)
 	}
 
-	deps := Deps{Memory: mem, Notify: channel, Speakers: b.Speakers}
+	deps := Deps{Memory: mem, Notify: channel, ResolveSpeaker: b.ResolveSpeaker}
 	deps.Enqueue = startJobs(ctx, b, store, &deps)
 	startCrons(ctx, b, deps.Enqueue)
 
@@ -433,9 +433,8 @@ func messages(b *brain.Brain, deps Deps, w http.ResponseWriter, r *http.Request)
 }
 
 func speakerOf(deps Deps, r *http.Request) string {
-	// Anthropic clients send x-api-key; OpenAI clients a bearer token
-	if k := r.Header.Get("x-api-key"); k != "" {
-		return deps.Speakers[k]
+	if deps.ResolveSpeaker == nil {
+		return ""
 	}
-	return deps.Speakers[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
+	return deps.ResolveSpeaker(r)
 }

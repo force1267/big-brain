@@ -416,3 +416,23 @@ itself via a local `speakers()` helper reading `JARVIS_DEMO_SPEAKERS` with
 plain `os.Getenv` (no config package involvement, per its own env prefix).
 Updated docs/authoring-guide.md (Brain struct, speaker-identity recipe,
 config table). Full suite green.
+
+## 2026-07-20 — Removed household-specific policy from pkg/ (session 7)
+
+Audited pkg/ for library code that baked in home-assistant-specific
+opinions rather than staying a general primitive. Found three and fixed
+all: `Memorize` had a hardcoded "household rules" prompt const — now takes
+`instruction string` like `Extract` does. `RecallFacts` had hardcoded
+"household" wording and a fixed guidance sentence — now defaults to a
+neutral "shared" label and takes `notes ...string` for domain guidance
+instead of forcing any. `Brain.Speakers`/`Deps.Speakers` forced a specific
+bearer/x-api-key + flat-map resolution scheme on every brain — replaced
+with `Brain.ResolveSpeaker func(*http.Request) string`, a hook the engine
+just calls; the credential scheme and identity source are entirely the
+author's choice.
+
+All the removed household wording (`memorizeInstruction`, `recallNote`) and
+the bearer/x-api-key + env-var map resolution now live in
+`cmd/jarvis-demo/main.go` only. Updated docs/authoring-guide.md (Brain
+struct, node reference, memory + speaker-identity recipes, config section)
+per CLAUDE.md rule 5. Full suite green.

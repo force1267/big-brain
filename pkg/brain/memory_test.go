@@ -28,7 +28,7 @@ func TestRecallFactsInjectsSystemMessage(t *testing.T) {
 	if sys.Role != "system" {
 		t.Fatalf("first message = %+v", sys)
 	}
-	for _, want := range []string{"[dad, 2026-07-01] dentist on Tuesday", "[household, 2026-07-02] the family is vegetarian", "current speaker is dad"} {
+	for _, want := range []string{"[dad, 2026-07-01] dentist on Tuesday", "[shared, 2026-07-02] the family is vegetarian", "current speaker is dad"} {
 		if !strings.Contains(sys.Content, want) {
 			t.Fatalf("missing %q in %q", want, sys.Content)
 		}
@@ -65,7 +65,7 @@ func TestMemorizeStoresFactsForSpeaker(t *testing.T) {
 		Memory:   mem,
 		Speaker:  "mom",
 	}
-	if err := Memorize("fast").Run(context.Background(), r); err != nil {
+	if err := Memorize("fast", "list durable facts").Run(context.Background(), r); err != nil {
 		t.Fatalf("Memorize: %v", err)
 	}
 	if len(mem.Facts) != 1 || mem.Facts[0].Speaker != "mom" ||
@@ -81,7 +81,7 @@ func TestMemorizeNothingWorthKeeping(t *testing.T) {
 		Models:   model.Models{"fast": &model.Mock{Script: []string{`{"facts":[]}`}}},
 		Memory:   mem,
 	}
-	if err := Memorize("fast").Run(context.Background(), r); err != nil {
+	if err := Memorize("fast", "list durable facts").Run(context.Background(), r); err != nil {
 		t.Fatal(err)
 	}
 	if len(mem.Facts) != 0 {
@@ -90,7 +90,7 @@ func TestMemorizeNothingWorthKeeping(t *testing.T) {
 }
 
 func TestMemorizeErrors(t *testing.T) {
-	if err := Memorize("fast").Run(context.Background(), &Run{}); !errors.Is(err, ErrNoMemory) {
+	if err := Memorize("fast", "list durable facts").Run(context.Background(), &Run{}); !errors.Is(err, ErrNoMemory) {
 		t.Fatalf("err = %v; want ErrNoMemory", err)
 	}
 	boom := errors.New("boom")
@@ -99,7 +99,7 @@ func TestMemorizeErrors(t *testing.T) {
 		Models:   model.Models{"fast": &model.Mock{Script: []string{`{"facts":["x"]}`}}},
 		Memory:   &memory.Mock{RememberErr: boom},
 	}
-	if err := Memorize("fast").Run(context.Background(), r); !errors.Is(err, boom) {
+	if err := Memorize("fast", "list durable facts").Run(context.Background(), r); !errors.Is(err, boom) {
 		t.Fatalf("err = %v; want boom", err)
 	}
 }

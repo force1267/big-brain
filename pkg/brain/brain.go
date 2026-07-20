@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
@@ -25,12 +26,12 @@ type Brain struct {
 	Pipelines map[string][]Node // named pipelines background jobs re-run by name
 	Webhooks  map[string]string // webhook trigger name → pipeline (POST /triggers/{name})
 	Crons     []Cron            // scheduled triggers defined by brain code
-	// Speakers maps API keys to speaker names, resolved from the caller's
-	// credential on every request. How this map is populated (env, a file,
-	// a database) is the brain author's choice; the engine only resolves
-	// the header against it. Unknown or missing key = anonymous speaker,
-	// never an error.
-	Speakers map[string]string
+	// ResolveSpeaker, if set, is called once per incoming request to decide
+	// who is talking (e.g. by reading an API key or bearer token header and
+	// looking it up somewhere). Nil means every caller is anonymous. Both
+	// the credential scheme and where identities live are entirely the
+	// brain author's choice — the engine only calls the function.
+	ResolveSpeaker func(*http.Request) string
 }
 
 // Cron is a recurring trigger: Every for intervals, or Daily ("15:04",

@@ -116,7 +116,11 @@ func TestSpeakerFromBearerKey(t *testing.T) {
 			return r.Emit(model.Chunk{Content: "ok"})
 		}),
 	}}
-	h := Handler(b, Deps{Memory: &memory.Mock{}, Speakers: map[string]string{"key-dad": "dad"}})
+	speakers := map[string]string{"key-dad": "dad"}
+	resolve := func(r *http.Request) string {
+		return speakers[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
+	}
+	h := Handler(b, Deps{Memory: &memory.Mock{}, ResolveSpeaker: resolve})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"model":"jarvis","messages":[{"role":"user","content":"hi"}]}`))
@@ -274,7 +278,8 @@ func TestMessagesSpeakerFromAPIKeyHeader(t *testing.T) {
 			return r.Emit(model.Chunk{Content: "ok"})
 		}),
 	}}
-	h := Handler(b, Deps{Speakers: map[string]string{"key-kid": "kid"}})
+	speakers := map[string]string{"key-kid": "kid"}
+	h := Handler(b, Deps{ResolveSpeaker: func(r *http.Request) string { return speakers[r.Header.Get("x-api-key")] }})
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
 		strings.NewReader(`{"model":"jarvis","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set("x-api-key", "key-kid")
