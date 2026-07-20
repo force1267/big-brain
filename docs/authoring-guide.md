@@ -327,10 +327,12 @@ recent `limit` facts; `OpenLLM(path, model, limit)` (also in
 in one call to decide what's relevant, capped at `limit`. A second real
 implementation with a genuinely different notion of "relevant" is what
 keeps `Memory`'s interface honest about not mandating "most recent" — or
-a fixed per-call cap. `serve.Run` builds the zero-setup `OpenFile` from
-`BIG_BRAIN_MEMORY_LIMIT` (default 50); swap in `OpenLLM` yourself if you
-build your own `serve.Handler` wiring instead of calling `serve.Run`. The
-simplest version needs nothing beyond the wiring:
+a fixed per-call cap. `serve.Run` picks between the two via
+`BIG_BRAIN_MEMORY_BACKEND` (`file`, the default, or `llm`); each backend
+reads its own limit (`BIG_BRAIN_MEMORY_FILE_LIMIT` /
+`BIG_BRAIN_MEMORY_LLM_LIMIT`, both default 50), and `llm` additionally
+reads `BIG_BRAIN_MEMORY_LLM_ROLE` (default `fast`) for which bound model
+judges relevance. The simplest version needs nothing beyond the wiring:
 
 ```go
 const memorizeInstruction = `Does the user's latest message state durable
@@ -560,8 +562,11 @@ None of this is brain code — it's how you deploy a given brain binary.
 | `BIG_BRAIN_UPSTREAM_BASE_URL` | provider default | Base URL of the OpenAI-compatible upstream backing your model roles. |
 | `BIG_BRAIN_UPSTREAM_API_KEY` | — | Upstream API key. |
 | `BIG_BRAIN_MODELS` | — | Role bindings, e.g. `fast=gpt-4o-mini,smart=gpt-4o`. |
-| `BIG_BRAIN_MEMORY_PATH` | `memory.jsonl` | Zero-setup memory store file. |
-| `BIG_BRAIN_MEMORY_LIMIT` | `50` | Facts `OpenFile` keeps in a single recall; 0 = no cap. Implementation-level config, not a `RecallFacts` parameter. |
+| `BIG_BRAIN_MEMORY_PATH` | `memory.jsonl` | Fact store file, either backend. |
+| `BIG_BRAIN_MEMORY_BACKEND` | `file` | `file` (`OpenFile`, recency) or `llm` (`OpenLLM`, one model call judges relevance). |
+| `BIG_BRAIN_MEMORY_FILE_LIMIT` | `50` | Facts `OpenFile` keeps in a single recall; 0 = no cap. Ignored unless backend is `file`. |
+| `BIG_BRAIN_MEMORY_LLM_LIMIT` | `50` | Facts `OpenLLM` keeps in a single recall; 0 = no cap. Ignored unless backend is `llm`. |
+| `BIG_BRAIN_MEMORY_LLM_ROLE` | `fast` | Model role `OpenLLM` calls to judge relevance. Must be a role your brain binds a model to; ignored unless backend is `llm`. |
 | `BIG_BRAIN_JOBS_PATH` | `jobs.jsonl` | Zero-setup durable job log. |
 | `BIG_BRAIN_NOTIFY_URL` | — | Outgoing webhook URL; empty logs notifications instead of sending them. |
 

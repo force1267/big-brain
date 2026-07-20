@@ -82,6 +82,35 @@ func TestLoad_Memory(t *testing.T) {
 	if c.Memory.Path != "/data/m.jsonl" {
 		t.Fatalf("memory path = %q", c.Memory.Path)
 	}
+	if c.Memory.Backend != MemoryBackendFile || c.Memory.FileLimit != 50 ||
+		c.Memory.LLMLimit != 50 || c.Memory.LLMRole != "fast" {
+		t.Fatalf("memory defaults = %+v", c.Memory)
+	}
+}
+
+func TestLoad_MemoryLLMBackend(t *testing.T) {
+	t.Setenv("BIG_BRAIN_MEMORY_BACKEND", "llm")
+	t.Setenv("BIG_BRAIN_MEMORY_FILE_LIMIT", "10")
+	t.Setenv("BIG_BRAIN_MEMORY_LLM_LIMIT", "20")
+	t.Setenv("BIG_BRAIN_MEMORY_LLM_ROLE", "smart")
+
+	c, err := New().Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.Memory.Backend != MemoryBackendLLM || c.Memory.FileLimit != 10 ||
+		c.Memory.LLMLimit != 20 || c.Memory.LLMRole != "smart" {
+		t.Fatalf("memory = %+v", c.Memory)
+	}
+}
+
+func TestLoad_MemoryInvalidBackend(t *testing.T) {
+	t.Setenv("BIG_BRAIN_MEMORY_BACKEND", "vector")
+
+	_, err := New().Load()
+	if !errors.Is(err, ErrLoad) || !errors.Is(err, ErrInvalidMemoryBackend) {
+		t.Fatalf("expected ErrLoad wrapping ErrInvalidMemoryBackend, got: %v", err)
+	}
 }
 
 func TestMockLoader(t *testing.T) {

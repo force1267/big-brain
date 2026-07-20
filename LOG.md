@@ -544,3 +544,26 @@ facts a given backing keeps around) masquerading as an interface contract
 - cmd/jarvis-demo, README, docs/authoring-guide.md updated to match.
 
 Full suite green under go vet + go test -race; gofmt clean.
+
+## 2026-07-20 — Memory backend selection wired into serve.Run (session 9, continued)
+
+Renaming BIG_BRAIN_MEMORY_LIMIT surfaced a real gap: OpenLLM had no way to
+ever be selected by serve.Run, so a bare "LLM_LIMIT" env var would have
+been dead config. Wired proper backend selection instead:
+
+- `BIG_BRAIN_MEMORY_BACKEND` (`file` default, or `llm`) picks the memory
+  implementation serve.Run opens.
+- `BIG_BRAIN_MEMORY_FILE_LIMIT` / `BIG_BRAIN_MEMORY_LLM_LIMIT` (both
+  default 50) replace the old single `BIG_BRAIN_MEMORY_LIMIT` — each
+  backend's cap is independently configurable.
+- `BIG_BRAIN_MEMORY_LLM_ROLE` (default `fast`) names which bound model
+  `OpenLLM` calls to judge relevance; unknown role now fails startup
+  clearly (new `serve.ErrNoMemoryModel`) instead of silently doing
+  nothing.
+- `internal/config`: new `Memory.Backend`/`FileLimit`/`LLMLimit`/`LLMRole`
+  fields, `MemoryBackendFile`/`MemoryBackendLLM` constants, validated
+  against `ErrInvalidMemoryBackend`.
+
+Updated docs/authoring-guide.md's config table and memory recipe. Full
+suite green (added config tests for the llm-backend path and invalid
+backend rejection).

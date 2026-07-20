@@ -21,6 +21,15 @@ var (
 	ErrInvalidEnv = errors.New("invalid environment")
 	// ErrInvalidModels is returned when BIG_BRAIN_MODELS is not role=model pairs.
 	ErrInvalidModels = errors.New("invalid models binding")
+	// ErrInvalidMemoryBackend is returned when BIG_BRAIN_MEMORY_BACKEND is
+	// not a known backend.
+	ErrInvalidMemoryBackend = errors.New("invalid memory backend")
+)
+
+// Memory backends serve.Run knows how to open.
+const (
+	MemoryBackendFile = "file"
+	MemoryBackendLLM  = "llm"
 )
 
 // Config holds every environment-derived setting, ready to be passed by value.
@@ -52,10 +61,13 @@ type Config struct {
 	// from BIG_BRAIN_MODELS, e.g. "fast=gpt-4o-mini,smart=gpt-4o".
 	Models map[string]string
 
-	// Memory is where the zero-setup fact store lives.
+	// Memory is where the fact store lives and which backend serves it.
 	Memory struct {
-		Path  string
-		Limit int // facts kept in context per recall; 0 = no cap
+		Path      string
+		Backend   string // MemoryBackendFile (default) or MemoryBackendLLM
+		FileLimit int    // OpenFile: facts kept in context per recall; 0 = no cap
+		LLMLimit  int    // OpenLLM: facts kept in context per recall; 0 = no cap
+		LLMRole   string // OpenLLM: model role that judges relevance
 	}
 
 	// Jobs is where the zero-setup durable job log lives.
@@ -116,14 +128,23 @@ func (envLoader) Load() (Config, error) {
 
 	v.SetDefault("memory.path", "memory.jsonl")
 	c.Memory.Path = v.GetString("memory.path")
-	v.SetDefault("memory.limit", 50)
-	c.Memory.Limit = v.GetInt("memory.limit")
+	v.SetDefault("memory.backend", MemoryBackendFile)
+	c.Memory.Backend = v.GetString("memory.backend")
+	v.SetDefault("memory.file_limit", 50)
+	c.Memory.FileLimit = v.GetInt("memory.file_limit")
+	v.SetDefault("memory.llm_limit", 50)
+	c.Memory.LLMLimit = v.GetInt("memory.llm_limit")
+	v.SetDefault("memory.llm_role", "fast")
+	c.Memory.LLMRole = v.GetString("memory.llm_role")
 	v.SetDefault("jobs.path", "jobs.jsonl")
 	c.Jobs.Path = v.GetString("jobs.path")
 	c.Notify.URL = v.GetString("notify.url")
 
 	if c.Env != EnvLocal && c.Env != EnvProduction {
 		return Config{}, fmt.Errorf("%w: %w: %q", ErrLoad, ErrInvalidEnv, c.Env)
+	}
+	if c.Memory.Backend != MemoryBackendFile && c.Memory.Backend != MemoryBackendLLM {
+		return Config{}, fmt.Errorf("%w: %w: %q", ErrLoad, ErrInvalidMemoryBackend, c.Memory.Backend)
 	}
 	return c, nil
 }

@@ -33,6 +33,9 @@ var (
 	// ErrNoPipeline is returned when a job names a pipeline the brain
 	// does not register.
 	ErrNoPipeline = errors.New("no such pipeline")
+	// ErrNoMemoryModel is returned when BIG_BRAIN_MEMORY_BACKEND=llm names
+	// a role (BIG_BRAIN_MEMORY_LLM_ROLE) the brain has no model bound to.
+	ErrNoMemoryModel = errors.New("no model bound to memory llm role")
 )
 
 // Deps are the engine-owned ambient dependencies a run sees. Run builds
@@ -89,7 +92,17 @@ func Run(ctx context.Context, b *brain.Brain, opts ...Option) error {
 		b.Models[model.Role(role)] = model.OpenAI(cfg.Upstream.BaseURL, cfg.Upstream.APIKey, name)
 	}
 
-	mem, err := memory.OpenFile(cfg.Memory.Path, cfg.Memory.Limit)
+	var mem memory.Memory
+	switch cfg.Memory.Backend {
+	case config.MemoryBackendLLM:
+		mm, ok := b.Models[model.Role(cfg.Memory.LLMRole)]
+		if !ok {
+			return fmt.Errorf("%w: %w: %q", ErrConfig, ErrNoMemoryModel, cfg.Memory.LLMRole)
+		}
+		mem, err = memory.OpenLLM(cfg.Memory.Path, mm, cfg.Memory.LLMLimit)
+	default:
+		mem, err = memory.OpenFile(cfg.Memory.Path, cfg.Memory.FileLimit)
+	}
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrConfig, err)
 	}
