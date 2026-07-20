@@ -131,12 +131,26 @@ func isAddGuest(r *brain.Run) bool {
 	return ok && it.Action == "add_guest" && it.Guest != ""
 }
 
+// speakers parses JARVIS_DEMO_SPEAKERS ("key-dad=dad,key-kid=kid") into an
+// API-key → speaker-name map. This is demo-specific config, so it's read
+// locally with os.Getenv rather than through the engine's config package.
+func speakers() map[string]string {
+	m := map[string]string{}
+	for _, pair := range strings.Split(os.Getenv("JARVIS_DEMO_SPEAKERS"), ",") {
+		if k, v, ok := strings.Cut(strings.TrimSpace(pair), "="); ok {
+			m[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	return m
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	jarvis := &brain.Brain{
-		Name: "jarvis",
+		Name:     "jarvis",
+		Speakers: speakers(),
 		Chat: []brain.Node{
 			brain.Prompt(persona),
 			// story 8: time/situation awareness, no per-request plumbing

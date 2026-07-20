@@ -21,8 +21,6 @@ var (
 	ErrInvalidEnv = errors.New("invalid environment")
 	// ErrInvalidModels is returned when BIG_BRAIN_MODELS is not role=model pairs.
 	ErrInvalidModels = errors.New("invalid models binding")
-	// ErrInvalidSpeakers is returned when BIG_BRAIN_SPEAKERS is not key=name pairs.
-	ErrInvalidSpeakers = errors.New("invalid speakers binding")
 )
 
 // Config holds every environment-derived setting, ready to be passed by value.
@@ -69,11 +67,6 @@ type Config struct {
 	Notify struct {
 		URL string
 	}
-
-	// Speakers maps API keys to speaker names, parsed from
-	// BIG_BRAIN_SPEAKERS, e.g. "key-dad=dad,key-kid=kid". Empty means all
-	// callers are anonymous.
-	Speakers map[string]string
 }
 
 // Loader loads configuration. Implementations must be safe to call once at
@@ -125,12 +118,6 @@ func (envLoader) Load() (Config, error) {
 	v.SetDefault("jobs.path", "jobs.jsonl")
 	c.Jobs.Path = v.GetString("jobs.path")
 	c.Notify.URL = v.GetString("notify.url")
-
-	speakers, err := parsePairs(v.GetString("speakers"), ErrInvalidSpeakers)
-	if err != nil {
-		return Config{}, fmt.Errorf("%w: %w", ErrLoad, err)
-	}
-	c.Speakers = speakers
 
 	if c.Env != EnvLocal && c.Env != EnvProduction {
 		return Config{}, fmt.Errorf("%w: %w: %q", ErrLoad, ErrInvalidEnv, c.Env)

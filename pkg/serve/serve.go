@@ -85,7 +85,7 @@ func Run(ctx context.Context, b *brain.Brain) error {
 		channel = notify.Webhook(cfg.Notify.URL)
 	}
 
-	deps := Deps{Memory: mem, Notify: channel, Speakers: cfg.Speakers}
+	deps := Deps{Memory: mem, Notify: channel, Speakers: b.Speakers}
 	deps.Enqueue = startJobs(ctx, b, store, &deps)
 	startCrons(ctx, b, deps.Enqueue)
 

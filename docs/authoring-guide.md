@@ -106,6 +106,7 @@ type Brain struct {
 	Pipelines map[string][]Node   // named graphs background jobs and triggers run by name
 	Webhooks  map[string]string   // trigger name → pipeline, exposed at POST /triggers/{name}
 	Crons     []Cron              // schedules your brain runs on its own
+	Speakers  map[string]string   // API key → speaker name; you populate this however you like
 }
 ```
 
@@ -313,8 +314,16 @@ Chat: []brain.Node{
 ### Speaker identity (story 3)
 
 Nothing to add to the pipeline — `r.Speaker` is already resolved by
-`serve.Run` from the caller's API credential (`BIG_BRAIN_SPEAKERS`). Just use
-it, e.g. inside `Prompt`'s template (`{{.Speaker}}`) or in a `brain.Func`.
+`serve.Run` from the caller's API credential, looked up in the
+`Brain.Speakers` map (`map[string]string`, API key → speaker name) you set
+when you build your `brain.Brain`. How you populate that map is entirely up
+to you — env vars, a config file, a database — the engine only resolves the
+header against whatever map you provide. Unknown or missing key resolves to
+an anonymous speaker, never an error. `cmd/jarvis-demo` reads its own
+`JARVIS_DEMO_SPEAKERS` env var (`key-dad=dad,key-kid=kid`) with plain
+`os.Getenv`, since that binding is demo-specific, not an engine concern.
+Just use `r.Speaker`, e.g. inside `Prompt`'s template (`{{.Speaker}}`) or in
+a `brain.Func`.
 
 ### Intent → structured tool call (story 4)
 
@@ -476,7 +485,11 @@ None of this is brain code — it's how you deploy a given brain binary.
 | `BIG_BRAIN_MEMORY_PATH` | `memory.jsonl` | Zero-setup memory store file. |
 | `BIG_BRAIN_JOBS_PATH` | `jobs.jsonl` | Zero-setup durable job log. |
 | `BIG_BRAIN_NOTIFY_URL` | — | Outgoing webhook URL; empty logs notifications instead of sending them. |
-| `BIG_BRAIN_SPEAKERS` | — | API-key → speaker-name bindings, e.g. `key-dad=dad,key-kid=kid`. Unknown/missing key = anonymous, never an error. |
+
+Speaker identity (`Brain.Speakers`) is *not* engine config — it's a field
+you set on your `Brain` value however you like. `cmd/jarvis-demo` binds it
+from `JARVIS_DEMO_SPEAKERS` with `os.Getenv`, entirely outside the engine's
+config package; see [Speaker identity](#speaker-identity-story-3) above.
 
 `memory`, `job`, and `notify` are all interfaces (`pkg/memory.Memory`,
 `pkg/job.Store`, `pkg/notify.Channel`); the JSONL files above are the

@@ -405,3 +405,14 @@ Renamed the 12-factor env prefix everywhere: `internal/config/config.go`
 assertion), and all doc references (README, CLAUDE.md, IMPLEMENTATION.md,
 docs/authoring-guide.md, docs/research.md). Historical LOG.md entries above
 keep the old name — append-only history. Full suite green.
+
+## 2026-07-20 — Speaker binding moved out of engine config (session 6)
+
+`internal/config` no longer parses BIG_BRAIN_SPEAKERS — speaker identity was
+demo-specific, not an engine concern. `brain.Brain` gained a `Speakers
+map[string]string` field (API key → speaker name); `serve.Run` reads it
+from `b.Speakers` instead of config. `cmd/jarvis-demo` now populates it
+itself via a local `speakers()` helper reading `JARVIS_DEMO_SPEAKERS` with
+plain `os.Getenv` (no config package involvement, per its own env prefix).
+Updated docs/authoring-guide.md (Brain struct, speaker-identity recipe,
+config table). Full suite green.
