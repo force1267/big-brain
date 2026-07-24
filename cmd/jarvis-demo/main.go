@@ -1,436 +1,361 @@
-// Command jarvis-demo is the reference brain. It deliberately uses only
-// pkg/ — it is executable documentation for external brain authors, so it
-// must not reach anything they cannot (see IMPLEMENTATION.md).
+// Command jarvis-demo is a reference brain built entirely on pkg/bb — a home
+// assistant for a smart house. It shows the bb surface working end to end:
+//
+//   - an intent router (a modelless agent that Selects a capability by keyword),
+//   - capability flows chosen from a Select group: talk, remember, recall,
+//     house (reads sensors / sets devices on the dummy world), briefing
+//     (reads several sensors concurrently and summarises),
+//   - memory the brain keeps across turns (author state, woven into the persona),
+//   - a Notify flow after Respond, so every answer is echoed to the world's
+//     notification sink,
+//   - durable execution (bb.Store) and a jsonl trace of every flow.
+//
+// It is self-contained: a dummy "world" HTTP server (sensors, devices, a
+// notification sink) runs in-process on :8090, so the demo needs nothing
+// external. Run it:
+//
+//	go run ./cmd/jarvis-demo
+//
+// then point any OpenAI client at http://localhost:8080/v1. Try messages like
+// "remember the wifi code is swordfish", "what did I tell you", "what's the
+// temperature", "turn on the porch light", or "give me a briefing". With no
+// credentials the persona replies are canned; set BIG_BRAIN_API_KEY (and
+// optionally BIG_BRAIN_BASE_URL, BIG_BRAIN_MODEL) to back chat with a real
+// model. Set BIG_BRAIN_DATA=<dir> for on-disk durability across restarts.
 package main
 
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
-	"syscall"
+	"sync"
 	"time"
 
-	"github.com/google/uuid"
-
-	"github.com/force1267/big-brain/pkg/brain"
-	"github.com/force1267/big-brain/pkg/cron"
-	"github.com/force1267/big-brain/pkg/job"
-	"github.com/force1267/big-brain/pkg/memory"
-	"github.com/force1267/big-brain/pkg/model"
-	"github.com/force1267/big-brain/pkg/serve"
+	"github.com/force1267/big-brain/pkg/bb"
 )
 
-const persona = `You are Jarvis, the household assistant of a busy family.
-You are warm, brief, and lightly witty. You answer as a helpful member of
-the household, never as a generic AI.`
+// Capability ids — the Select routing vocabulary. The router declares these as
+// its exits; each capability flow claims one with WithId.
+const (
+	idTalk     = "talk"
+	idRemember = "remember"
+	idRecall   = "recall"
+	idHouse    = "house"
+	idBriefing = "briefing"
+)
 
-const classify = `Classify the user's latest message.
-Actions: "add_guest" (they want someone added to the door guest list),
-"party" (they announce a party or gathering coming up), or "chat"
-(anything else). For add_guest, "guest" is the person's name; otherwise
-leave it empty.`
+const worldAddr = "127.0.0.1:8090"
 
-// recallNote is household-specific guidance on how to weigh recalled facts,
-// passed to the generic brain.RecallFacts node.
-const recallNote = `Facts tagged with a name belong to that person only; prefer the current speaker's and the shared household facts.`
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
 
-// memorizeInstruction is household-flavored wording for what's worth
-// remembering, fed to the model by this brain's own memorize node (below).
-const memorizeInstruction = `Does the user's latest message state durable
-facts worth remembering long-term (preferences, appointments, dates,
-relationships, standing household rules)? List them, each self-contained,
-in third person, saying "the speaker" for the person talking (never "the
-user"). Leave the list empty for small talk, questions, or one-off
-requests.`
+	// The dummy world the brain acts on: sensors, devices, a notify sink.
+	world := startWorld(worldAddr)
+	defer world.Shutdown(context.Background())
 
-// intent is the structured output of the classification stage (story 4).
-type intent struct {
-	Action string `json:"action"`
-	Guest  string `json:"guest"`
-}
-
-// face is the door camera's webhook payload (story 6).
-type verdict struct {
-	Open   bool   `json:"open"`
-	Reason string `json:"reason"`
-}
-
-// memorized is the structured output of the memorize stage.
-type memorized struct {
-	Facts []string `json:"facts"`
-}
-
-// --- speaker identity (household-specific; pkg/ has no notion of this) ---
-//
-// pkg/brain and pkg/serve carry no concept of "who is talking" — that is
-// entirely this brain's business. Identity flows in one direction: an
-// api-key/bearer-token header is resolved to a name once per request (via
-// serve.WithPrepare) and stashed in Run.Vars["speaker"], the same generic
-// per-run scratch space any node uses. Everything downstream — prompting,
-// fact tagging, addressing background jobs and notifications — reads it
-// back out of Vars like any other value.
-
-// resolveSpeaker parses JARVIS_DEMO_SPEAKERS ("key-dad=dad,key-kid=kid")
-// into an API-key → speaker-name map once, then looks up the bearer token
-// (OpenAI clients) or x-api-key (Anthropic clients) on each request and
-// stores the result via serve's generic Prepare hook. The whole scheme —
-// env-var config, header choice, flat-map lookup, and the very idea of a
-// "speaker" — is this demo's policy; pkg/serve just calls the function.
-func resolveSpeaker() func(*http.Request, *brain.Run) {
-	m := map[string]string{}
-	for _, pair := range strings.Split(os.Getenv("JARVIS_DEMO_SPEAKERS"), ",") {
-		if k, v, ok := strings.Cut(strings.TrimSpace(pair), "="); ok {
-			m[strings.TrimSpace(k)] = strings.TrimSpace(v)
-		}
+	// The model backing persona chat: a real provider if configured, else a
+	// canned reply so the demo runs with no key.
+	if key := os.Getenv("BIG_BRAIN_API_KEY"); key != "" {
+		bb.RegisterModel(bb.NewModel().WithName(envOr("BIG_BRAIN_MODEL", "gpt-4o-mini")).WithTemprature(0.7), "chat")
+	} else {
+		bb.RegisterModel(bb.FixedModel("At your service. Anything else?"), "chat")
 	}
-	return func(req *http.Request, run *brain.Run) {
-		key := req.Header.Get("x-api-key")
-		if key == "" {
-			key = strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+
+	j := &jarvis{world: "http://" + worldAddr, mem: &memory{}, http: &http.Client{Timeout: 5 * time.Second}}
+
+	// The brain: route by intent, run the chosen capability, respond, then echo
+	// the answer to the world's notification sink. .Next after Respond is how a
+	// brain keeps acting past the reply.
+	brain := j.router().
+		Next(bb.Select(j.talk(), j.remember(), j.recall(), j.house(), j.briefing())).
+		Next(bb.Respond).
+		Next(j.notify())
+
+	// Durability: in-memory by default, on-disk when BIG_BRAIN_DATA is set.
+	store := bb.MemStore()
+	if dir := os.Getenv("BIG_BRAIN_DATA"); dir != "" {
+		fs, err := bb.FileStore(dir)
+		if err != nil {
+			fatal(err)
 		}
-		if name := m[key]; name != "" {
-			run.SetVar("speaker", name)
-		}
+		store = fs
+	}
+
+	fmt.Fprintln(os.Stderr, "jarvis-demo: world on :8090, brain on :8080 (OpenAI at /v1/chat/completions); trace on stdout")
+	err := bb.Serve(ctx, brain,
+		bb.Addr(":8080"),
+		bb.Trace(bb.JSONL(os.Stdout)),
+		bb.Store(store),
+	)
+	if err != nil {
+		fatal(err)
 	}
 }
 
-// speakerOf reads the current speaker stashed by resolveSpeaker, or "" for
-// an anonymous caller or a background run with none set.
-func speakerOf(r *brain.Run) string {
-	s, _ := brain.Var[string](r, "speaker")
-	return s
+// jarvis holds the brain's dependencies: the world it acts on and the memory it
+// keeps. Flow constructors hang off it so they can close over both.
+type jarvis struct {
+	world string
+	mem   *memory
+	http  *http.Client
 }
 
-// situation gives the model time/system awareness (story 8) plus, when
-// known, who it's talking to. Neither needs engine help: time.Now() is
-// already ambient via the stdlib, and speaker identity is this brain's
-// own concept — pkg/brain provides no Situation node, on purpose (see
-// docs/authoring-guide.md).
-func situation(_ context.Context, r *brain.Run) error {
-	now := time.Now()
-	var b strings.Builder
-	fmt.Fprintf(&b, "Current situation: it is %s, %s (%s).\n",
-		now.Format("Monday, 2 January 2006"), now.Format("15:04"), now.Format("MST"))
-	b.WriteString("House quiet hours are 22:00 to 07:00; avoid noisy appliances then.\n")
-	if spk := speakerOf(r); spk != "" {
-		b.WriteString("You are talking to " + spk + ".\n")
-	}
-	r.Messages = append([]model.Message{{Role: "system", Content: b.String()}}, r.Messages...)
-	return nil
-}
-
-// memorize is this brain's speaker-aware fact-keeping node: pkg/brain's
-// generic Memorize takes plain facts with no attribution, so tagging each
-// fact with who said it is done here, by embedding the tag in Content —
-// the engine keeps no separate concept for it.
-func memorize(role model.Role, instruction string) brain.Node {
-	extract := brain.Extract[memorized](role, instruction, "_memorize")
-	return brain.Func(func(ctx context.Context, r *brain.Run) error {
-		if err := extract.Run(ctx, r); err != nil {
-			return err
-		}
-		got, _ := brain.Var[memorized](r, "_memorize")
-		spk := speakerOf(r)
-		for _, content := range got.Facts {
-			tagged := content
-			if spk != "" {
-				tagged = fmt.Sprintf("[%s] %s", spk, content)
+// router is a modelless agent: it reads the latest message and Selects a
+// capability by keyword. Declaring its exits lets Serve verify the wiring at
+// startup.
+func (j *jarvis) router() bb.Flow {
+	route := bb.NewAgent().
+		Selects(idTalk, idRemember, idRecall, idHouse, idBriefing).
+		OnMessage(func(_ context.Context, turn bb.Turn) error {
+			switch msg := strings.ToLower(turn.Last().Content); {
+			case strings.Contains(msg, "remember"):
+				turn.Select(idRemember)
+			case strings.Contains(msg, "recall"), strings.Contains(msg, "what did"), strings.Contains(msg, "what do you know"):
+				turn.Select(idRecall)
+			case strings.Contains(msg, "briefing"), strings.Contains(msg, "status"):
+				turn.Select(idBriefing)
+			case containsAny(msg, "temperature", "temp", "door", "humidity", "light", "turn on", "turn off"):
+				turn.Select(idHouse)
+			default:
+				turn.Select(idTalk)
 			}
-			if err := r.Memory.Remember(ctx, memory.Fact{Content: tagged, At: time.Now()}); err != nil {
+			return nil
+		})
+	return bb.NewFlow().WithAgent(route)
+}
+
+// talk is the persona capability: it weaves what the brain remembers into a
+// system note, then answers with the chat model.
+func (j *jarvis) talk() bb.Flow {
+	a := bb.NewAgent().
+		WithModel(bb.NewModel("chat")).
+		WithRole(bb.Role("You are Jarvis, a warm but terse home assistant.")).
+		OnMessage(func(_ context.Context, turn bb.Turn) error {
+			if facts := j.mem.recall(); len(facts) > 0 {
+				turn.Add(bb.NewMessage("You remember: " + strings.Join(facts, "; ")).As("system"))
+			}
+			turn.Add(turn.Last())
+			reply, err := turn.Ask()
+			if err != nil {
 				return err
 			}
+			turn.Reply(reply.ReadAll())
+			return nil
+		})
+	return bb.NewFlow().WithId(idTalk).WithAgent(a)
+}
+
+// remember stores a fact from the user's message. No model needed.
+func (j *jarvis) remember() bb.Flow {
+	a := bb.NewAgent().OnMessage(func(_ context.Context, turn bb.Turn) error {
+		fact := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(turn.Last().Content), "remember"))
+		fact = strings.TrimLeft(fact, " :,-")
+		if fact == "" {
+			turn.Reply("Remember what, exactly?")
+			return nil
+		}
+		j.mem.remember(fact)
+		turn.Reply("Got it — I'll remember that " + fact + ".")
+		return nil
+	})
+	return bb.NewFlow().WithId(idRemember).WithAgent(a)
+}
+
+// recall reports what the brain has been told.
+func (j *jarvis) recall() bb.Flow {
+	a := bb.NewAgent().OnMessage(func(_ context.Context, turn bb.Turn) error {
+		facts := j.mem.recall()
+		if len(facts) == 0 {
+			turn.Reply("You haven't told me anything to remember yet.")
+			return nil
+		}
+		turn.Reply("Here's what I know: " + strings.Join(facts, "; ") + ".")
+		return nil
+	})
+	return bb.NewFlow().WithId(idRecall).WithAgent(a)
+}
+
+// house acts on the dummy world: set a device, or read a sensor.
+func (j *jarvis) house() bb.Flow {
+	a := bb.NewAgent().OnMessage(func(ctx context.Context, turn bb.Turn) error {
+		msg := strings.ToLower(turn.Last().Content)
+		switch {
+		case strings.Contains(msg, "turn on"), strings.Contains(msg, "turn off"):
+			device := deviceFrom(msg)
+			state := "on"
+			if strings.Contains(msg, "off") {
+				state = "off"
+			}
+			if err := j.set(ctx, device, state); err != nil {
+				return err
+			}
+			turn.Reply(fmt.Sprintf("Done — %s is now %s.", device, state))
+		default:
+			sensor := sensorFrom(msg)
+			reading, err := j.read(ctx, sensor)
+			if err != nil {
+				return err
+			}
+			turn.Reply(fmt.Sprintf("The %s reads %s.", sensor, reading))
 		}
 		return nil
 	})
+	return bb.NewFlow().WithId(idHouse).WithAgent(a)
 }
 
-// registerGuest is the background tool (story 5): it calls the door-camera
-// endpoint with the guest from the job payload and records the outcome for
-// the Notify node. It never returns an error — this brain chooses to
-// notify on failure rather than fail silently (see PRODUCT.md).
-func registerGuest(ctx context.Context, r *brain.Run) error {
-	guest, _ := brain.Var[string](r, "guest")
-	body, _ := json.Marshal(map[string]string{"name": guest})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		os.Getenv("JARVIS_DOOR_URL"), bytes.NewReader(body))
-	if err != nil {
-		r.SetVar("result", fmt.Sprintf("I couldn't add %s to the guest list: %v", guest, err))
-		return nil
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	switch {
-	case err != nil:
-		r.SetVar("result", fmt.Sprintf("I couldn't reach the door camera to add %s — I'll need you to try again.", guest))
-	case resp.StatusCode >= 300:
-		resp.Body.Close()
-		r.SetVar("result", fmt.Sprintf("The door camera refused %s (status %d).", guest, resp.StatusCode))
-	default:
-		resp.Body.Close()
-		r.SetVar("result", fmt.Sprintf("Done — %s is on the guest list and the door camera will recognize them.", guest))
-		// the guest list is a durable fact the unknown-face pipeline reads
-		content := fmt.Sprintf("%s is on the door guest list.", guest)
-		if spk := speakerOf(r); spk != "" {
-			content = fmt.Sprintf("[%s] %s", spk, content)
+// briefing reads several sensors concurrently and summarises them in one reply.
+func (j *jarvis) briefing() bb.Flow {
+	a := bb.NewAgent().OnMessage(func(ctx context.Context, turn bb.Turn) error {
+		sensors := []string{"temperature", "humidity", "door"}
+		readings := make([]string, len(sensors))
+		var wg sync.WaitGroup
+		for i, s := range sensors {
+			wg.Add(1)
+			go func(i int, s string) {
+				defer wg.Done()
+				r, err := j.read(ctx, s)
+				if err != nil {
+					r = "unavailable"
+				}
+				readings[i] = fmt.Sprintf("%s %s", s, r)
+			}(i, s)
 		}
-		_ = r.Memory.Remember(ctx, memory.Fact{Content: content, At: time.Now()})
+		wg.Wait()
+		turn.Reply("Briefing — " + strings.Join(readings, ", ") + ".")
+		return nil
+	})
+	return bb.NewFlow().WithId(idBriefing).WithAgent(a)
+}
+
+// notify echoes the final reply to the world's notification sink. It sits after
+// Respond, so it runs once the user has their answer.
+func (j *jarvis) notify() bb.Flow {
+	return bb.Notify(func(ctx context.Context, text string) error {
+		return j.post(ctx, "/notify", `{"text":`+quote(text)+`}`)
+	})
+}
+
+// --- dummy world client helpers ---
+
+func (j *jarvis) read(ctx context.Context, sensor string) (string, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", j.world+"/sensor/"+sensor, nil)
+	resp, err := j.http.Do(req)
+	if err != nil {
+		return "", err
 	}
-	return nil
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return strings.TrimSpace(string(b)), nil
 }
 
-// describeFace turns the door camera's webhook payload into a message the
-// verdict extraction can reason over, alongside recalled facts.
-func describeFace(_ context.Context, r *brain.Run) error {
-	payload, _ := brain.Var[map[string]any](r, "payload")
-	desc, _ := json.Marshal(payload)
-	r.Messages = append(r.Messages, model.Message{Role: "user",
-		Content: "Door camera event, someone is at the door: " + string(desc)})
-	return nil
+func (j *jarvis) set(ctx context.Context, device, state string) error {
+	return j.post(ctx, "/device/"+device, `{"state":`+quote(state)+`}`)
 }
 
-// checkWeather and checkRSVPs are the story-10 fan-out tools. Each could
-// call a real API; what matters is they run concurrently and merge into
-// one reply. ponytail: canned results; swap for real endpoints anytime.
-func checkWeather(_ context.Context, r *brain.Run) error {
-	r.SetVar("weather", "clear skies expected, around 24°C")
-	return nil
-}
-
-func checkRSVPs(ctx context.Context, r *brain.Run) error {
-	facts, err := r.Memory.Recall(ctx, "")
+func (j *jarvis) post(ctx context.Context, path, body string) error {
+	req, _ := http.NewRequestWithContext(ctx, "POST", j.world+path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := j.http.Do(req)
 	if err != nil {
 		return err
 	}
-	guests := 0
-	for _, f := range facts {
-		if strings.Contains(f.Content, "guest list") {
-			guests++
-		}
-	}
-	r.SetVar("rsvps", fmt.Sprintf("%d guests on the door list so far", guests))
+	resp.Body.Close()
 	return nil
 }
 
-// partyAt schedules the brain's own reminder before the party (story 7).
-// ponytail: fixed "tomorrow 09:00"; parsing dates out of chat is a model
-// job for a later slice. JARVIS_PARTY_DELAY overrides for demos.
-func partyAt(*brain.Run) time.Time {
-	if d, err := time.ParseDuration(os.Getenv("JARVIS_PARTY_DELAY")); err == nil {
-		return time.Now().Add(d)
-	}
-	tomorrow := time.Now().AddDate(0, 0, 1)
-	return time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), 9, 0, 0, 0, tomorrow.Location())
+// --- memory: the brain's own state, a simple concurrent list of facts ---
+
+type memory struct {
+	mu    sync.Mutex
+	facts []string
 }
 
-// queueGuest persists the intent and primes the reply to promise a text.
-func queueGuest(_ context.Context, r *brain.Run) error {
-	it, _ := brain.Var[intent](r, "intent")
-	r.Messages = append(r.Messages, model.Message{Role: "system",
-		Content: fmt.Sprintf("You have queued adding %q to the guest list; it runs in the background. Tell the user, in persona and one short sentence, that you're on it and will text them when it's done.", it.Guest)})
-	return nil
+func (m *memory) remember(fact string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.facts = append(m.facts, fact)
 }
 
-func isAddGuest(r *brain.Run) bool {
-	it, ok := brain.Var[intent](r, "intent")
-	return ok && it.Action == "add_guest" && it.Guest != ""
+func (m *memory) recall() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.facts...)
 }
 
-// --- dummy world: this brain's own two external dependencies -------------
-//
-// jarvis calls out to two things that don't exist in a laptop demo: a
-// door-camera actuator (JARVIS_DOOR_URL, hit by registerGuest) and a
-// notification relay (BIG_BRAIN_NOTIFY_URL, the engine's own outgoing
-// webhook channel). Standing up a real door lock and a real Telegram bot
-// isn't reasonable for "try the demo" — so this brain runs a tiny stand-in
-// for both on its own, on a second port, and points itself at it by
-// default. A real deployment overrides JARVIS_DOOR_URL and
-// BIG_BRAIN_NOTIFY_URL with the real endpoints; nothing here is pkg/'s
-// concern, it's this brain's own fixture.
+// --- the dummy world server ---
 
-// startDummyWorld serves the door-camera and notify-relay stand-ins on
-// addr, logging whatever they receive so a live demo is visible end to
-// end without a second terminal.
-func startDummyWorld(addr string) {
+func startWorld(addr string) *http.Server {
+	sensors := map[string]string{"temperature": "21°C", "humidity": "45%", "door": "closed"}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /door", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /sensor/{name}", func(w http.ResponseWriter, r *http.Request) {
+		v, ok := sensors[r.PathValue("name")]
+		if !ok {
+			v = "unknown"
+		}
+		io.WriteString(w, v)
+	})
+	mux.HandleFunc("POST /device/{name}", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		log.Printf("[dummy door camera] %s", body)
-		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(os.Stderr, "🏠 world: device %s <- %s\n", r.PathValue("name"), bytes.TrimSpace(body))
+		io.WriteString(w, "ok")
 	})
 	mux.HandleFunc("POST /notify", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		log.Printf("[dummy notify relay] %s", body)
-		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(os.Stderr, "🔔 world: notify %s\n", bytes.TrimSpace(body))
+		io.WriteString(w, "ok")
 	})
-	go func() {
-		if err := http.ListenAndServe(addr, mux); err != nil {
-			log.Printf("dummy world server: %v", err)
-		}
-	}()
+	srv := &http.Server{Addr: addr, Handler: mux}
+	go srv.ListenAndServe()
+	return srv
 }
 
-// setDefaultEnv sets key to value unless the deployer already set it —
-// env vars remain the escape hatch to point at a real door lock or relay.
-func setDefaultEnv(key, value string) {
-	if os.Getenv(key) == "" {
-		os.Setenv(key, value)
-	}
-}
+// --- small helpers ---
 
-// --- triggers: composed from serve's generic primitives, not declared --
-//
-// pkg/serve has no concept of "webhook trigger" or "cron trigger" — it
-// only exposes Enqueue (via WithEndpoint/WithBackground). What follows is
-// this brain's own composition of that primitive with an HTTP route (for
-// the door camera) and with cron.Next, a plain stdlib-style utility
-// function (for the nightly review), respectively.
-
-// doorWebhook is story 6's trigger: the door camera POSTs an event here,
-// and it becomes a durable job, so a crash after 202 still runs the
-// pipeline. The route ("POST /triggers/door") and this handler are the
-// entire "webhook trigger" — nothing else in the brain declares it.
-func doorWebhook(enqueue serve.Enqueue) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var payload any
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		j := job.Job{ID: uuid.NewString(), Pipeline: "unknown-face", At: time.Now(),
-			Source: "webhook:door", Payload: map[string]any{"payload": payload}}
-		if err := enqueue(r.Context(), j); err != nil {
-			log.Printf("door webhook enqueue failed: %v", err)
-			http.Error(w, "could not accept event", http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusAccepted)
+func sensorFrom(msg string) string {
+	switch {
+	case strings.Contains(msg, "humid"):
+		return "humidity"
+	case strings.Contains(msg, "door"):
+		return "door"
+	default:
+		return "temperature"
 	}
 }
 
-// nightlyReview is story 7's trigger: a plain goroutine driving
-// cron.Next, with no engine help beyond Enqueue. cron.Cron and cron.Next
-// are exported exactly so any brain can build a schedule like this one
-// without pkg/serve needing to know schedules exist.
-func nightlyReview(ctx context.Context, enqueue serve.Enqueue) {
-	schedule := cron.Cron{Daily: "21:00"}
-	for {
-		next := cron.Next(schedule, time.Now())
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(time.Until(next)):
-		}
-		j := job.Job{ID: uuid.NewString(), Pipeline: "nightly-review", At: time.Now(), Source: "cron"}
-		if err := enqueue(ctx, j); err != nil {
-			log.Printf("nightly-review enqueue failed: %v", err)
+func deviceFrom(msg string) string {
+	for _, d := range []string{"porch light", "light", "heater", "lock", "fan"} {
+		if strings.Contains(msg, d) {
+			return d
 		}
 	}
+	return "light"
 }
 
-func main() {
-	dummyAddr := os.Getenv("JARVIS_DEMO_DUMMY_ADDR")
-	if dummyAddr == "" {
-		dummyAddr = ":8090"
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
 	}
-	startDummyWorld(dummyAddr)
-	setDefaultEnv("JARVIS_DOOR_URL", "http://localhost"+dummyAddr+"/door")
-	setDefaultEnv("BIG_BRAIN_NOTIFY_URL", "http://localhost"+dummyAddr+"/notify")
+	return false
+}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	jarvis := &brain.Brain{
-		Name: "jarvis",
-		Chat: []brain.Node{
-			brain.Prompt(persona),
-			// story 8: time/situation awareness + speaker identity — both
-			// this brain's own composition of stdlib time and Run.Vars,
-			// not engine-provided nodes.
-			brain.Func(situation),
-			brain.RecallFacts(recallNote),
-			brain.Extract[intent]("fast", classify, "intent"),
-			brain.If(isAddGuest, brain.Seq(
-				brain.Go("register-guest", func(r *brain.Run) map[string]any {
-					it, _ := brain.Var[intent](r, "intent")
-					return map[string]any{"guest": it.Guest, "speaker": speakerOf(r)}
-				}),
-				brain.Func(queueGuest),
-			), nil),
-			brain.If(func(r *brain.Run) bool {
-				it, ok := brain.Var[intent](r, "intent")
-				return ok && it.Action == "party"
-			}, brain.Seq(
-				// story 7: the brain installs a trigger for itself
-				brain.GoAt(partyAt, "party-prep", nil),
-				// story 10: fan out checks, join into one reply
-				brain.Parallel(brain.Func(checkWeather), brain.Func(checkRSVPs)),
-				brain.Func(func(_ context.Context, r *brain.Run) error {
-					weather, _ := brain.Var[string](r, "weather")
-					rsvps, _ := brain.Var[string](r, "rsvps")
-					r.Messages = append(r.Messages, model.Message{Role: "system",
-						Content: fmt.Sprintf("You scheduled yourself a party-prep reminder for tomorrow morning. Checks you ran: weather — %s; RSVPs — %s. Acknowledge the party plan in persona, one or two short sentences, weaving these in.", weather, rsvps)})
-					return nil
-				}),
-			), nil),
-			brain.Call("fast"),
-			brain.Reply(),
-			// after Reply: the caller already has the answer; ambient
-			// memory happens behind their back.
-			memorize("fast", memorizeInstruction),
-		},
-		Pipelines: map[string][]brain.Node{
-			// story 5: finish later, then reach out
-			"register-guest": {
-				brain.Func(registerGuest),
-				brain.Notify(`{{index .Vars "result"}}`),
-			},
-			// story 6: reacting to the world, no human prompted this run
-			"unknown-face": {
-				brain.RecallFacts(recallNote),
-				brain.Func(describeFace),
-				brain.Extract[verdict]("fast",
-					`Someone is at the door. Based on the known facts (the guest
-list), decide whether to open: open only for people on the guest list.
-Give a one-sentence reason.`, "verdict"),
-				brain.If(func(r *brain.Run) bool {
-					v, ok := brain.Var[verdict](r, "verdict")
-					return ok && v.Open
-				},
-					brain.Notify(`Door opened: {{(index .Vars "verdict").Reason}}`),
-					brain.Notify(`Alert — someone unrecognized is at the door. {{(index .Vars "verdict").Reason}}`)),
-			},
-			// story 7: acting on schedule
-			"party-prep": {
-				brain.Notify("Reminder: the party is coming up — time to sort the shopping and tidy up."),
-			},
-			"nightly-review": {
-				brain.RecallFacts(recallNote),
-				brain.Notify("Nightly check-in done — I reviewed the household facts; all quiet."),
-			},
-		},
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
+	return def
+}
 
-	err := serve.Run(ctx, jarvis,
-		serve.WithPrepare(resolveSpeaker()),
-		// story 6: reacting to the world — an HTTP endpoint composed from
-		// two things, in this brain's own code: the route, and where it
-		// lands in the graph. pkg/serve knows nothing about "webhook
-		// triggers" as a concept; this is all ordinary Go.
-		serve.WithEndpoint("POST /triggers/door", doorWebhook),
-		// story 7: acting on schedule — likewise composed from the
-		// stdlib-plain cron.Next utility and Enqueue; no engine concept
-		// of "cron triggers" either.
-		serve.WithBackground(nightlyReview),
-	)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+func quote(s string) string { return `"` + strings.NewReplacer(`"`, `\"`, "\n", `\n`).Replace(s) + `"` }
+
+func fatal(err error) {
+	fmt.Fprintln(os.Stderr, "jarvis-demo:", err)
+	os.Exit(1)
 }

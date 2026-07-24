@@ -661,3 +661,245 @@ description, pkg/cron's now-zero engine dependents) and
 docs/authoring-guide.md's Triggers section, Brain struct, and story 6/7
 recipes. Full suite green under gofmt/vet/test -race; live door-webhook
 trigger re-verified against a real model.
+
+## 2026-07-22 — Architecture reset: IMPLEMENTATION.md rewritten (functions, not node graphs)
+
+Input: CRITIQUE.md (hard pass over pkg/ + jarvis-demo) and new-arch.md.
+Conclusion of the discussion: the node-graph DSL ([]Node, brain.If, Seq,
+Parallel, Vars map[string]any) is the accidental DSL PRODUCT.md rejected;
+scrapped in place. IMPLEMENTATION.md fully rewritten around one decision:
+a pipeline is a plain Go function the engine calls, not data it
+interprets. Key settled points:
+
+- Two handle types: *bb.Turn (chat; has Reply) vs *bb.Job (background;
+  no Reply — compile error replaces the old Replied flag).
+- Durable work via bb.Task registration → typed TaskRef; Later/At take
+  function refs with one JSON-able payload arg, killing stringly
+  pipeline names and map[string]any.
+- Sessions: NEW opt-in primitive — durable KV per author-chosen key,
+  backed by persistors; transcripts still belong to the client.
+- ctx.Value only for cross-cutting request values (speaker identity);
+  business data rides typed args, never ctx (rejected new-arch.md's
+  ctx-as-data-bus on Go-doc grounds).
+- Triggers: bb.Every (crontab syntax, engine-owned loop — closes the
+  WithBackground ctx footgun), bb.OnHTTP, supervised bb.Go escape hatch
+  (joined on shutdown).
+- pkg/persist: one durability substrate under jobs/sessions/schedules;
+  memory/file default, redis later. pkg/brain, pkg/serve, pkg/job,
+  pkg/cron slated for deletion; internal/ wire code salvaged (with the
+  role-coercion/tool-call fidelity bugs fixed).
+- Build order unchanged: same ten stories, vertical slices, demo first.
+
+Product decisions untouched. Code not yet changed — next session starts
+slice 1 against the new surface. authoring-guide.md will be rewritten
+as the code lands (docs move with code).
+
+## 2026-07-22 — jarvis-demo rewritten as pseudocode spec; prior-art survey
+
+- Rewrote cmd/jarvis-demo/main.go against the new pkg/bb surface from the
+  rewritten IMPLEMENTATION.md. It is deliberately non-compiling pseudocode
+  (pkg/bb does not exist yet) — the spec slice work must satisfy. It
+  forced concrete API decisions: bb.New + registration methods (not
+  ctor options), Brain.Later for handlers outside Turn/Job, t.System /
+  t.LastMessage / memory.Format / bb.Messages helpers, Prepare returning
+  ctx, Every(crontab, ref, payload).
+- User still not fully happy with the shape; requested a survey of prior
+  art. Written to docs/prior-art.md with verbatim interface examples:
+  Open WebUI Pipes + Letta (same product idea), Genkit Go + Pydantic AI +
+  DSPy + OpenAI Agents SDK (plain-function camp), Eino + Haystack +
+  Mastra + LangGraph/LlamaIndex Workflows (graph-DSL camp), Inngest +
+  Temporal + Restate (durable execution). Conclusions: plain-function bet
+  is mainstream; DSL⇄durability is the real axis; our facade+faculties+
+  guarantees combination is unoccupied; concrete steals noted (Letta
+  memory tiering, Inngest step-run upgrade path, Restate virtual objects
+  ≈ Session).
+
+## 2026-07-23 — front-end research: drag-and-drop brain builder
+
+- Wrote docs/research-graph-ui.md: survey of node-editor libraries for a
+  no-code graph builder/visualizer for brains.
+- Recommendation: React + Vite + React Flow (@xyflow/react), dagre (ELK
+  later for nested subgraphs), Zustand (+zundo for undo), zod-validated
+  graph JSON owned by us (not the library's shape), CodeMirror 6 for code
+  fields, JSON-Schema-driven inspector forms, shadcn/ui.
+- Rejected: Rete.js (ships a runtime we don't need — Go executes graphs),
+  LiteGraph (canvas-drawn nodes make internals painful), Blockly (wrong
+  metaphor), JointJS/GoJS (licensing/weight).
+- Debug/replay: Go side must emit structured run events from day one; the
+  debugger is a scrubber over that event list rendered as an overlay on the
+  same canvas. SSE for live runs.
+- Deferred: multiplayer (yjs), component registry versioning, run diffing.
+- Prior art to copy: n8n (per-node data inspector), Langflow (typed port
+  colours), ComfyUI (groups/subgraphs), Rivet (execution recording).
+
+## 2026-07-23 — Third architecture: durable savepoint engine (pkg/engine)
+
+Scrapped the second design (plain-Go flows with *durable intent*, whole-job
+re-run) after a design conversation (`conversation-*.txt`, `new-arch.md`). The
+author's top priority was **opt-in, per-step, resume-from-savepoint
+reliability plus tracing** — a game save point, not durable intent.
+
+Built `pkg/engine` from scratch:
+- `Store` (2-method KV): `MemStore` default, `FileStore` (atomic rename).
+- `Tracer` (1 method): `NoTrace` default, `JSONLTracer`. `StepRecord` carries
+  run/flow/step/attempt/cached/start/dur/in/out/err — one record per savepoint.
+- `Step`/`Do`/`Sleep`: memoized savepoints keyed `step/<run>/<name>`; result
+  JSON-stored on first success, replayed (`Cached:true`) on resume. `Sleep`
+  stores its deadline and `panic`s a private `yield` recovered by the engine
+  to requeue the run (frees the worker; durable wait). Retry opts `Retries`,
+  `Forever`, `Backoff`. Duplicate step name = `ErrDupStep`.
+- Run loop: queue is concrete code over `Store` (not an interface). Runs
+  persisted before Enqueue returns; claimed-run stays in store until acked
+  (at-least-once via lease-by-omission); `New` reloads pending on boot. Sorted
+  dispatcher + N workers = parallelism. ponytail notes on O(n) insert and
+  single-process lock left for the redis/multi-process upgrade.
+- Tests green: savepoint-resume (side effect runs once across a simulated
+  crash), retry-to-success, retry-exhaustion, sleep-yield-then-resume,
+  dup-step, enqueue-and-run e2e, filestore reload across restart.
+
+Deleted the old DSL: `pkg/brain`, `pkg/serve`, `pkg/job`, `pkg/cron`,
+`internal/app`, `cmd/cli`. Carried `pkg/model`, `pkg/memory`, `pkg/notify`,
+`internal/{openai,anthropic,config,logging,telemetry}`.
+
+Rewrote `cmd/jarvis-demo` as the doorbell flow — runs with no API key, prints
+a jsonl trace showing `classify` served from cache after a `Sleep` resume and
+`notify` retried until success. `go build/vet/test ./...` all green.
+
+Rewrote `PRODUCT.md`, `IMPLEMENTATION.md`, `docs/authoring-guide.md` to match.
+IMPLEMENTATION.md lists the pending slices (serving layer, config, cron,
+runtime-data KV, OTel tracer, notify durability) — engine substrate is done,
+those layer on top.
+
+## 2026-07-23 (cont.) — Serving layer, cron, runtime data; reference brain complete
+
+Continued the third architecture until the product surface is complete.
+
+- `pkg/serve`: OpenAI + Anthropic chat endpoints (both streaming) + `/models`
+  over the engine. `Brain` (New/OnChat/Mux/Handler/Serve) and `Turn`
+  (Messages, Params, Model(role), System, Reply, Later). Reply streams in the
+  caller's protocol via an `internal/openai`+`internal/anthropic` seam;
+  protocol difference is one switch in reply.go. Tests: both protocols,
+  streaming, system-prepend, Later-enqueues, no-handler guard. All green.
+- `pkg/engine` additions: `EnqueueID` (idempotent singleton runs);
+  `SetData`/`GetData` (run-scoped durable KV, data.go); `Every` + a 5-field
+  crontab parser (cron.go) implemented as a self-rescheduling durable run —
+  cron rides the same queue, no timer subsystem. Fixed an Enqueue
+  double-marshal. Tests: cron parse-errors/next/step-list/fire, plus existing.
+- `cmd/jarvis-demo` rewritten as the full home assistant: serves chat with
+  memory recall + persona, routes "remember X" to a durable background flow
+  (Later → Do(...,Forever)), runs a nightly cron review, jsonl trace of every
+  savepoint. Runs with no API key (scripted model) or a real provider via
+  BIG_BRAIN_API_KEY/_BASE_URL/_MODEL; BIG_BRAIN_DATA=<dir> for restart-durable
+  storage. Smoke-tested with curl: OpenAI non-stream, /models, Anthropic
+  stream, and the background remember flow all confirmed in the trace.
+
+Deliberately NOT built, with reasons (see IMPLEMENTATION.md "Pending"):
+OTel Tracer backend (JSONL already covers tracing; clean one-type swap, skip
+the trace SDK until spans are needed); Config→Brain boot helper (author wires
+a Go program, that is the config surface; moving internal/config to pkg/ waits
+for a second brain); notify durability as a subsystem (it's Do(...,Forever) /
+Later — a separate send queue would duplicate the engine's guarantee).
+
+`go build/vet/test ./...` all green.
+
+## 2026-07-23 (cont.) — Schedule introspection: Scheduled() + Cancel()
+
+Added cron/timer listing and cancellation (dynamism ladder level 3/4).
+- `Every` now returns its ticker handle ID (was error-only).
+- `Engine.Scheduled() []Schedule` — snapshot of pending runs (ID, Flow, Wake,
+  and Cron=spec for tickers). Meant to be formatted for a model to choose
+  cancellations, or driven by author logic.
+- `Engine.Cancel(ctx, id)` — removes the pending run, writes a tombstone under
+  cancelled/<id> so a ticker mid-fire won't re-arm, acks the record, nudges the
+  dispatcher, and traces a <cancel> record for audit. Unknown/already-done ID =
+  no-op. ponytail note: tombstones aren't pruned.
+- Cron ticker checks e.cancelled(id) at the top and does nothing if tombstoned.
+- Kept it unguarded (no per-handle allowlist) per the "keep it simple" call;
+  documented in the authoring guide that callers should filter Scheduled()
+  before exposing handles to a model. HTTP routes left as-is (stdlib ServeMux
+  is write-only) per user's decision.
+Tests: TestScheduledLists, TestCancelStopsCron (incl. re-arm-after-cancel
+guard). go build/vet/test ./... green.
+
+## 2026-07-24 — bb framework implemented (slices 1–6), all green
+
+Implemented the `bb` design from cmd/marvis-demo/main.go (the goal post),
+package-by-package, leaves first, each fully tested (many under -race) before
+the next. Architecture in BB.md.
+
+- Slice 1 model: pkg/model Spec builder (WithName/Think/Temprature, value-
+  immutable), tag Registry (RegisterModel/Lookup/Resolve), Bound (inject a
+  Model), Message builder (NewMessage/As). bb facade: Model, NewModel(tags…),
+  RegisterModel, Message, NewMessage, Role.
+- Slice 2 agent: internal/agent Agent (build-time, WithModel/Role/Schema/
+  Selects/OnMessage) + Turn (runtime: Add/Last/Ask/AskWith/Reply/Select) +
+  Reply (ReadAll/Read/Stream/Media). Schema-mismatch owned by Ask. bb.Extract[T]
+  is a FREE function (Go forbids generic methods — the one goal-post divergence:
+  reply.Extract[intent]() → bb.Extract[intent](reply)).
+- Slice 3 flow: internal/flow Flow (sealed iface), Basic (WithId/WithAgent),
+  seq via Next, Select group (runtime unknown-id = loud error), Respond, trace
+  seam.
+- Slice 4 concurrency: multi-agent flows run concurrently (fixed slice 3's
+  sequential run); divergent concurrent Select = ErrSelectConflict; All/One/
+  Group; Checkpoint/Wait/Reached.
+- Slice 5 serve: internal/serve OpenAI+Anthropic HTTP + /models + diagnostics;
+  flow.Validate (startup: modelless default agents, unbuildable models, declared
+  Select exits ⊄ group); Addr/Workers/Trace opts; Handler+Serve.
+- Slice 6 durability+trace: flow checkpointing over a Store (engine.Store),
+  keyed by (run id from X-Run-Id header, structural path); flow.cached resume;
+  Event timings + JSONL tracer; Notify prebuilt flow. bb: Store/MemStore/
+  FileStore/Notify/JSONL.
+
+Verified: a throwaway copy of main.go WITH the bb import builds; only remaining
+errors are reply.Extract (impossible-as-method, flagged) and a `return flow`
+missing `, nil` (a bug in the goal-post's own code). API conforms.
+
+Old superseded code (pkg/brain-era already gone; pkg/serve old Brain, old
+cmd/jarvis-demo) can be deleted next — bb.Serve replaces them.
+
+## 2026-07-24 (cont.) — Deleted old code, rewrote jarvis on bb, updated all docs
+
+- Deleted superseded packages: pkg/serve (old Brain, replaced by internal/serve
+  + bb.Serve), pkg/memory (bb has no memory primitive — memory is author state),
+  pkg/notify (replaced by bb.Notify + author send func), and the dead
+  internal/config + internal/logging + internal/telemetry cluster (0 importers).
+  Repo builds/vets/tests green after removal.
+- Added bb.FixedModel(reply) — a canned model so a brain runs with no API key.
+- Rewrote cmd/jarvis-demo on bb as a smart-home brain (NOT a marvis copy):
+  keyword router → Select(talk, remember, recall, house, briefing) → Respond →
+  Notify. Self-contained dummy world HTTP server (:8090) with sensors/devices/
+  notify sink; house agent reads sensors + sets devices; briefing reads sensors
+  concurrently; memory kept as author state and woven into persona; durability
+  via bb.Store; jsonl trace. Smoke-tested end to end — every capability works,
+  world side-effects (🏠/🔔) fire, memory persists across requests.
+- Docs: rewrote IMPLEMENTATION.md for the bb architecture (folded in the old
+  BB.md, then deleted BB.md); updated PRODUCT.md (authoring model, faculties,
+  persistence→durable-execution, parallelism, reference brains, config);
+  rewrote docs/authoring-guide.md completely for bb; rewrote README.md (was the
+  long-dead node-graph design importing pkg/brain+pkg/serve).
+- Did NOT touch cmd/marvis-demo/main.go (the goal post; user fixed its errors).
+
+## 2026-07-24 (cont.) — Cleared the ponytail debt ledger (7 fixes)
+
+Fixed all 7 deliberate shortcuts; no ponytail: markers remain.
+- engine pending queue: O(n) sorted-slice insert → container/heap min-heap
+  (runHeap); dispatch pops the earliest in O(log n).
+- engine cancel tombstones: now written only for cron-ticker ids (a finite,
+  reused set), never for one-off cancels — bounds growth to distinct tickers.
+- engine FileStore: 256-way subdirectory fan-out by hash prefix + sharded
+  lock (256), so large key sets don't pile into one dir and unrelated keys
+  don't contend. No new dependency.
+- engine cron: added Catchup() option — fires the target once per missed tick
+  (ticker payload carries its scheduled time); default stays fire-once-late.
+- engine Step retry: backoff >= 30s now yields the worker (persists the attempt
+  counter, requeues, resumes) instead of holding a goroutine; short backoffs
+  stay inline.
+- bb Schema: `enum:"a,b,c"` struct tag → JSON-schema enum (plus existing doc).
+- flow Group: real live shared chat — members run over one agent.SharedChat
+  with write-through replies and live reads, so a member sees another's reply
+  as it lands (was: same-starting-chat merge). New internal/agent SharedChat +
+  NewSharedTurn; flow carries it on ctx.
+Tests added for every fix (Group live visibility via a checkpoint, cron
+catch-up count, bounded tombstones, step yield-on-long-backoff, schema enum);
+all green under -race. go mod tidy dropped deps orphaned by the earlier
+package deletions.

@@ -1,8 +1,11 @@
 # PRODUCT
 
 What big-brain is, decided so far. Product only — no implementation, no
-business strategy. History of the discussion lives in `discussion.md` and
-`LOG.md`.
+business strategy. This is the **third** framing: the first was a node-graph
+DSL, the second "a brain is a plain Go function with durable *intent*". Both
+are scrapped. The through-line that survived every round is in `new-arch.md`;
+the reasoning that produced this framing is in `LOG.md`, `CRITIQUE.md`, and
+the `conversation-*.txt` transcripts.
 
 ## Core idea
 
@@ -10,203 +13,159 @@ business strategy. History of the discussion lives in `discussion.md` and
 (text, vision, voice) behind standard model-provider APIs (OpenAI- and
 Anthropic-compatible). From the outside it is just another model endpoint —
 every existing chat UI, IDE plugin, and SDK is a free client. Inside, a
-request runs through a **brain**: a pipeline of model calls, memory, files,
-search, and tools that makes it far more effective than one model for a
-specialized task.
+request runs through a **brain**: model calls, memory, tools, and background
+work that make it far more effective than one model for a specialized task.
 
-The engine ships the building blocks; a brain composes them into a specific
-character. The constraint is a feature: everything clever must fit behind a
-boring API.
+## The one thing the engine sells
 
-## The brain's faculties (what the product promises)
+**Durable, resumable, observable execution — and nothing you didn't ask for.**
+A brain author could hand-write the model calls, the prompt templates, the
+graph, the database wiring, and get exactly what the reference brain does. The
+engine earns its place by owning the parts they would get wrong or forget:
 
-- **Memory** — the brain remembers across sessions, ambiently: it decides
-  what to remember. A memoryful "model" is visibly unlike every provider it
+- **Composition.** Agents, flows, `Select` routing, and the concurrency
+  strategies (`All`/`One`/`Group`, `Checkpoint`) — the author writes handlers
+  and wiring; the engine runs the tree, merges replies, and resolves selection.
+
+- **Durable, resumable execution.** With a store configured, each flow's result
+  is checkpointed; a client that retries a crashed run (same run id) resumes
+  from the flow that was interrupted instead of re-asking the model. Like a save
+  point in a game — the run continues from where it was.
+
+- **Observability, free from the same boundaries.** Every flow start/end,
+  select, response, and cached-resume is a timed trace event. Backends: a
+  diagnostics ring (always on, at `/v1/diagnostics/trace`), a jsonl writer, or
+  the author's own. Debugging is a byproduct of running the tree.
+
+- **The boring boundary.** OpenAI/Anthropic-compatible serving, `/models`,
+  startup validation of the whole wiring, faithful passthrough of the chat
+  protocol.
+
+- **Faculties.** Model roles, structured extraction (typed `Schema`/`Extract`),
+  typed prompt templates, a `Notify` outgoing flow — the common machinery,
+  abstracted so it adds value without getting in the way of business logic.
+
+## The authoring model
+
+**A brain is a tree of flows, and control flow is Go.** A flow runs one or more
+agents over a chat and hands the result to the next flow; flows compose (a group
+of flows is a flow) and chain with `Next`. An agent's `OnMessage` handler is a
+plain Go function: it branches, calls tools, reads memory, and `Select`s which
+flow runs next. There is no graph DSL, no `Vars map[string]any`, no node
+vocabulary to grow — `if` is `if`.
+
+The load-bearing split: an **Agent** is build-time configuration (model, role,
+schema, declared exits, handler) and cannot act; a **Turn** is the agent live on
+one message (`Add/Ask/Reply/Select`) and cannot reconfigure. Each invalid state
+is unrepresentable at compile time — a builder can't ask, a running turn can't
+change its model.
+
+The library is the product; a brain is a Go program that imports `pkg/bb`,
+assembles its flows, and calls `bb.Serve`. A data-format brain (a graph loaded
+from a file) can be layered on top later — a graph is just a flow that walks a
+node list; the reverse is impossible — so that door stays open without paying
+for it now.
+
+## What the engine does NOT promise
+
+- **Streaming is buffered today.** A reply is produced by running the flow to
+  completion, then streamed to the client. True token-by-token streaming (and
+  genuine keep-working-after-reply) is a known future pass.
+- **At-least-once, not exactly-once.** A durable run that a client retries with
+  the same run id resumes from the last completed flow; a crash in the narrow
+  window before a result is checkpointed re-runs that flow. Side effects that
+  must not double are the author's responsibility (an idempotency key derived
+  from the run), aided but not guaranteed.
+
+## The faculties (what the product promises the end user)
+
+- **Memory** — the brain remembers across turns and decides what to remember.
+  Memory is the brain's own state: an agent's handler reads and writes it (a
+  map, a KV via `bb.MemStore`/`bb.FileStore`, a vector DB) and weaves recalled
+  facts into the persona. The engine gives durable execution and a KV; what to
+  remember and how to recall is the author's — deliberately, so memory strategy
+  never gets in the way. A memoryful "model" is visibly unlike the providers it
   imitates.
-- **Initiative (asynchrony)** — the brain can keep working after the
-  response ends and initiate contact later ("I'll text you when it's
-  done"): background jobs, incoming webhooks, outgoing notifications. A
-  deliberate, loud break from the stateless-model illusion.
-- **Senses** — vision, voice, text inputs.
-- **Hands** — tools; complicated tools get their own internal pipelines.
+- **Initiative** — the brain keeps acting past the reply: flows chained after
+  `bb.Respond` (e.g. a Notify that reaches out), and an outgoing-notification
+  flow. Durable, so a promise made survives a restart. (Scheduled/self-installed
+  triggers live in `pkg/engine`, not yet surfaced in the request-driven bb API.)
+- **Senses** — vision, voice, text (roadmap beyond v1 text).
+- **Hands** — tools; complex tools get their own internal flows.
 - **Character** — persona, mood, when to joke.
 
-Pipelines are how the brain thinks; faculties are what the product promises.
+## Working state within a run
 
-## Decision: how a brain is authored
+The chat threading through a flow chain *is* the run's working state: each flow
+appends its replies, and the next flow sees them. Beyond that, an agent handler
+holds ordinary Go variables for the span of a turn. Long-term facts are memory
+(above); the chat is the scratch a single run carries between flows.
 
-**Library-first. A brain is a Go program.** It imports
-`github.com/force1267/big-brain/pkg/...`, defines its nodes, conditionals,
-and tools as code, assembles the graph as a runtime object, and hands it to
-the engine, which serves it.
+## Reference brains
 
-Why not a data format (JSON/YAML/protobuf graph): a format is a programming
-language in denial — real brains need conditionals, loops, and arbitrary
-tool logic, and the node vocabulary would grow forever (the n8n/Terraform
-trajectory). Serialization choice (protobuf vs JSON) was a red herring;
-authorship is what matters.
+**The home assistant.** Chosen because it exercises both differentiators —
+memory and initiative — with the fewest heavy dependencies. Two reference
+brains, both `pkg/bb`-only, exactly as an external author writes them:
 
-Key insight that keeps doors open: **a data format can be layered on top of
-a code API, never the reverse.** Deferred, both expressible later as node
-types / loaders without touching the engine:
+- `cmd/marvis-demo` is the **goal post**: an intent router that classifies each
+  message with a model + typed schema, then `Select`s a capability. The bb API
+  was designed to make this program read well; the framework exists to satisfy
+  it.
+- `cmd/jarvis-demo` is the **runnable smart-home brain**: a keyword router into
+  capabilities (talk, remember, recall, house, briefing) over a self-contained
+  dummy world (sensors, devices, a notification sink), with memory kept across
+  turns, concurrent sensor reads, a Notify flow after the reply, durable
+  execution, and a jsonl trace. It runs with no API key.
 
-- A file-format brain = a generic brain whose graph is loaded from a file.
-- Split topology (orchestrator here, private "small-brain" hosted elsewhere)
-  = a remote-node type. It's a deployment topology, not an authoring model;
-  don't pay the network-protocol cost before it's needed.
+## One brain per process
 
-## Decision: one brain per process
+**This codebase is vLLM, not OpenAI.** One process serves exactly one brain =
+one "model" = one memory, one character. Being a *provider* (tenants, billing,
+catalogs) is somebody else's product built around this one — enabled by the
+embeddable `pkg/` and an externalized store (tenant-keyed state, stateless
+brain). "Many users" in scope means **speaker identity within one brain**: the
+household members of a home assistant. The brain tells speakers apart but
+remains one brain with one memory.
 
-**This codebase is vLLM, not OpenAI.** One big-brain process serves exactly
-one brain = one "model" = one memory, one character. Being a *provider*
-(tenants, billing, catalogs) is somebody else's product built around this
-one — enabled by the embeddable `pkg/`, possibly with a stateless brain
-that treats tenant identity as request context.
+## Configuration
 
-"Many users" in scope means **speaker identity within one brain**: the
-household members of a home assistant, the lab members of a research
-helper. The brain tells speakers apart (API key / user field) but remains
-one brain with one memory.
+Serve takes functional options (`bb.Addr`, `bb.Store`, `bb.Trace`, `bb.Workers`)
+with zero-config defaults, and provider credentials come from environment
+(`BIG_BRAIN_API_KEY`/`_BASE_URL`/`_MODEL`, 12-factor). Model roles are
+first-class and portable: `bb.RegisterModel(m, "fast", "cheap")` binds a model
+to tags, `bb.NewModel("fast")` fetches it, and flow code names the role while
+deployment config decides which provider backs it.
 
-## Decision: reference brain
+## Serving: handler first, runner second
 
-**The home assistant** is the first brain and drives which building blocks
-exist in v1. Chosen over the research-lab helper because it exercises both
-differentiators — memory and initiative — with the fewest heavy
-dependencies (no Elasticsearch/vector/vision stack on day one).
+The engine exposes an `http.Handler` the author can mount anywhere, and a
+convenience runner that owns the listener and graceful shutdown. Author-added
+routes are served either way — mounting the handler yourself still serves the
+engine's routes plus yours. Chat completions (OpenAI) and messages
+(Anthropic), both streaming, plus `/models`. Sampling parameters clients send
+are accepted, never an error, and surfaced to the brain as context. Caller
+tools and `<think>` blocks pass through untouched; honoring them is the
+brain's choice.
 
-## Decision: building-block taxonomy
+## Continuity — transcripts vs memory
 
-Every building block plays one of three roles in how a brain runs:
+The chat API is stateless: the client sends history each request; the engine
+keeps no server-side conversation. **Transcripts belong to the client;
+durable facts belong to memory.** Memory is the only continuity there is.
 
-- **Triggers** start a pipeline run: `chat` (the standard API request —
-  not special, just the most common trigger), `webhook`, `cron`. Brains
-  can install their own triggers at runtime; that is what makes
-  initiative real.
-- **Nodes** are the steps: prompt template, structured output
-  (json-schema; validate first, repair-model only on mismatch), tool/HTTP
-  call, conditionals, fan-out/join, and explicitly **reply** and
-  **notify**. Background work is not a node type — it is the pipeline
-  continuing after the reply node fires.
-- **Context & effects** are ambient, visible to every node: memory,
-  speaker identity, time/system awareness, model roles, outgoing
-  channels.
+## Parallelism
 
-**Model roles** (fast, smart, cheap…) are first-class: nodes reference a
-role; which provider/model backs each role is deployment configuration.
-This keeps brain code portable across providers.
+A flow's agents run concurrently, and the grouping strategies run member flows
+concurrently: `All` (merge every reply), `One` (first finisher wins, others
+cancelled), `Group` (one live shared chat — a member sees another's reply as it
+lands). `Checkpoint`/`Wait` coordinate agents within
+a flow. Two agents selecting different next-flows is a loud error, never a
+silent last-writer race. The same tracing applies to parallel work.
 
-## Decision: dynamism ladder
+## Non-goals (v1)
 
-Behavior change lives in data whenever possible; structure change only
-when data can't express it. Because graphs are runtime objects built by
-code, dynamism comes in grades, none requiring engine features:
-
-1. Fixed graph, dynamic data (memory) — most "learning".
-2. Dynamic construction — brain code assembles subgraphs at runtime.
-3. Self-installed triggers — the brain schedules its own future runs.
-4. Self-modifying structure — the brain registers new pipelines for
-   itself (skill learning, self-healing).
-
-Levels 1–3 are v1 scope; all ten reference stories run on them. Level 4
-is deliberately deferred pending its own discussion (persistence, audit,
-rollback of learned skills). Engine constraint preserving it: graphs are
-first-class values and registration is not restricted to startup.
-
-## Reference stories
-
-Ten home-assistant functionality stories define v1 coverage — each block
-must appear in at least one (full text in `discussion.md`): persona chat
-through any standard client; ambient memory; speaker identity; intent →
-structured tool call; reply-then-finish with notification; webhook-driven
-runs; scheduled and self-scheduled runs; time/system awareness; model
-roles; parallel multi-stage reasoning behind one streamed reply.
-
-## Decision: continuity — transcripts vs memory
-
-The chat API is stateless: the client sends history each request, and the
-engine keeps no server-side conversation. **Transcripts belong to the
-client; durable facts belong to memory.** Memory is the only continuity
-there is; the brain never assumes the client sent full history, and two
-different clients share nothing except what memory carries.
-
-## Decision: caller-declared tools and reasoning are the brain's concern
-
-The interface is chat, and chat includes tool calls — a caller may declare
-tools and receive tool-call responses; a brain may likewise emit `<think>`
-blocks to explain its reasoning. Whether and how to honor caller tools or
-expose reasoning is the **brain developer's choice**; the engine only
-faithfully carries the chat protocol in both directions.
-
-## Decision: background-job outcomes are not policed
-
-The engine does not enforce "every background continuation ends in a
-notification." Whether a failed background job notifies the user is a
-per-story, per-brain decision by the brain developer. The concern (a
-promise followed by silence) is real and is documented in an authoring
-guide, not enforced by the engine. The home-assistant reference brain
-*does* notify on background failure.
-
-## Decision: notification channel v1 = outgoing webhook
-
-The one built-in channel is an HTTP POST to a configured URL — it composes
-with any relay (Telegram bots, ntfy, …) without integrating them. The
-channel concept is **explicitly open to extension**: channels are an
-extensible family, outgoing webhook is merely the first member.
-
-## Decision: v1 API surface
-
-Chat completions (OpenAI-compatible) and messages (Anthropic-compatible),
-both with streaming, plus `/models` listing the single brain. No voice,
-vision, or realtime endpoints in v1 — senses remain a roadmap faculty, not
-a v1 promise. Sampling parameters clients send (temperature, etc.) are
-accepted, never an error, and exposed to the brain as context. Recorded
-here so future work doesn't silently widen or shrink this contract.
-
-## Decision: persistence
-
-One line: **memory and installed triggers always survive; background jobs
-survive as intent and re-run rather than resume; storage is pluggable with
-a zero-setup default.** The three kinds of engine-owned state carry three
-different promises:
-
-- **Memory** — survives unconditionally. Memory *is* the product.
-- **Self-installed triggers** — survive. Initiative that evaporates on
-  restart is fake initiative. (Config-defined triggers need no durability;
-  they reappear from brain code on startup.)
-- **Background jobs** — *durable intent, not durable execution*: the job
-  record survives and re-runs from the start after a crash (at-least-once);
-  partial execution is not resumed. Queued work is never silently lost,
-  but brain developers must write background pipelines to tolerate a
-  duplicate run (authoring-guide material). Durable mid-pipeline
-  resumption (workflow-engine territory) is a possible future grade, like
-  the dynamism ladder — not v1.
-
-The promise is *what* survives, never *where* it is stored: all three live
-behind engine-owned interfaces with pluggable backing. Default backing
-requires zero setup — one binary, durability included. Externalizing these
-interfaces is what enables the provider/stateless-brain deployment: same
-brain code, tenant-keyed external state.
-
-## Decision: build order — vertical slices in story order
-
-Blocks are built as vertical slices, each making a reference story pass
-end-to-end — never layer-by-layer. The order (rationale in
-`discussion.md`):
-
-1. **Story 1** — walking skeleton: chat trigger, prompt + model-call +
-   reply nodes, model roles, streaming, OpenAI-compatible serving.
-2. **Story 4** — structured output, tool node, conditionals.
-3. **Stories 2+3** — memory interface (zero-setup default) + speaker
-   identity.
-4. **Story 5** — post-reply continuation, outgoing-webhook channel,
-   durable-intent job store.
-5. **Stories 6+7** — webhook and cron triggers, self-installed triggers.
-6. **Stories 8+10** — context injection, fan-out/join (9 falls out of
-   slice 1's roles).
-
-Anthropic-messages compatibility is deferred until after slice 2; one
-client protocol proves the boundary.
-
-There are no open product questions; how the code is organized lives in
-`IMPLEMENTATION.md`.
+Voice/vision/realtime endpoints; multi-tenancy or provider features; a graph
+file format or node-type registry; a generic plugin system; server-side
+transcripts; exactly-once delivery; durable execution of un-`Step`-wrapped
+code. Redis/vector backends and richer join policies: later, when a slice
+demands them.

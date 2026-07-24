@@ -1,168 +1,146 @@
 # IMPLEMENTATION
 
-The bridge between `PRODUCT.md` (what big-brain is) and the code (how it
-is built). Read `PRODUCT.md` first; read `docs/effective-go-rules.md` and
-`CLAUDE.md` before writing any Go. This file records the implementation
-requirements and guidance that follow from the product decisions — it
-does not restate them.
+How big-brain is built. The public surface is **`pkg/bb`** — the one package a
+brain author imports. Everything else is an implementation concern in its own
+package behind it (Effective Go: small, single-responsibility packages; `bb` is
+pure wiring). `cmd/marvis-demo/main.go` is the **goal post** — the exact API an
+author writes; the code exists to satisfy it. Read `PRODUCT.md` first, then
+`docs/authoring-guide.md` for how to use the surface.
 
-## Shape of the system
+## The authoring model
 
-One process, one binary, authored by the brain developer:
-
-```
-brain author's main.go
-  └── imports pkg/...        builds the graph, calls Serve
-        └── engine (library) owns HTTP, triggers, run loop, state
-              └── internal/  wire formats and guts, invisible to authors
-```
-
-- **big-brain is a library.** There is no engine executable that loads
-  brain artifacts. The author's program *is* the deployable binary.
-- **`pkg/` is the whole author-facing surface.** A brain author is an
-  external module; Go forbids importing `internal/`. Anything a brain
-  needs to compile — graph types, nodes, triggers, model roles, serve —
-  must be exported from `pkg/`.
-- **`internal/` holds only what runs behind the pkg API** and that we
-  want to change without breaking authors. First occupant:
-  `internal/openai` (chat-completions wire structs, SSE encoding,
-  `/models` payloads). Extract more (e.g. a run executor) only when a
-  pkg package outgrows its home — extraction later is mechanical, a
-  premature boundary is not.
-- **Deliberate deviation from CLAUDE.md's "initialization lives in
-  `internal/`":** the reference brain `cmd/jarvis-demo` uses only
-  `pkg/`, exactly like an external author would. It is executable
-  documentation; if it needs private wiring, the pkg API is defective —
-  fix the API. (Logged in `LOG.md`.)
-
-## Package layout (slice 1; grow only when a slice demands it)
+A brain is a tree of **flows**. A flow runs one or more **agents** over an
+incoming chat, collects their replies, and hands the result to the next flow.
+Flows compose — a group of flows is itself a flow — and `Next` chains them:
 
 ```
-pkg/brain/         graph as runtime values: Node, Graph, Run; chat trigger;
-                   prompt-template, model-call, reply nodes
-pkg/model/         model roles (fast/smart/cheap...) + provider clients
-                   (openai-go, anthropic-sdk-go) selected by deployment config
-pkg/serve/         Serve(brain): OpenAI-compatible chat completions +
-                   streaming + /models
-internal/openai/   wire types + SSE — authors never see these
-cmd/jarvis-demo/   reference brain; pkg-only; ~30 lines
+router.Next(bb.Select(talk, remember, …)).Next(bb.Respond).Next(notify)
 ```
 
-Naming per Effective Go: short lower-case package names, no stutter —
-`brain.Graph`, `model.Role`, `serve.Serve` (call sites read well).
+Control flow is Go: an agent's `OnMessage` handler is a plain function that can
+branch, call tools, and `Select` the next flow. There is no graph DSL, no
+`Vars` bag, no node vocabulary to grow.
 
-This box is the slice-1 snapshot, kept for history — later slices grew
-`pkg/` well past it. Current layout, and why each package exists:
+The two-type split is the load-bearing decision: an **Agent** is build-time
+configuration (`WithModel/WithRole/WithSchema/Selects/OnMessage`) and cannot
+act; a **Turn** is the agent live on one message (`Add/Ask/Reply/Select`) and
+cannot reconfigure. Each invalid state is unrepresentable at compile time.
+
+## Packages
 
 ```
-pkg/brain/    graph runtime: Node, Run, Brain, control flow, model calls,
-              memory/background nodes. Composes model/memory/job/notify;
-              owns none of their types. Carries no trigger concept beyond
-              Chat and named Pipelines — no Webhooks/Crons fields; see
-              pkg/serve below for how triggers actually get wired.
-pkg/model/    Role indirection + Model interface + OpenAI client. Leaf:
-              no deps on any other pkg/ package.
-pkg/memory/   Memory interface + two implementations (OpenFile: recency;
-              OpenLLM: one model call judges relevance over the full log).
-              Leaf except for OpenLLM's dependency on pkg/model — the one
-              interface→implementation edge that isn't a pure leaf,
-              because judging relevance requires a model call.
-pkg/job/      Store interface (durable, at-least-once) + Job (envelope +
-              RunAt readiness gate + a free-form Source provenance tag).
-              Leaf: no deps.
-pkg/notify/   Channel interface (notify.go) + one file per implementation
-              (webhook.go; Log lives with the interface as the always-
-              available fallback). Leaf: no deps.
-pkg/cron/     Cron declaration + Next(now) — pure schedule math. A plain
-              utility function, not part of any interface; brain authors
-              call it directly when composing their own scheduled
-              triggers (see pkg/serve). Leaf: no deps, and no longer
-              imported by pkg/brain or pkg/serve — only by whatever brain
-              code chooses to use it.
-pkg/serve/    HTTP serving, config loading, job runner. Exposes Enqueue —
-              the one primitive every trigger, of any kind, ultimately
-              calls — via two composable options: WithEndpoint (adds a
-              route to the shared server) and WithBackground (runs a
-              func at startup with Enqueue in hand). Webhook- and
-              cron-shaped triggers are brain-author code built from
-              these two primitives plus pkg/cron, not engine-owned
-              trigger kinds — pkg/serve has no concept of either. The
-              only pkg/ package that reaches into internal/ (wire
-              formats, config, logging, telemetry) and the only one that
-              picks concrete implementations (OpenFile, Webhook, OpenAI)
-              from env config.
-internal/     openai, anthropic (wire formats + SSE), config, logging,
-              telemetry — invisible to brain authors, reachable only from
-              pkg/serve and internal/app.
-cmd/jarvis-demo/  reference brain; pkg-only.
-cmd/cli/          thin entrypoint bridging internal/app to the OS.
+pkg/bb/          The facade. Type aliases + constructors delegating to the
+                 packages below. Owns only the small value types with no
+                 separate concern of their own: Prompt templates, typed Schema.
+                 No business logic. The one package authors import.
+
+pkg/model/       The model concern. Model interface (Stream), providers
+                 (OpenAI, Mock), the Spec builder (WithName/Think/Temprature,
+                 value-immutable), the tag Registry (RegisterModel/Lookup/
+                 Resolve), Message + As. Bound injects a specific Model. Leaf.
+
+internal/agent/  Agent (build-time) + Turn (runtime) + Reply. An agent asks its
+                 model, validates the reply against its schema (schema mismatch
+                 is owned here, by Ask), replies, and selects. Depends on model.
+
+internal/flow/   Flow orchestration. The sealed Flow interface; Basic (one or
+                 more agents, run concurrently); seq (Next chaining); the four
+                 grouping strategies Select/All/One/Group; Checkpoint/Wait/
+                 Reached; Respond/Notify prebuilt flows; the trace seam; and
+                 durable checkpointing over a Store. Depends on agent.
+
+internal/serve/  The boring boundary. Validates a flow at startup, then serves
+                 it over OpenAI- and Anthropic-compatible HTTP (+ /models, +
+                 /v1/diagnostics/trace). Handler for embedding, Serve for the
+                 runner. Depends on flow + internal/{openai,anthropic} wire.
+
+internal/openai/ + internal/anthropic/   Wire request/response types and SSE.
+
+pkg/engine/      A durable at-least-once job engine (Store, Step/Sleep, worker
+                 loop, cron). bb uses only its Store implementations (MemStore/
+                 FileStore) as the flow-checkpoint backend; the rest stands
+                 alone for job-style use.
 ```
 
-No cycles: every edge points from `brain`/`serve` down to a leaf, never
-back up, and `internal/` never imports `pkg/`. `pkg/brain` composing
-model/memory/job/notify — and nothing composing `brain` except `serve` —
-is the deliberate shape: infrastructure stays ignorant of pipelines,
-business logic (`brain`) stays ignorant of HTTP and config, and only
-`serve` is allowed to know about both. `pkg/cron` sits outside this
-composition entirely now — it's a utility any brain author's own code may
-import, not a dependency of the engine.
+No cycles: `bb` points down at the internals and at `model`/`engine`; the
+internals never import `bb`. `pkg/model.Structured` satisfies the agent's
+`Schema` interface **structurally**, so no package imports another just for a
+type.
 
-## Build order (decided in PRODUCT.md)
+## Key mechanisms
 
-Vertical slices in story order: 1 → 4 → 2+3 → 5 → 6+7 → 8+10. Each slice
-is done when its story passes end to end against a real off-the-shelf
-client. Never build a layer (all nodes, all triggers) ahead of the slice
-that needs it.
+**Select routing.** An agent `Select`s a flow id (a string, because the
+selector is model output — that is the honest type at the LLM boundary). At
+request time an unknown id is a loud error, not a silent misroute
+(`ErrUnknownSelect`). Optionally an agent declares its exits with `Selects(…)`;
+then `flow.Validate` checks, **at startup**, that every declared exit is a
+member of the downstream Select group.
 
-**Slice-1 definition of done:** `cmd/jarvis-demo` compiles from `pkg/`
-alone; `curl` (or any OpenAI SDK) against it returns a streamed persona
-reply; `/models` lists the one brain; `gofmt` clean, `go vet` clean,
-tests green.
+**Concurrency.** A flow's agents run concurrently; `All`/`One`/`Group` run
+member flows concurrently. `All` merges every reply, `One` takes the first
+finisher and cancels the rest, `Group` runs members over one live shared chat
+(`agent.SharedChat`, write-through replies) so a member sees another's reply as
+it lands. Two agents selecting **different** ids is a loud `ErrSelectConflict`,
+never a wall-clock last-writer race; the same id is fine. `Checkpoint`/`Wait`/
+`Reached` coordinate agents within a flow. All concurrency is `-race` clean.
 
-**Write the author code first.** Each slice starts by writing (or
-extending) `cmd/jarvis-demo` as the spec the engine must satisfy, then
-building the pkg surface until it compiles and the story passes.
+**Errors surface at two points only.** `Serve`/`Handler` (all wiring and config,
+at startup, via `flow.Validate`) and `Ask` (schema mismatch + transport, at
+runtime, because it depends on live model output). Builders only record;
+`Extract` is a pure typed getter.
 
-## Requirements carried from product decisions
+**Durability.** With a `Store` configured, each leaf flow's result is
+checkpointed, keyed by `(run id, structural path)`. A request carries its run
+id via the `X-Run-Id` header; a client that retries a crashed run with the same
+id resumes — flows that already completed replay from the savepoint (a
+`flow.cached` trace event) instead of re-asking the model. Structural path (not
+completion order) keeps keys stable under concurrency.
 
-- **Graphs are first-class runtime values** and registration is not
-  restricted to startup (keeps dynamism level 4 possible). Node bodies
-  are author-supplied Go functions; the engine never interprets a data
-  format.
-- **Chat is just a trigger.** The run loop must not special-case the
-  HTTP request; `reply` is a node that streams to the caller, and the
-  pipeline may continue after it fires. Design the run model for this in
-  slice 1 even though continuation ships in slice 4.
-- **Model roles are indirection**: nodes name a role; deployment config
-  (env) binds roles to provider+model. No provider names in brain code.
-- **Protocol fidelity**: sampling params are accepted, never an error,
-  and surfaced to the brain as context; caller tools and `<think>`
-  blocks pass through untouched — honoring them is brain code's choice.
-- **State behind interfaces** (memory, installed triggers, job store):
-  engine-owned pluggable interfaces with a zero-setup default backing.
-  Promises: memory and installed triggers survive restarts; jobs are
-  durable intent (at-least-once, re-run from start). Arrives in slices
-  3–5; nothing in earlier slices may assume in-process-only state.
+**Observability.** Every flow boundary, select, response, and cached-resume is a
+timed trace `Event`. Tracers: the diagnostics ring (always on, exposed at
+`/v1/diagnostics/trace`), a `JSONL` writer, or an author's own.
 
-## Repo rules that bind every package (from CLAUDE.md)
+## The Go-impossible bit (one deliberate divergence from the goal post)
 
-- `effective.go` in every package: comments only, what the package is
-  and why Effective Go justifies it.
-- Interfaces ≤3 methods (≤2 active, ≤1 marker), defined where used;
-  every package exporting an interface ships `mock.go`.
-- Sentinel errors per package (`var ErrX = errors.New(...)`), wrap with
-  `fmt.Errorf("%w: %w", ErrX, err)`, context added at every layer.
-- `logrus` for logs; `viper` for config; all environment-dependent
-  values from env vars prefixed `BIG_BRAIN_` (12-factor). Role→model
-  binding is the first such config.
-- OTel metrics: noop/stdout locally, OTLP in production, selected by
-  env; metric-bearing interfaces get `MonitoredX` wrappers in the
-  package's `telemetry.go`, returned by `New...` when telemetry is on.
-- Tests: happy, unhappy, edge, every branch — quality over coverage.
-- Every session appends to `LOG.md`.
+`reply.Extract[intent]()` cannot exist — Go forbids type parameters on methods.
+It is a **free function**, `bb.Extract[intent](reply)`, exactly like
+`bb.Schema[intent]()`. This is the only place the built API differs from the
+goal-post source, and it is recorded here so it is not mistaken for an omission.
 
-## Non-goals (do not build)
+## Build order (how it was built; how to extend it)
 
-Voice/vision/realtime endpoints; Anthropic messages API before slice 2
-is done; multi-tenancy or provider features; durable mid-pipeline
-resumption; a graph file format; a node-type registry "for later."
+Leaves first, each package real and exhaustively tested (happy, unhappy, edge,
+every branch; concurrency under `-race`) before the next:
+
+1. **model** — Spec, Registry, Message.
+2. **agent** — Agent/Turn/Reply, Extract.
+3. **flow** — Flow/Basic/seq/Next, Select, Respond.
+4. **concurrency** — concurrent agents, All/One/Group, Checkpoint.
+5. **serve** — Validate + OpenAI/Anthropic HTTP + diagnostics.
+6. **durability + trace** — checkpoint/resume, timings, JSONL, Notify.
+
+## Status and deferred depth (documented, not hidden)
+
+Built, green, and demonstrated end to end by both `cmd/marvis-demo` (intent
+routing with a model + schema) and `cmd/jarvis-demo` (a full smart-home brain
+with a self-contained dummy world, memory, tools, briefing, notify, durability).
+
+Deliberately deferred:
+
+- **True token streaming through flows.** `Serve` runs the flow to completion,
+  then streams the buffered reply. A live token stream (and genuine
+  reply-then-keep-working after `Respond`) needs a streaming-chat pass.
+- **Scheduled/self-installed triggers (cron).** Not in the bb request→flow
+  surface; `pkg/engine` has the durable scheduler (crontab, catch-up, durable
+  retry-with-yield) if a job-style API is wanted.
+
+(`Group` now runs members over one live shared chat — a member sees another's
+reply as it lands — via `internal/agent.SharedChat`; it is no longer a
+same-starting-chat approximation.)
+
+## Repo rules (from CLAUDE.md)
+
+`effective.go` per package; interfaces small (Flow is 3 methods: `run`/`id`
+unexported seal it, `Next` exported); sentinel errors wrapped `%w`; tests for
+happy/unhappy/edge/every branch; every session appends to `LOG.md`;
+`docs/authoring-guide.md` moves with the code.
