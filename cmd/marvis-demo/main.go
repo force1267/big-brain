@@ -9,21 +9,49 @@ import (
 	"github.com/force1267/big-brain/pkg/bb"
 )
 
+var (
+	ModelCheap string = "cheap"
+	ModelSmart        = "smart"
+	ModelFast         = "fast"
+)
+
+var (
+	FlowIntentDiscovery string = "IntentDiscovery"
+	FlowTalking                = "Talking"
+	FlowRemember               = "Remember"
+	FlowRecall                 = "Recall"
+	FlowList                   = "List"
+	FlowHouse                  = "House"
+	FlowExtra                  = "Extra"
+)
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	// RegisterModel binds one model to one or more string tags, so flows can fetch
-	// it by tag (bb.NewModel("cheap")) instead of re-specifying name/params every time.
+	// bb.WithModel binds one model to one or more string tags, so flows can fetch
+	// it by tag (bb.NewModel(ModelCheap)) instead of re-specifying name/params every time.
 	// define the model once here; every tagged flow reuses it, and swapping the backing
 	// model later is a one-line change that all of them follow. one model can answer to
 	// several tags — "fast" and "cheap" point at the same small model until you split them.
 	// (intent-discovery and talk below deliberately build their models inline instead —
 	// the demo shows both styles; tagging is a convenience, not a requirement.)
-	bb.RegisterModel(
+	var register bb.RegisterModel = bb.WithModel(
 		bb.NewModel().WithName("google/gemma-4-e4b").WithThink(false).WithTemprature(0.3),
-		"cheap", "fast",
 	)
+	register = register.WithTag(
+		ModelCheap,
+		ModelFast,
+	)
+
+	// there is a concept of default model, and flows using that model as their default models. (flows can have a default model for their agents; flow.WithModel just like agent.WithModel)
+	// the first call to bb.WithModel sets a default model that all the flows use as their default model.
+	// the bb.WithDefaultModel(bb.NewModel().) works like bb.WithModel but it does not tag and only sets the default model.
+	// the order of models used by an agent:
+	// 1- agent.WithModel() sets it
+	// 2- flow.WithModel() on the flow the agent is running in
+	// 3- flow's default model set by bb.WithDefaultModel()
+	// 4- the first model registered by bb.WithModel
 
 	talking, err := flowTalk(ctx)
 	if err != nil {
@@ -72,19 +100,28 @@ func main() {
 	if err := bb.Serve(ctx, flow); err != nil {
 		fmt.Println(err)
 	}
+	// multiple flows can be served
+	// bb.WithFlow(flow).As("exmaple/marvis-demo").WithFlow(anotherFlow).As("google/gemma-4-e4b").Serve()
+	// var register bb.RegisterFlow = bb.WithFlow() // registers a flow as default flow. requests not mentioning a model name uses this flow
+	// bb.WithFlow().As("model/name") // a flow can be named. not twice .As("model-1").As("model-2") is a type error
+	// var regsiterAnother bb.RegisterNamedFlow = bb.WithFlow().As("model/name")
+	// bb.RegisterFlow can not be chained with another WithFlow because having two default models is not possible.
+	// both bb.RegisterFlow and bb.RegisterNamedFlow can be chained to .Serve(ctx)
+	// there is a bb.WithDefaultFlow(flow) (without .As()) that returns the same chain WithFlow()
+	// the order of default flow is:
+	// 1- bb.Serve(ctx, defaultFlow) was intentionally called with a default flow
+	// 2- last WithDefaultFlow()
+	// 3- last WithFlow() without .As()
+	// 4- last WithFlow().As() if no unnamed WithFlow or WithDefaultFlow exists
+
+	// multiple bb.WithFlow() works the same
+	// bb.WithFlow(flow1).As("flow/1")
+	// bb.WithFlow(flow2).As("flow/2")
+	// bb.Serve(ctx) // serve can be run without default flow
+
 	// the Serve also serves diagnostics, tracing and debbugging endpoints too
 	// visualization tools and developer tools that we are going to develop can use them
 }
-
-var (
-	FlowIntentDiscovery string = "IntentDiscovery"
-	FlowTalking         string = "Talking"
-	FlowRemember        string = "Remember"
-	FlowRecall          string = "Recall"
-	FlowList            string = "List"
-	FlowHouse           string = "House"
-	FlowExtra           string = "Extra"
-)
 
 type intent struct {
 	Intent string `json:"intent"` // one of the possible intent keys
@@ -168,8 +205,14 @@ func flowDiscoverIntent(ctx context.Context) (bb.Flow, error) {
 				// pure typed getter that cannot error — no duplicated error path.
 				return fmt.Errorf("error at discover agent ask: %w", err)
 			}
+			// turn.Request().MaxTokens or turn.Request().Temperature to get params that was sent alongside user's original request.
 
-			// var response string = reply.ReadAll() // also there is Stream() that gives a channel, Read() gives available chunk
+			// var response string = reply.ReadAll() // the whole reply, blocking until it is complete
+			// var tokens <-chan string = reply.Stream() // the SAME reply live, token by token, from the start
+			// reply.ReadAll() and reply.Stream() coexist — you are never forced to choose: stream the tokens to
+			// the user AND still ReadAll() the whole thing (e.g. to remember it). Read() gives the next available chunk.
+			// (this discovery agent has a schema, so its reply is always buffered whole to validate — Stream() here
+			// just yields that finished JSON once. live token streaming is for the schema-less terminal reply; see flowTalk.)
 			// var media []string = reply.ListMedia() // a list of media sent alongside reply
 			// var image []byte = reply.Media("some-image")
 			var response intent = bb.Extract[intent](reply) // reads one full message after it is completed, extracts it
@@ -217,6 +260,9 @@ func flowDiscoverIntent(ctx context.Context) (bb.Flow, error) {
 
 	// multiple agents can turn.Reply(...), all of them gets added to the flows' chat and gets sent to the next flow.
 
+	// a flow can also have a model. bb.NewFlow().WithModel(model)
+	// this way the agent without a model (bb.NewAgent().OnMessage(func ...)) inherits the flow's model
+	// and also, if a flow doesn't define a model, by default its model becomes the first bb.RegisterModel that happens
 	return flow, nil
 }
 
@@ -228,10 +274,34 @@ func flowTalk(ctx context.Context) (bb.Flow, error) {
 
 	role := bb.Role("You are Marvis, a warm and concise home assistant. Just chat with the user.")
 
-	// no schema, no OnMessage: a plain agent flow streams its reply straight back to the next flow.
+	// no schema, no OnMessage: a plain agent asks the model and replies. when this flow is the
+	// TERMINAL one (its reply is the user's answer — the flow right before bb.Respond, or the last
+	// in the chain) AND the client asked for streaming, a default agent like this streams its reply
+	// to the user token by token automatically. nothing to write. otherwise it buffers. talk sits
+	// before Respond, so it is terminal.
 	var agent bb.Agent = bb.NewAgent().
 		WithModel(model).
 		WithRole(role)
+	// to stream from your OWN OnMessage handler, tee the incoming tokens into the outgoing channel
+	// turn.Stream() hands you:
+	//   reply, _ := turn.Ask()
+	//   if out, ok := turn.Stream(); ok {          // ok only when this turn is terminal + client wants SSE
+	//       for tok := range reply.Stream() {      // live model tokens
+	//           out <- tok                          // forward (or transform / inject as you like)
+	//       }
+	//       close(out)                              // the framework delivers to the user AND captures the
+	//                                               // whole message into the flow's chat for you (for Respond/
+	//                                               // Notify downstream and for durability) — do NOT also turn.Reply it.
+	//       return reply.Err()                      // a mid-stream model error lands here (no HTTP status left once
+	//                                               // tokens are flowing; Serve emits an SSE error frame)
+	//   }
+	//   turn.Reply(reply.ReadAll())                 // buffered fallback: non-terminal, or a non-streaming request
+	// turn.Stream() is CLAIM-ONCE: only the first agent in the terminal flow that calls it gets ok=true; any other
+	// (a sibling in bb.All/bb.Group, a non-terminal agent) gets ok=false and should turn.Reply normally. this is how
+	// concurrent agents never interleave two token streams to the one user.
+	// why terminal-only: a durable flow hands COMPLETE messages to the next flow (that is what the checkpoint saves),
+	// so a live stream cannot cross a flow boundary and stay resumable. the durable chat is always whole; the live
+	// stream is a parallel tee that only exists at the terminus.
 
 	// return ..., nil
 	var flow bb.Flow = bb.NewFlow().WithId(FlowTalking).WithAgent(agent)
@@ -239,13 +309,13 @@ func flowTalk(ctx context.Context) (bb.Flow, error) {
 }
 
 func flowRemember(ctx context.Context) (bb.Flow, error) {
-	// NewModel("cheap") returns a builder seeded from the model registered under "cheap"
+	// NewModel(ModelCheap) returns a builder seeded from the model registered under "cheap"
 	// in main — not a frozen instance. it is still a builder, so a flow can override any
 	// setting on top of the registered defaults, e.g.
-	//   bb.NewModel("cheap").WithTemprature(0.9)
+	//   bb.NewModel(ModelCheap).WithTemprature(0.9)
 	// to keep the shared backing model but make just this flow more creative. NewModel()
 	// with no tag is the same builder starting from blank instead of a registered base.
-	var model bb.Model = bb.NewModel("cheap").WithTemprature(0.9)
+	var model bb.Model = bb.NewModel(ModelCheap).WithTemprature(0.9)
 
 	role := bb.Role("You are Marvis' memory keeper. The user is telling you a fact to remember. Restate the fact you will remember, briefly.")
 
@@ -258,7 +328,7 @@ func flowRemember(ctx context.Context) (bb.Flow, error) {
 }
 
 func flowRecall(ctx context.Context) (bb.Flow, error) {
-	var model bb.Model = bb.NewModel("cheap") // the model registered under "cheap" in main
+	var model bb.Model = bb.NewModel(ModelCheap) // the model registered under "cheap" in main
 
 	role := bb.Role("You are Marvis recalling what you know. The user is asking about a fact they told you before. Answer from memory, and say so if you don't know it.")
 
@@ -271,7 +341,7 @@ func flowRecall(ctx context.Context) (bb.Flow, error) {
 }
 
 func flowList(ctx context.Context) (bb.Flow, error) {
-	var model bb.Model = bb.NewModel("cheap") // the model registered under "cheap" in main
+	var model bb.Model = bb.NewModel(ModelCheap) // the model registered under "cheap" in main
 
 	role := bb.Role("You are Marvis maintaining the user's lists. They may create a list, add, remove, or modify items. Confirm the change you made.")
 
@@ -284,7 +354,7 @@ func flowList(ctx context.Context) (bb.Flow, error) {
 }
 
 func flowHouse(ctx context.Context) (bb.Flow, error) {
-	var model bb.Model = bb.NewModel("cheap") // the model registered under "cheap" in main
+	var model bb.Model = bb.NewModel(ModelCheap) // the model registered under "cheap" in main
 
 	role := bb.Role("You are Marvis controlling the smart house. The user wants to read a sensor, set a device, or check something. Report what you did or read.")
 

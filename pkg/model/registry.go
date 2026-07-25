@@ -13,8 +13,10 @@ var ErrUnknownModelTags = errors.New("model: no model registered for tags")
 // facade exposes RegisterModel as a package-level function (a brain registers
 // its models once at startup). Guarded for the rare concurrent registration.
 type registryT struct {
-	mu    sync.RWMutex
-	items []regEntry
+	mu     sync.RWMutex
+	items  []regEntry
+	def    Spec
+	defSet bool
 }
 
 type regEntry struct {
@@ -25,7 +27,9 @@ type regEntry struct {
 var registry registryT
 
 // Register stores spec under every tag in tags. A model may hold several tags
-// ("fast", "cheap"); later Lookup finds it by any subset of them.
+// ("fast", "cheap"); later Lookup finds it by any subset of them. The first
+// registration also becomes the process default (the last rung of the model
+// inheritance ladder: agent → flow → SetDefault → first Register).
 func Register(spec Spec, tags ...string) {
 	set := make(map[string]bool, len(tags))
 	for _, t := range tags {
@@ -33,7 +37,26 @@ func Register(spec Spec, tags ...string) {
 	}
 	registry.mu.Lock()
 	registry.items = append(registry.items, regEntry{spec: spec, tags: set})
+	if !registry.defSet {
+		registry.def, registry.defSet = spec, true
+	}
 	registry.mu.Unlock()
+}
+
+// SetDefault sets the default model explicitly, overriding (and pre-empting)
+// the first-Register default. It registers no tags.
+func SetDefault(spec Spec) {
+	registry.mu.Lock()
+	registry.def, registry.defSet = spec, true
+	registry.mu.Unlock()
+}
+
+// Default returns the default Spec, or a zero (IsSet false) Spec if none was
+// set. It is the last fallback when neither an agent nor its flow has a model.
+func Default() Spec {
+	registry.mu.RLock()
+	defer registry.mu.RUnlock()
+	return registry.def
 }
 
 // Lookup returns the first registered Spec whose tag set contains all of the
@@ -66,7 +89,7 @@ func Resolve(tags ...string) Spec {
 // ResetRegistry clears all registrations. For tests.
 func ResetRegistry() {
 	registry.mu.Lock()
-	registry.items = nil
+	registry.items, registry.def, registry.defSet = nil, Spec{}, false
 	registry.mu.Unlock()
 }
 

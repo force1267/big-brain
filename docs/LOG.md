@@ -903,3 +903,132 @@ Tests added for every fix (Group live visibility via a checkpoint, cron
 catch-up count, bounded tombstones, step yield-on-long-backoff, schema enum);
 all green under -race. go mod tidy dropped deps orphaned by the earlier
 package deletions.
+
+## 2026-07-25 — Model inheritance ladder (WithModel/WithDefaultModel)
+
+Goal (from marvis-demo main.go): no agent is model-less. An agent inherits its
+model from the flow, and a flow from a default model.
+
+Done:
+- pkg/model registry: added a process default. First `Register` sets it;
+  `SetDefault` overrides; `Default()` reads it. `ResetRegistry` clears it.
+- pkg/bb: replaced `RegisterModel(m, tags...)` with fluent `WithModel(m)`
+  returning a `RegisterModel` handle, `.WithTag(tags...)` to bind lookup tags.
+  First `WithModel` is the implicit default. Added `WithDefaultModel(m)` — sets
+  the default without tagging.
+- internal/flow Basic: added `WithModel` (flow default model) and resolves each
+  agent's model along the ladder — agent → flow → default — before running,
+  via `resolved()`/`modelFor()`. Validate uses the same resolution.
+- jarvis-demo: chat model now `WithModel(...).WithTag("chat")`; talk flow sets
+  the model on the flow, its agent inherits it.
+- docs/authoring-guide.md: documented the 4-rung ladder and WithModel/WithTag.
+- Tests: flow inheritance ladder (agent/flow/default precedence), registry
+  default (first-register + SetDefault override). All green.
+
+## 2026-07-25 — Multi-flow serving (WithFlow/As/default precedence)
+
+Goal (from marvis-demo main.go): one brain serves several flows, selected by
+the request's model name, with one default flow for unnamed/unknown models.
+
+Done:
+- internal/serve: process-global flow registry (registry.go) mirroring the
+  model registry. Entries carry a rank; default resolved by precedence
+  (Serve-arg > WithDefaultFlow > unnamed WithFlow > named fallback), last wins
+  within a rank. `Handle`/`AddUnnamed`/`AddDefault`/`SetName`/`resolveRegistry`.
+- internal/serve server: now holds named map + default flow; `resolve(model)`
+  routes per request (named match else default), echoing the served id back.
+  Handler validates every distinct flow; `ErrNoFlow` when nothing to serve.
+  `bb.Serve(ctx, nil, ...)` serves only registered flows.
+- internal/openai WriteModels: variadic names → /models lists every served id.
+- pkg/bb: `WithFlow(f) RegisterFlow`, `.As(name) RegisterNamedFlow`,
+  `WithDefaultFlow(f)`, chainable `.WithFlow`/`.Serve`. `As` twice and a second
+  default in a chain are compile errors by type construction.
+- docs/authoring-guide.md: "Serving several flows" section + precedence list.
+- serve: duplicate flow name warns (logrus, like an id-less Select member).
+- Tests: registry precedence, last-within-rank, per-request routing, duplicate
+  name warning. All green.
+
+## 2026-07-25 — PRODUCT doc reconciled with multi-flow + WithModel
+
+Docs only (no code). Closed the drift the PRODUCT audit (next.md) found:
+- PRODUCT §Configuration: `RegisterModel(m, tags)` → `WithModel(m).WithTag(...)`,
+  plus the model inheritance ladder (agent→flow→WithDefaultModel→first model).
+- PRODUCT §"One brain per process" reframed as "One deployment, one owner — but
+  several flows": documents multi-flow serving (named flows picked by model id,
+  default precedence, /models lists all) while explicitly ruling out first-class
+  multi-tenancy (no tenant boundary/auth/isolation; separate processes or an
+  externalized tenant-keyed store remain the deployment's job). Speaker identity
+  noted as author logic, not a framework primitive.
+- README.md and docs/IMPLEMENTATION.md: `RegisterModel` → `WithModel().WithTag()`;
+  IMPLEMENTATION serve entry notes the flow Registry + default precedence.
+
+## 2026-07-25 — Clarify request params reach flows as context (docs)
+
+Docs only. Specified the intended semantics for client sampling params:
+- PRODUCT §Serving: request params (model, temperature, max_tokens, …) are
+  accepted and **reach the flow as request context**, read by the handler to
+  honor/clamp/ignore/branch — never a silent override of the agent's own model
+  config.
+- authoring-guide: added `turn.Request()` (request params as context) + a
+  handler example (low max_tokens → terser persona), stressing that `Ask` still
+  uses the agent's WithModel config, not the request's.
+- next.md audit: reframed the sampling-params item — doc now correct, code is
+  the gap; the fix must expose params as read-only context, not auto-apply them.
+
+## 2026-07-25 — Implement request params as flow context (turn.Request)
+
+Wired the client's sampling params through to handlers as read-only context.
+
+Done:
+- internal/agent/request.go: `Request` struct (Model, Temperature, MaxTokens),
+  `WithRequest(ctx)` / `requestFrom`, and `Turn.Request()`. Read-only context —
+  never applied to Ask (the agent's own WithModel config still wins).
+- internal/flow: `State.Req agent.Request`; `flow.Run` sets it on ctx once per
+  run (constant for the chain) via agent.WithRequest.
+- internal/serve: both openai/anthropic handlers build agent.Request from the
+  parsed wire params and pass it into run → flow.State.Req.
+- pkg/bb: exposed `bb.Request` (alias of agent.Request).
+- Tests: serve end-to-end (params reach a handler via turn.Request), agent unit
+  (zero value outside a request; carried value with WithRequest). All green,
+  vet clean.
+- next.md updated: moved from Partial/gap to Kept (implemented).
+
+## 2026-07-25 — Streaming (terminal-only, durability-safe)
+
+Implemented true token streaming. Design decided with the user first: live
+streaming cannot cross a flow boundary (the checkpoint between flows is a
+complete message), so it is confined to the terminal boundary; State always
+carries whole messages, the client stream is a parallel tee.
+
+Interface:
+- reply.Stream() is now LIVE, backed by a record-replay streamBuf so
+  reply.ReadAll()/Extract coexist with it (agent/stream.go, agent/reply.go).
+- turn.Stream() (chan<- string, ok): claim-once client sink; ok=false for
+  non-terminal / concurrent-group / non-streaming, whereupon the author
+  turn.Reply()s. The framework tees to the client and records the whole message
+  into State; a default (no-handler) agent auto-streams (flow/flow.go runAgent).
+- reply.Err() carries a mid-stream model error.
+
+Plumbing:
+- agent.Sink on ctx (agent/sink.go); Serve installs it per streaming request.
+- seq.run strips the sink from every step except the terminal one (before the
+  first Respond, else the last step) — terminalStep().
+- Turn.Ask returns a live Reply when a sink is present and no schema; buffers +
+  validates otherwise (agent/turn.go).
+- runOneAgent calls turn.AwaitStream() on every path so a streaming goroutine
+  never races a later client write (fixed a real -race failure on the error
+  path).
+- Mid-stream errors: openai/anthropic WriteStreamError (SSE error frame); Serve
+  emits it instead of a 500 once bytes are on the wire.
+
+Also fixed a latent panic: Handler deduped served flows via a map keyed by Flow,
+but a seq (chained flow) is unhashable — surfaced the first time jarvis served a
+chained flow. Removed the dedup (Validate is idempotent).
+
+Demo: jarvis talk agent now streams (terminal, before Respond). Verified end to
+end with curl (SSE deltas + DONE for streaming; plain JSON otherwise).
+
+Docs: PRODUCT (streaming non-promise rewritten), IMPLEMENTATION (agent/serve/
+flow entries + a Streaming mechanism section), authoring-guide (Streaming to the
+client section with the tee pattern), next.md (#1 marked done). Tests cover
+streamBuf, Turn.Stream, terminalStep, serve live/error/buffered; all -race clean.

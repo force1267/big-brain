@@ -10,9 +10,9 @@ import "github.com/force1267/big-brain/pkg/model"
 type Model = model.Spec
 
 // NewModel returns a model builder. With no tags it starts blank. With one or
-// more tags it is seeded from the model registered (via RegisterModel) under
-// all of those tags; an unknown tag records an error that surfaces at Serve.
-// The result is still a builder in every case, so it stays overridable.
+// more tags it is seeded from the model registered (via WithModel) under all of
+// those tags; an unknown tag records an error that surfaces at Serve. The
+// result is still a builder in every case, so it stays overridable.
 func NewModel(tags ...string) Model {
 	if len(tags) == 0 {
 		return model.Spec{}
@@ -20,10 +20,31 @@ func NewModel(tags ...string) Model {
 	return model.Resolve(tags...)
 }
 
-// RegisterModel binds a model to one or more string tags so flows can fetch it
-// by tag with NewModel("tag") instead of respecifying it. Call it once at
+// RegisterModel is a registered model: the handle WithModel returns, so tags
+// can be attached fluently (WithModel(m).WithTag("cheap", "fast")).
+type RegisterModel struct{ spec Model }
+
+// WithModel registers m and returns it as a RegisterModel so tags can be added.
+// The first WithModel call also becomes the default model — the model any flow
+// (and so any agent) falls back to when it sets none of its own. Call it at
 // startup, before the flows that look models up are built.
-func RegisterModel(m Model, tags ...string) { model.Register(m, tags...) }
+func WithModel(m Model) RegisterModel {
+	model.Register(m)
+	return RegisterModel{spec: m}
+}
+
+// WithTag binds the registered model to one or more string tags, so flows can
+// fetch it with NewModel("tag") instead of respecifying it. It may be called
+// repeatedly; each call adds a lookup for that tag set.
+func (r RegisterModel) WithTag(tags ...string) RegisterModel {
+	model.Register(r.spec, tags...)
+	return r
+}
+
+// WithDefaultModel sets the default model without tagging it. It overrides the
+// implicit "first WithModel" default, and is the last rung of the model ladder:
+// agent.WithModel → flow.WithModel → WithDefaultModel → first WithModel.
+func WithDefaultModel(m Model) { model.SetDefault(m) }
 
 // FixedModel returns a model that always replies with the given text — no
 // provider, no network. It is for demos and tests: a brain runs end to end

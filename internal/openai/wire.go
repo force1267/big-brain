@@ -76,19 +76,38 @@ func WriteDone(w io.Writer, id, model string) error {
 	return err
 }
 
-// WriteModels writes the /models listing for the single served brain.
-func WriteModels(w http.ResponseWriter, brainName string) {
+// WriteStreamError emits an error into an already-open SSE stream, then DONE.
+// Once deltas have been sent there is no HTTP status left to fail with, so a
+// mid-stream failure surfaces here.
+func WriteStreamError(w io.Writer, msg string) error {
+	body, err := json.Marshal(map[string]any{
+		"error": map[string]string{"message": msg, "type": "server_error"},
+	})
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", body)
+	return err
+}
+
+// WriteModels writes the /models listing for the served brain(s). Each name is
+// one servable model id (the default flow's name plus any named flows).
+func WriteModels(w http.ResponseWriter, names ...string) {
 	type m struct {
 		ID      string `json:"id"`
 		Object  string `json:"object"`
 		Created int64  `json:"created"`
 		OwnedBy string `json:"owned_by"`
 	}
+	data := make([]m, 0, len(names))
+	for _, n := range names {
+		data = append(data, m{n, "model", time.Now().Unix(), "big-brain"})
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
 		Object string `json:"object"`
 		Data   []m    `json:"data"`
-	}{"list", []m{{brainName, "model", time.Now().Unix(), "big-brain"}}})
+	}{"list", data})
 }
 
 // WriteError writes an OpenAI-shaped error body.

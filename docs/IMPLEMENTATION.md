@@ -36,12 +36,17 @@ pkg/bb/          The facade. Type aliases + constructors delegating to the
 
 pkg/model/       The model concern. Model interface (Stream), providers
                  (OpenAI, Mock), the Spec builder (WithName/Think/Temprature,
-                 value-immutable), the tag Registry (RegisterModel/Lookup/
-                 Resolve), Message + As. Bound injects a specific Model. Leaf.
+                 value-immutable), the tag Registry (Register/Lookup/Resolve
+                 plus a process Default), Message + As. Bound injects a specific
+                 Model. Leaf.
 
 internal/agent/  Agent (build-time) + Turn (runtime) + Reply. An agent asks its
                  model, validates the reply against its schema (schema mismatch
-                 is owned here, by Ask), replies, and selects. Depends on model.
+                 is owned here, by Ask), replies, and selects. Reply is backed by
+                 a record-replay streamBuf so reply.Stream() (live) and
+                 reply.ReadAll()/Extract (whole) coexist. Turn.Stream() hands a
+                 terminal agent a live client sink (claim-once). Depends on
+                 model.
 
 internal/flow/   Flow orchestration. The sealed Flow interface; Basic (one or
                  more agents, run concurrently); seq (Next chaining); the four
@@ -49,10 +54,13 @@ internal/flow/   Flow orchestration. The sealed Flow interface; Basic (one or
                  Reached; Respond/Notify prebuilt flows; the trace seam; and
                  durable checkpointing over a Store. Depends on agent.
 
-internal/serve/  The boring boundary. Validates a flow at startup, then serves
-                 it over OpenAI- and Anthropic-compatible HTTP (+ /models, +
-                 /v1/diagnostics/trace). Handler for embedding, Serve for the
-                 runner. Depends on flow + internal/{openai,anthropic} wire.
+internal/serve/  The boring boundary. Validates the flow(s) at startup, then
+                 serves them over OpenAI- and Anthropic-compatible HTTP (+
+                 /models, + /v1/diagnostics/trace). A process can serve several
+                 named flows (a flow Registry, picked by the request's model id)
+                 plus one default; last-wins default precedence. Handler for
+                 embedding, Serve for the runner. Depends on flow +
+                 internal/{openai,anthropic} wire.
 
 internal/openai/ + internal/anthropic/   Wire request/response types and SSE.
 
@@ -99,6 +107,27 @@ completion order) keeps keys stable under concurrency.
 **Observability.** Every flow boundary, select, response, and cached-resume is a
 timed trace `Event`. Tracers: the diagnostics ring (always on, exposed at
 `/v1/diagnostics/trace`), a `JSONL` writer, or an author's own.
+
+**Streaming (terminal-only).** Durability forces sequential flows with
+*complete*-message handoff — the checkpoint between flows is a whole message, so
+a live token stream cannot cross a flow boundary and stay resumable. Live
+streaming is therefore confined to the **terminal** boundary, and there are two
+output paths: `State` (durable, always whole) and an ephemeral live tee to the
+client. Mechanics: `Serve` installs a per-request client `Sink` on the context
+for a streaming request; `seq.run` strips that sink from every step except the
+terminal one (the step before the first `Respond`, else the last step), so only
+terminal turns see it. `Turn.Ask`, when a sink is present and the agent has no
+schema, returns a **live** `Reply` (a goroutine pumps `model.Stream` into a
+`streamBuf`); otherwise it buffers and validates as before. `Turn.Stream()`
+returns `(chan<- string, ok)` — `ok` is a **claim-once** atomic, so exactly one
+agent (the first) streams; concurrent/`Group` turns and non-terminal turns get
+`ok=false` and fall back to `turn.Reply`. The framework tees the author's
+outgoing channel to the client sink *and* accumulates it into `State` as one
+complete message (so `Respond`/`Notify` downstream and the checkpoint all see
+whole text). A default (no-handler) agent does this tee automatically. Errors
+after the first streamed byte cannot be an HTTP status: `Serve` emits an SSE
+error frame and truncates. At-least-once still holds — a crash mid-stream
+re-runs the terminal flow and re-streams from the top.
 
 ## The Go-impossible bit (one deliberate divergence from the goal post)
 

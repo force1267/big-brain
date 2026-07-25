@@ -69,3 +69,24 @@ func TestRegistryFirstMatchWins(t *testing.T) {
 		t.Fatalf("first match should win, got %q", s.Name())
 	}
 }
+
+// Default: first Register sets it; SetDefault overrides.
+func TestRegistryDefault(t *testing.T) {
+	ResetRegistry()
+	t.Cleanup(ResetRegistry)
+	if Default().IsSet() {
+		t.Fatal("no default before any register")
+	}
+	Register(Spec{}.WithName("first"), "x")
+	if Default().Name() != "first" {
+		t.Fatalf("first register = default, got %q", Default().Name())
+	}
+	Register(Spec{}.WithName("second"), "y") // does not replace default
+	if Default().Name() != "first" {
+		t.Fatalf("default replaced, got %q", Default().Name())
+	}
+	SetDefault(Spec{}.WithName("explicit"))
+	if Default().Name() != "explicit" {
+		t.Fatalf("SetDefault ignored, got %q", Default().Name())
+	}
+}

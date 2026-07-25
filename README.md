@@ -35,9 +35,9 @@ func main() {
 	// A model backs the "chat" role — a real provider if BIG_BRAIN_API_KEY is
 	// set, else a canned reply so this runs with no credentials.
 	if os.Getenv("BIG_BRAIN_API_KEY") != "" {
-		bb.RegisterModel(bb.NewModel().WithName("gpt-4o-mini"), "chat")
+		bb.WithModel(bb.NewModel().WithName("gpt-4o-mini")).WithTag("chat")
 	} else {
-		bb.RegisterModel(bb.FixedModel("At your service."), "chat")
+		bb.WithModel(bb.FixedModel("At your service.")).WithTag("chat")
 	}
 
 	// One agent, one flow: ask the model and reply.
@@ -104,10 +104,10 @@ Provider credentials come from the environment (12-factor), prefix
 - **[docs/authoring-guide.md](docs/authoring-guide.md)** — the developer
   guide: the flow/agent/turn model, models, routing, concurrency, memory,
   serving, durability, testing. Start here to build a brain.
-- **[PRODUCT.md](PRODUCT.md)** — what big-brain is and why.
-- **[IMPLEMENTATION.md](IMPLEMENTATION.md)** — the package architecture behind
+- **[PRODUCT.md](docs/PRODUCT.md)** — what big-brain is and why.
+- **[IMPLEMENTATION.md](docs/IMPLEMENTATION.md)** — the package architecture behind
   `pkg/bb`.
-- **[LOG.md](LOG.md)** — project history, session by session.
+- **[LOG.md](docs/LOG.md)** — project history, session by session.
 - **[CLAUDE.md](CLAUDE.md)** — rules AI agents follow in this repo.
 
 ## Status

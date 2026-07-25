@@ -61,10 +61,12 @@ func main() {
 
 	// The model backing persona chat: a real provider if configured, else a
 	// canned reply so the demo runs with no key.
+	// It is registered first, so it is also the brain's default model: every flow
+	// and agent that sets none of its own inherits it.
 	if key := os.Getenv("BIG_BRAIN_API_KEY"); key != "" {
-		bb.RegisterModel(bb.NewModel().WithName(envOr("BIG_BRAIN_MODEL", "gpt-4o-mini")).WithTemprature(0.7), "chat")
+		bb.WithModel(bb.NewModel().WithName(envOr("BIG_BRAIN_MODEL", "gpt-4o-mini")).WithTemprature(0.7)).WithTag("chat")
 	} else {
-		bb.RegisterModel(bb.FixedModel("At your service. Anything else?"), "chat")
+		bb.WithModel(bb.FixedModel("At your service. Anything else?")).WithTag("chat")
 	}
 
 	j := &jarvis{world: "http://" + worldAddr, mem: &memory{}, http: &http.Client{Timeout: 5 * time.Second}}
@@ -133,8 +135,9 @@ func (j *jarvis) router() bb.Flow {
 // talk is the persona capability: it weaves what the brain remembers into a
 // system note, then answers with the chat model.
 func (j *jarvis) talk() bb.Flow {
+	// No model on the agent: it inherits the flow's (below), which in turn would
+	// fall back to the default model if the flow set none.
 	a := bb.NewAgent().
-		WithModel(bb.NewModel("chat")).
 		WithRole(bb.Role("You are Jarvis, a warm but terse home assistant.")).
 		OnMessage(func(_ context.Context, turn bb.Turn) error {
 			if facts := j.mem.recall(); len(facts) > 0 {
@@ -145,10 +148,19 @@ func (j *jarvis) talk() bb.Flow {
 			if err != nil {
 				return err
 			}
+			// talk is the flow before Respond, so it is terminal: stream tokens
+			// straight to the client when they asked for it. Otherwise buffer.
+			if out, ok := turn.Stream(); ok {
+				for tok := range reply.Stream() {
+					out <- tok
+				}
+				close(out)
+				return reply.Err()
+			}
 			turn.Reply(reply.ReadAll())
 			return nil
 		})
-	return bb.NewFlow().WithId(idTalk).WithAgent(a)
+	return bb.NewFlow().WithId(idTalk).WithModel(bb.NewModel("chat")).WithAgent(a)
 }
 
 // remember stores a fact from the user's message. No model needed.

@@ -106,6 +106,13 @@ func WriteStop(w io.Writer) error {
 	return event(w, "message_stop", map[string]any{"type": "message_stop"})
 }
 
+// WriteStreamError emits an error event into an already-open SSE stream. Once
+// deltas have been sent there is no HTTP status left to fail with.
+func WriteStreamError(w io.Writer, msg string) error {
+	return event(w, "error", map[string]any{"type": "error",
+		"error": map[string]string{"type": "api_error", "message": msg}})
+}
+
 // WriteError writes an Anthropic-shaped error body.
 func WriteError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")

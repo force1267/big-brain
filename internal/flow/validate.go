@@ -54,10 +54,11 @@ func walkAll(members []Flow, errs *[]error) {
 
 func validateAgents(f *Basic, errs *[]error) {
 	for _, ag := range f.agents {
-		spec := ag.Model()
+		// the effective model: the agent's own, else the flow's, else the default.
+		spec := f.modelFor(ag)
 		if !spec.IsSet() {
 			if ag.Handler() == nil {
-				*errs = append(*errs, fmt.Errorf("flow %q: a default (no-OnMessage) agent has no model", f.fid))
+				*errs = append(*errs, fmt.Errorf("flow %q: a default (no-OnMessage) agent has no model on the agent, the flow, or as default", f.fid))
 			}
 			continue // a handler agent may legitimately never ask
 		}

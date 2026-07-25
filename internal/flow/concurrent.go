@@ -70,7 +70,12 @@ func runOneAgent(ctx context.Context, flowID string, ag agent.Agent, i int, chat
 	} else {
 		turn = agent.NewTurn(ctx, ag, chat)
 	}
-	if err := runAgent(ctx, ag, turn, chat); err != nil {
+	err := runAgent(ctx, ag, turn, chat)
+	// Wait for any streaming goroutine to finish writing to the client before
+	// returning, so a later write (the buffered emit, or an error frame) never
+	// races it — this must happen on the error path too.
+	turn.AwaitStream()
+	if err != nil {
 		return nil, "", false, fmt.Errorf("%w: flow %q agent %d: %w", ErrAgent, flowID, i, err)
 	}
 	sel, hasSel := turn.Selected()

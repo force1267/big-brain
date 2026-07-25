@@ -22,7 +22,7 @@ func TestNewModelSeededFromRegistryAndOverridable(t *testing.T) {
 	model.ResetRegistry()
 	t.Cleanup(model.ResetRegistry)
 
-	RegisterModel(NewModel().WithName("gemma").WithTemprature(0.3), "cheap", "fast")
+	WithModel(NewModel().WithName("gemma").WithTemprature(0.3)).WithTag("cheap", "fast")
 
 	// seeded from the registered model
 	seeded := NewModel("cheap")

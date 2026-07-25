@@ -12,9 +12,15 @@ import (
 type Agent = agent.Agent
 
 // Turn is the runtime handle inside OnMessage: the agent acting on one incoming
-// message (Add/Last/Messages/Ask/AskWith/Reply/Select). It has no With… methods
-// — a turn cannot reconfigure its agent.
+// message (Add/Last/Messages/Ask/AskWith/Reply/Select/Stream/Request). It has no
+// With… methods — a turn cannot reconfigure its agent. Stream taps the live
+// client output at the terminal flow; Request reads the caller's params.
 type Turn = *agent.Turn
+
+// Request is the client's request params (model, temperature, max_tokens) as
+// read-only context, retrieved with Turn.Request. It is input for a handler to
+// weigh, never applied to the agent's model config automatically.
+type Request = agent.Request
 
 // Reply is the result of Turn.Ask: the model's completed answer, read whole
 // (ReadAll), incrementally (Read/Stream), or decoded with Extract.

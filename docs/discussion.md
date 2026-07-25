@@ -331,3 +331,116 @@ Outcome: `Brain.Webhooks`/`Brain.Crons` removed; `serve.WithEndpoint` and
 kept exactly as it already was (a pure `Cron` + `Next`, zero deps) and is
 no longer imported by the engine at all — only by whatever brain code
 chooses to use it.
+
+---
+
+## The bb rewrite — from primitives to a shipped framework
+
+The node-graph engine and its `pkg/serve`/`pkg/brain` surface were scrapped in
+one long pairing session. It began not from a spec but from a list of candidate
+primitives the author sketched (`Task`, `Event`, `Trigger`, `Reliable`, `Flow`,
+`Model`, `Memory`, `Session`, `Chat`, `Prompt`, `Trace`) and the question "are
+these any good?" The useful move was refusing to treat them uniformly: some are
+real dispatch points (Task, Trigger, Model, Memory), some are just data (Event,
+Chat, Prompt, Trace — the engine never calls a method on them, so they aren't
+interfaces), and some are properties, not things (Reliable is a decorator, not
+an interface with a method). The lesson that stuck: *only a dispatch point earns
+an interface; everything else is a value or a function.*
+
+That first exploration converged on a durable-savepoint engine (Step/Sleep over
+a Store, a worker loop, cron) — which was built and hardened and now lives on as
+`pkg/engine`. But the authoring surface it implied still felt wrong, and the
+author restarted from a blank `cmd/marvis-demo/main.go`, writing the API they
+*wanted to type* and having each symbol implemented to match. The main.go became
+the goal post; the framework existed to satisfy it. This inverted the usual
+order (spec → code → example) and was the single best decision of the session —
+every interface question was answered by "how does it read at the call site."
+
+The decisions that came out of that pairing, each reached by argument:
+
+- **A brain is a tree of flows; control flow is Go.** The node-graph DSL had
+  reinvented `if`, loops, and a `Vars map[string]any` bag. The fix was to make an
+  agent's `OnMessage` a plain Go function and compose flows with `Next` and
+  grouping. No node vocabulary to grow (the n8n/Terraform death spiral avoided).
+
+- **Agent and Turn are two types, not one.** The author noticed the build-time
+  agent (`WithModel/WithRole/...`) and the runtime handle inside `OnMessage`
+  were the same type but had disjoint valid method sets — a builder shouldn't
+  `Ask` (no live message), a running turn shouldn't reconfigure itself. Splitting
+  them makes each invalid state a compile error. Naming was debated (`Agent`/
+  `Turn` won over `AgentSpec`/`Agent`, because `NewAgent()→Agent` reads right and
+  `Turn` matches the live-handle concept already used in serving).
+
+- **Select is a string, and that's correct, not lazy.** The router selects the
+  next flow by id. The first instinct was to feel bad about stringly-typed
+  routing — until we named *why* it's a string: the selector is model output, and
+  model output is a string. A typed `Select(flow)` would just force every author
+  to write the same `switch` mapping the string to a handle. So the string
+  boundary is the honest type at the LLM/Go seam. The safety net that *is* ours to
+  add: validate the selector against the linked group — loudly at request time,
+  and (via an optional `Selects(...)` declaration) at startup.
+
+- **Concurrency conflicts are loud, not last-writer.** A multi-agent flow runs
+  its agents concurrently, so "last Select wins" is only well-defined within one
+  agent (program order); across concurrent agents a *divergent* select is a
+  wiring error the flow raises, never a wall-clock race. The author's framing —
+  "handling concurrency is what Go devs do; we gave them Checkpoint/Wait" — was
+  right, but the nondeterministic select was *our* hazard leaking into their code,
+  so we made it an error instead of a silent race.
+
+- **`reply.Extract[intent]()` is impossible; it's a free function.** Go forbids
+  type parameters on methods. This was the one place the goal-post couldn't be
+  satisfied as written, flagged for the author to decide; the resolution
+  (`bb.Extract[intent](reply)`) matched the `bb.Schema[intent]()` shape already
+  blessed. A good reminder to surface impossibilities rather than hack around
+  them.
+
+- **Errors surface at exactly two points.** Builders only record data (they never
+  fail mid-chain); everything structural surfaces at `Serve`/`Handler`
+  (`flow.Validate` at startup) and everything model-dependent at `Ask` (schema
+  mismatch + transport, at runtime). Two surfaces a developer must hold in their
+  head, nothing scattered. `Extract` owns nothing — `Ask` already validated.
+
+- **`NewModel(tags...)` always returns a builder.** Zero tags = blank, one-or-more
+  = seeded from the tag registry, and *still overridable* (`NewModel("cheap").
+  WithTemprature(0.9)`), because it's a value-immutable `Spec`. The author probed
+  this directly ("can a registered model still be tweaked?") and value semantics
+  made the answer yes for free.
+
+Implementation followed a strict discipline: leaves first, each package real and
+exhaustively tested (happy/unhappy/edge/every branch, concurrency under `-race`)
+before the next — model → agent/turn → flow → concurrency → serve → durability.
+The one goal-post divergence (Extract) and one goal-post *bug* (a `return flow`
+missing `, nil`) were both surfaced by compiling a throwaway copy of main.go with
+the import added — a cheap way to prove API conformance without touching the
+author's file.
+
+Then the reference brain was rebuilt on the new surface. `jarvis` was
+deliberately *not* a copy of `marvis`: where marvis routes with a model + typed
+schema, jarvis uses a keyword router into a Select group (talk/remember/recall/
+house/briefing) over a self-contained dummy world (sensors, devices, a notify
+sink), with memory as author state, concurrent sensor reads, a `Notify` flow
+after `Respond`, and durability. It runs with no API key. Building it surfaced an
+honest limitation to report rather than paper over: the request→flow surface has
+no scheduled/cron trigger and no true fire-after-reply async — those live in
+`pkg/engine`, unexposed (captured in `next.md`).
+
+Cleanup was aggressive, as the author encouraged: `pkg/{brain,serve,memory,
+notify,cron,job}`, `internal/{app,config,logging,telemetry}`, and `cmd/cli` were
+deleted — anything the bb design superseded — and `go mod tidy` dropped the
+orphaned dependencies. Memory, notably, has *no* bb primitive: it's the brain's
+own state (a map, or a KV via `bb.MemStore`), woven into the persona by a
+handler. That was a deliberate call — memory *strategy* varies too much to
+impose one, so the engine gives durability and a KV and stays out of the way.
+
+Finally, the ponytail debt ledger was cleared: seven deliberate shortcuts fixed,
+including two that were real features rather than one-liners — a min-heap for the
+pending queue, sharded FileStore, cron catch-up, retry-with-yield on long
+backoff, bounded cancel tombstones, schema enum tags, and — the biggest — turning
+`Group` from a same-starting-chat approximation into a genuine live shared chat
+(`agent.SharedChat`, write-through replies), so a group member sees another's
+reply as it lands.
+
+The through-line of the whole session: *write the call site first, let only
+dispatch points be interfaces, name why each shortcut is honest before taking
+it, and surface impossibilities instead of hacking around them.*

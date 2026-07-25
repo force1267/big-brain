@@ -68,9 +68,18 @@ for it now.
 
 ## What the engine does NOT promise
 
-- **Streaming is buffered today.** A reply is produced by running the flow to
-  completion, then streamed to the client. True token-by-token streaming (and
-  genuine keep-working-after-reply) is a known future pass.
+- **Streaming is terminal-only, and buffered everywhere else.** The client can
+  get true token-by-token output, but only at the **terminal** boundary — the
+  flow whose reply is the user's answer (the one before `bb.Respond`, or the
+  last in the chain). Everywhere upstream, flows still hand each other *complete*
+  messages, because that is what durability checkpoints: a live stream cannot
+  cross a flow boundary and still have a consistent save point. So there are two
+  output paths — the durable one (`State`, always whole messages) and an
+  ephemeral live tee to the client that exists only at the terminus. An author
+  opts a terminal agent in with `turn.Stream()`; if the client did not request
+  streaming, or the agent is not terminal, it silently falls back to buffered.
+  Genuine keep-working-*after*-the-connection-closes is still a future pass (it
+  is engine/initiative work, not streaming).
 - **At-least-once, not exactly-once.** A durable run that a client retries with
   the same run id resumes from the last completed flow; a crash in the narrow
   window before a result is checkpointed re-runs that flow. Side effects that
@@ -117,24 +126,41 @@ brains, both `pkg/bb`-only, exactly as an external author writes them:
   turns, concurrent sensor reads, a Notify flow after the reply, durable
   execution, and a jsonl trace. It runs with no API key.
 
-## One brain per process
+## One deployment, one owner — but several flows
 
-**This codebase is vLLM, not OpenAI.** One process serves exactly one brain =
-one "model" = one memory, one character. Being a *provider* (tenants, billing,
-catalogs) is somebody else's product built around this one — enabled by the
-embeddable `pkg/` and an externalized store (tenant-keyed state, stateless
-brain). "Many users" in scope means **speaker identity within one brain**: the
-household members of a home assistant. The brain tells speakers apart but
-remains one brain with one memory.
+**This codebase is vLLM, not OpenAI.** A process is one deployment owned by one
+author, not a multi-tenant provider. Being a *provider* (tenants, billing,
+catalogs, per-tenant isolation) is somebody else's product built around this
+one — enabled by the embeddable `pkg/` and an externalized store (tenant-keyed
+state, stateless brain). There is no first-class multi-tenancy here and there
+won't be: no tenant boundary, no per-tenant auth, no isolated memories.
+
+What a process *can* do is serve **several named flows behind one endpoint**,
+each exposed as its own "model" id. A request's `model` field selects the flow;
+requests that name no or an unknown model get a default flow (last-wins
+precedence: an explicit `Serve` default, then `WithDefaultFlow`, then the last
+unnamed `WithFlow`, then a named flow as fallback). `/models` lists every served
+id. This is a *routing* convenience for one owner — publishing a chat brain, a
+coding brain, and a summarizer from a single binary — not a tenancy model: the
+flows share the process, the store, and the trust boundary, and memory belongs
+to whichever flow's handlers write it. Keeping tenants apart is still the
+deployment's job (separate processes, or an externalized tenant-keyed store).
+
+"Many users" in scope means **speaker identity within one brain**: the household
+members of a home assistant. A brain can tell speakers apart from the message
+`role`/content, but that is the author's logic today — the framework surfaces no
+speaker primitive of its own.
 
 ## Configuration
 
 Serve takes functional options (`bb.Addr`, `bb.Store`, `bb.Trace`, `bb.Workers`)
 with zero-config defaults, and provider credentials come from environment
 (`BIG_BRAIN_API_KEY`/`_BASE_URL`/`_MODEL`, 12-factor). Model roles are
-first-class and portable: `bb.RegisterModel(m, "fast", "cheap")` binds a model
-to tags, `bb.NewModel("fast")` fetches it, and flow code names the role while
-deployment config decides which provider backs it.
+first-class and portable: `bb.WithModel(m).WithTag("fast", "cheap")` binds a
+model to tags, `bb.NewModel("fast")` fetches it, and flow code names the role
+while deployment config decides which provider backs it. A model an agent never
+overrides is inherited down a ladder — agent → flow → `bb.WithDefaultModel` →
+the first registered model — so no agent is ever accidentally model-less.
 
 ## Serving: handler first, runner second
 
@@ -142,10 +168,15 @@ The engine exposes an `http.Handler` the author can mount anywhere, and a
 convenience runner that owns the listener and graceful shutdown. Author-added
 routes are served either way — mounting the handler yourself still serves the
 engine's routes plus yours. Chat completions (OpenAI) and messages
-(Anthropic), both streaming, plus `/models`. Sampling parameters clients send
-are accepted, never an error, and surfaced to the brain as context. Caller
-tools and `<think>` blocks pass through untouched; honoring them is the
-brain's choice.
+(Anthropic), both streaming, plus `/models`. Sampling parameters a client sends
+(`model`, `temperature`, `max_tokens`, …) are accepted, never an error, and
+**reach the flow as request context** — not applied automatically. A handler
+reads them off the turn/context and decides what to do: honor them, clamp them,
+ignore them, or branch on them (e.g. a low `max_tokens` picks a terser persona;
+a requested `model` name the brain understands routes differently). They are an
+input to author logic, never a silent override of the agent's own model config.
+Caller tools and `<think>` blocks pass through untouched the same way; honoring
+them is the brain's choice.
 
 ## Continuity — transcripts vs memory
 

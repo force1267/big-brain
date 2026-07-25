@@ -3,16 +3,22 @@ package serve
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/force1267/big-brain/internal/agent"
 	"github.com/force1267/big-brain/internal/anthropic"
 	"github.com/force1267/big-brain/internal/flow"
 	"github.com/force1267/big-brain/internal/openai"
 	"github.com/force1267/big-brain/pkg/model"
 	"github.com/google/uuid"
 )
+
+// ErrNoFlow is returned by Serve/Handler when neither an explicit default flow
+// nor any registered flow is available to serve.
+var ErrNoFlow = errors.New("serve: no flow to serve")
 
 // Option configures a served brain.
 type Option func(*config)
@@ -49,27 +55,41 @@ func Trace(t flow.Tracer) Option { return func(c *config) { c.tracer = t } }
 // id is used (correct, but no cross-request resume).
 func Store(s flow.Store) Option { return func(c *config) { c.store = s } }
 
-// server holds the running brain.
+// server holds the running brain: a default flow (used when a request names no,
+// or an unknown, model) and any named flows keyed by model id.
 type server struct {
-	flow   flow.Flow
-	name   string
+	named  map[string]flow.Flow
+	def    flow.Flow
+	name   string // reported id of the default flow
 	tracer flow.Tracer
 	ring   *ring
 	store  flow.Store
 }
 
 // Handler validates the flow and returns its http.Handler for embedding. All
-// wiring/config errors surface here (the single startup surface).
+// wiring/config errors surface here (the single startup surface). The flow f is
+// the explicit default (may be nil to serve only registered flows).
 func Handler(f flow.Flow, opts ...Option) (http.Handler, error) {
-	if err := flow.Validate(f); err != nil {
-		return nil, err
+	named, def := resolveRegistry(f)
+	if def == nil && len(named) == 0 {
+		return nil, ErrNoFlow
+	}
+	// Validate every served flow. No dedup: a Flow (seq) isn't hashable, and
+	// Validate is idempotent, so re-checking a shared default/named flow is fine.
+	for _, fl := range append(flowsOf(named), def) {
+		if fl == nil {
+			continue
+		}
+		if err := flow.Validate(fl); err != nil {
+			return nil, err
+		}
 	}
 	c := defaults()
 	for _, o := range opts {
 		o(&c)
 	}
 	r := &ring{max: 500}
-	s := &server{flow: f, name: c.name, tracer: tee(r, c.tracer), ring: r, store: c.store}
+	s := &server{named: named, def: def, name: c.name, tracer: tee(r, c.tracer), ring: r, store: c.store}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/chat/completions", s.openai)
@@ -77,6 +97,23 @@ func Handler(f flow.Flow, opts ...Option) (http.Handler, error) {
 	mux.HandleFunc("GET /v1/models", s.models)
 	mux.HandleFunc("GET /v1/diagnostics/trace", s.diagnostics)
 	return mux, nil
+}
+
+// resolve picks the flow for a request's model id: a named match, else the
+// default. The second return is the id echoed back to the client.
+func (s *server) resolve(reqModel string) (flow.Flow, string) {
+	if f, ok := s.named[reqModel]; ok {
+		return f, reqModel
+	}
+	return s.def, s.name
+}
+
+func flowsOf(m map[string]flow.Flow) []flow.Flow {
+	out := make([]flow.Flow, 0, len(m))
+	for _, f := range m {
+		out = append(out, f)
+	}
+	return out
 }
 
 // Serve runs the brain on the configured address until ctx is cancelled, then
@@ -103,14 +140,14 @@ func Serve(ctx context.Context, f flow.Flow, opts ...Option) error {
 	return nil
 }
 
-func (s *server) run(ctx context.Context, runID string, msgs []model.Message) (string, error) {
+func (s *server) run(ctx context.Context, f flow.Flow, runID string, msgs []model.Message, req agent.Request) (string, error) {
 	if s.store != nil {
 		if runID == "" {
 			runID = uuid.NewString()
 		}
 		ctx = flow.WithCheckpoint(ctx, s.store, runID)
 	}
-	out, err := flow.Run(ctx, s.flow, flow.State{Chat: msgs}, s.tracer)
+	out, err := flow.Run(ctx, f, flow.State{Chat: msgs, Req: req}, s.tracer)
 	if err != nil {
 		return "", err
 	}
@@ -127,17 +164,40 @@ func (s *server) openai(w http.ResponseWriter, r *http.Request) {
 	for i, m := range req.Messages {
 		msgs[i] = model.Message{Role: m.Role, Content: m.Content}
 	}
-	reply, err := s.run(r.Context(), r.Header.Get("X-Run-Id"), msgs)
+	f, name := s.resolve(req.Model)
+	rp := agent.Request{Model: req.Model, Temperature: req.Temperature, MaxTokens: req.MaxTokens}
+	id := "chatcmpl-" + uuid.NewString()
+	runID := r.Header.Get("X-Run-Id")
+
+	if req.Stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := http.NewResponseController(w)
+		sink := &agent.Sink{Write: func(_ context.Context, chunk string) error {
+			if err := openai.WriteChunk(w, id, name, chunk); err != nil {
+				return err
+			}
+			return fl.Flush()
+		}}
+		reply, err := s.run(agent.WithSink(r.Context(), sink), f, runID, msgs, rp)
+		if err != nil {
+			openai.WriteStreamError(w, err.Error())
+			fl.Flush()
+			return
+		}
+		if !sink.Claimed() { // nobody streamed: emit the buffered reply as one delta
+			openai.WriteChunk(w, id, name, reply)
+		}
+		openai.WriteDone(w, id, name)
+		fl.Flush()
+		return
+	}
+
+	reply, err := s.run(r.Context(), f, runID, msgs, rp)
 	if err != nil {
 		openai.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	id := "chatcmpl-" + uuid.NewString()
-	if req.Stream {
-		writeStreamOpenAI(w, id, s.name, reply)
-		return
-	}
-	openai.WriteResponse(w, id, s.name, reply)
+	openai.WriteResponse(w, id, name, reply)
 }
 
 func (s *server) anthropic(w http.ResponseWriter, r *http.Request) {
@@ -153,47 +213,58 @@ func (s *server) anthropic(w http.ResponseWriter, r *http.Request) {
 	for _, m := range req.Messages {
 		msgs = append(msgs, model.Message{Role: m.Role, Content: string(m.Content)})
 	}
-	reply, err := s.run(r.Context(), r.Header.Get("X-Run-Id"), msgs)
+	f, name := s.resolve(req.Model)
+	rp := agent.Request{Model: req.Model, Temperature: req.Temperature, MaxTokens: req.MaxTokens}
+	id := "msg_" + uuid.NewString()
+	runID := r.Header.Get("X-Run-Id")
+
+	if req.Stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := http.NewResponseController(w)
+		anthropic.WriteStart(w, id, name)
+		fl.Flush()
+		sink := &agent.Sink{Write: func(_ context.Context, chunk string) error {
+			if err := anthropic.WriteDelta(w, chunk); err != nil {
+				return err
+			}
+			return fl.Flush()
+		}}
+		reply, err := s.run(agent.WithSink(r.Context(), sink), f, runID, msgs, rp)
+		if err != nil {
+			anthropic.WriteStreamError(w, err.Error())
+			fl.Flush()
+			return
+		}
+		if !sink.Claimed() {
+			anthropic.WriteDelta(w, reply)
+		}
+		anthropic.WriteStop(w)
+		fl.Flush()
+		return
+	}
+
+	reply, err := s.run(r.Context(), f, runID, msgs, rp)
 	if err != nil {
 		anthropic.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	id := "msg_" + uuid.NewString()
-	if req.Stream {
-		writeStreamAnthropic(w, id, s.name, reply)
-		return
-	}
-	anthropic.WriteResponse(w, id, s.name, reply)
+	anthropic.WriteResponse(w, id, name, reply)
 }
 
 func (s *server) models(w http.ResponseWriter, _ *http.Request) {
-	openai.WriteModels(w, s.name)
+	names := make([]string, 0, len(s.named)+1)
+	if s.def != nil {
+		names = append(names, s.name)
+	}
+	for n := range s.named {
+		names = append(names, n)
+	}
+	openai.WriteModels(w, names...)
 }
 
 func (s *server) diagnostics(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(s.ring.snapshot())
-}
-
-// writeStreamOpenAI emits the (buffered) reply as one SSE delta then DONE. True
-// token streaming through flows arrives with the streaming-chat work later.
-func writeStreamOpenAI(w http.ResponseWriter, id, name, reply string) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	fl := http.NewResponseController(w)
-	openai.WriteChunk(w, id, name, reply)
-	fl.Flush()
-	openai.WriteDone(w, id, name)
-	fl.Flush()
-}
-
-func writeStreamAnthropic(w http.ResponseWriter, id, name, reply string) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	fl := http.NewResponseController(w)
-	anthropic.WriteStart(w, id, name)
-	anthropic.WriteDelta(w, reply)
-	fl.Flush()
-	anthropic.WriteStop(w)
-	fl.Flush()
 }
 
 func lastContent(chat []model.Message) string {

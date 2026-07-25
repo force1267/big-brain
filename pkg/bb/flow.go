@@ -12,8 +12,9 @@ import (
 // (NewFlow, Select, ...); the interface is sealed.
 type Flow = flow.Flow
 
-// NewFlow starts a flow builder: WithId (so it can be Selected), WithAgent (one
-// or more agents that all receive the incoming chat), and Next (chaining).
+// NewFlow starts a flow builder: WithId (so it can be Selected), WithModel (the
+// model its agents inherit), WithAgent (one or more agents that all receive the
+// incoming chat), and Next (chaining).
 func NewFlow() *flow.Basic { return flow.New() }
 
 // Select groups flows so an upstream agent picks one by id (turn.Select). A

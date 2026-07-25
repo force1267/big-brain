@@ -24,12 +24,11 @@ func main() {
     ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
     defer stop()
 
-    bb.RegisterModel(bb.NewModel().WithName("gpt-4o-mini"), "chat")
+    bb.WithModel(bb.NewModel().WithName("gpt-4o-mini")).WithTag("chat")
 
-    agent := bb.NewAgent().
-        WithModel(bb.NewModel("chat")).
+    agent := bb.NewAgent(). // no model: inherits the flow's / the default
         WithRole(bb.Role("You are a terse assistant."))
-    flow := bb.NewFlow().WithAgent(agent)
+    flow := bb.NewFlow().WithModel(bb.NewModel("chat")).WithAgent(agent)
 
     bb.Serve(ctx, flow) // OpenAI + Anthropic at :8080
 }
@@ -41,17 +40,30 @@ replies. That is the whole walking skeleton.
 ## Models
 
 ```go
-bb.RegisterModel(bb.NewModel().WithName("gpt-4o-mini").WithTemprature(0.5), "fast", "cheap")
+bb.WithModel(bb.NewModel().WithName("gpt-4o-mini").WithTemprature(0.5)).WithTag("fast", "cheap")
 m := bb.NewModel("fast")                 // seeded from the registered model
 m2 := bb.NewModel("fast").WithTemprature(0.9) // overrides just this use
 inline := bb.NewModel().WithName("gpt-4o") // no registry, built inline
 demo := bb.FixedModel("canned reply")    // no provider — for demos/tests
 ```
 
-`bb.NewModel(tags…)` is always a builder: with no tags it starts blank, with
-tags it is seeded from the registered model and stays overridable. Provider
-credentials come from the environment (`BIG_BRAIN_API_KEY`, `BIG_BRAIN_BASE_URL`).
-Flow code names a *role*; deployment decides which provider backs it.
+`bb.WithModel(m)` registers `m` and returns a handle; `.WithTag(…)` binds it to
+lookup tags. `bb.NewModel(tags…)` is always a builder: with no tags it starts
+blank, with tags it is seeded from the registered model and stays overridable.
+Provider credentials come from the environment (`BIG_BRAIN_API_KEY`,
+`BIG_BRAIN_BASE_URL`). Flow code names a *role*; deployment decides which
+provider backs it.
+
+**Which model an agent asks** is resolved along a ladder, first match wins:
+
+1. `agent.WithModel(m)` — the agent's own model.
+2. `flow.WithModel(m)` — the model set on the flow the agent runs in.
+3. `bb.WithDefaultModel(m)` — an explicit process default.
+4. the first `bb.WithModel(…)` registered — the implicit default.
+
+So no agent is ever truly model-less; leaving `WithModel` off just means "use
+whatever the flow, then the default, provides". A default (no-`OnMessage`) agent
+that resolves to no model at any rung is a startup error from `bb.Serve`.
 
 ## Agents and turns
 
@@ -81,6 +93,31 @@ agent := bb.NewAgent().
   decodes it into a schema type.
 - `ctx` is this turn's context; it is done when the handler returns. Pass it to
   any I/O you do so cancellation is respected.
+- `turn.Request()` is the client's request as context: the sampling parameters
+  it sent (`model`, `temperature`, `max_tokens`, …). They are **not** applied to
+  your agent automatically — they are an input for the handler to read and act on.
+
+**Request parameters.** The engine never silently honors a client's sampling
+knobs; it hands them to the flow so *you* decide. A handler can honor, clamp,
+ignore, or branch on them:
+
+```go
+OnMessage(func(ctx context.Context, turn bb.Turn) error {
+    req := turn.Request()
+    if n := req.MaxTokens; n != nil && *n < 64 {
+        turn.Add(bb.NewMessage("Answer in one short sentence.").As("system"))
+    }
+    // req.Model is the model id the client asked for (also what selects a
+    // named flow at the serving layer); req.Temperature is theirs to weigh in.
+    turn.Add(turn.Last())
+    reply, err := turn.Ask() // asks with the agent's own model config, not req's
+    // ...
+})
+```
+
+The agent's own `WithModel` config is what `Ask` uses; the request params are
+context, never an override — so a brain stays a brain, not a raw model whose
+behavior the caller dictates.
 
 **Structured output.** `WithSchema(bb.Schema[T]())` tells the agent to expect
 JSON matching `T`; `Ask` validates the reply against it (a mismatch is the error
@@ -186,6 +223,55 @@ if facts := mem.recall(); len(facts) > 0 {
 
 See `cmd/jarvis-demo` for a complete memory + tools + briefing brain.
 
+## Streaming to the client
+
+The user can see tokens as the model types them — but only at the **terminal**
+boundary: the flow whose reply is the answer (the one before `bb.Respond`, or
+the last in the chain). Everywhere upstream, flows hand each other *complete*
+messages, because that is what durable checkpointing needs. So `State` always
+carries whole messages; streaming is a parallel live tee that exists only at the
+end.
+
+A **default agent (no `OnMessage`) streams automatically** when it is terminal
+and the client asked for it — nothing to write. To stream from a handler, tee
+the model's live output into the outgoing channel `turn.Stream()` hands you:
+
+```go
+OnMessage(func(ctx context.Context, turn bb.Turn) error {
+    turn.Add(turn.Last())
+    reply, err := turn.Ask()
+    if err != nil {
+        return err
+    }
+    if out, ok := turn.Stream(); ok { // ok only when terminal + client wants SSE
+        for tok := range reply.Stream() { // live model tokens
+            out <- tok                     // forward (or transform/inject)
+        }
+        close(out)             // done; the full text is captured into State for you
+        return reply.Err()     // a mid-stream model error surfaces here
+    }
+    turn.Reply(reply.ReadAll()) // buffered fallback (non-terminal, or non-streaming)
+    return nil
+})
+```
+
+Key facts:
+
+- `turn.Stream()` returns `(chan<- string, ok)`. `ok` is **claim-once**: the
+  first agent to call it in the terminal flow wins; everyone else (a sibling in a
+  concurrent group, a non-terminal agent, a non-streaming request) gets
+  `ok=false` and should `turn.Reply` normally.
+- `reply.Stream()` and `reply.ReadAll()`/`bb.Extract` **coexist** — read the
+  live tokens *and* still get the whole text (e.g. to save to memory after). You
+  are never forced to choose.
+- Closing `out` is enough: the framework delivers to the client and records the
+  complete message into `State`, so `Respond`/`Notify` and durability all see the
+  whole reply. Do **not** also `turn.Reply` the same text.
+- `reply.Err()` is where a mid-stream model error lands (once tokens are flowing
+  there is no HTTP status left to fail with; the server emits an SSE error frame).
+- A schema agent never streams live (structured output is validated whole); its
+  `reply.Stream()` yields the finished JSON once.
+
 ## Serving
 
 ```go
@@ -204,6 +290,31 @@ the other is `Ask` (schema/transport, at runtime).
 
 Endpoints: `POST /v1/chat/completions` (OpenAI), `POST /v1/messages`
 (Anthropic), `GET /v1/models`, `GET /v1/diagnostics/trace`.
+
+### Serving several flows
+
+One brain can serve many flows, chosen by the request's `model`:
+
+```go
+bb.WithFlow(chatFlow)                       // unnamed → the default flow
+bb.WithFlow(codeFlow).As("acme/coder")      // named → picked by model id
+bb.WithFlow(mathFlow).As("acme/math").
+    Serve(ctx)                              // chainable; Serve ends the chain
+```
+
+A request naming a registered model routes to that flow; a request naming no or
+an unknown model gets the default. Which flow is the default is a precedence
+(highest wins, last-within-rank wins):
+
+1. `bb.Serve(ctx, f)` — an explicit default passed to `Serve`.
+2. `bb.WithDefaultFlow(f)` — an explicit default, no name.
+3. `bb.WithFlow(f)` — the last unnamed flow.
+4. `bb.WithFlow(f).As(name)` — a named flow, default only if nothing unnamed exists.
+
+`WithFlow(f).As(name)` names a flow (calling `As` twice is a compile error). A
+`RegisterFlow` (unnamed) cannot chain another `WithFlow` — a chain holds one
+default — but a named flow can. `Serve(ctx)` with no default is valid when at
+least one named flow is registered.
 
 ## Durability
 

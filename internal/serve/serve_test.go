@@ -18,7 +18,7 @@ func talkFlow(reply string) flow.Flow {
 
 func serverFor(f flow.Flow) *server {
 	r := &ring{max: 50}
-	return &server{flow: f, name: "brain", tracer: r, ring: r}
+	return &server{def: f, name: "brain", tracer: r, ring: r}
 }
 
 // OpenAI non-streaming request returns the flow's reply.
@@ -73,7 +73,7 @@ func TestServeFlowError(t *testing.T) {
 	boom := flow.New().WithAgent(agent.New().OnMessage(func(context.Context, *agent.Turn) error {
 		return context.Canceled
 	}))
-	s := &server{flow: boom, name: "brain", tracer: &ring{max: 10}, ring: &ring{max: 10}}
+	s := &server{def: boom, name: "brain", tracer: &ring{max: 10}, ring: &ring{max: 10}}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"messages":[]}`))
 	s.openai(rec, req)
@@ -93,7 +93,7 @@ func TestHandlerValidates(t *testing.T) {
 // Diagnostics endpoint returns the recorded trace after a run.
 func TestDiagnostics(t *testing.T) {
 	r := &ring{max: 50}
-	s := &server{flow: talkFlow("x"), name: "brain", tracer: r, ring: r}
+	s := &server{def: talkFlow("x"), name: "brain", tracer: r, ring: r}
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"messages":[]}`))
 	s.openai(httptest.NewRecorder(), req)
 
@@ -108,10 +108,96 @@ func TestDiagnostics(t *testing.T) {
 
 // /models lists the brain.
 func TestModels(t *testing.T) {
-	s := &server{flow: talkFlow("x"), name: "jarvis", tracer: &ring{max: 1}, ring: &ring{max: 1}}
+	s := &server{def: talkFlow("x"), name: "jarvis", tracer: &ring{max: 1}, ring: &ring{max: 1}}
 	rec := httptest.NewRecorder()
 	s.models(rec, httptest.NewRequest("GET", "/v1/models", nil))
 	if !strings.Contains(rec.Body.String(), "jarvis") {
 		t.Fatalf("models: %s", rec.Body)
+	}
+}
+
+// Request params (temperature, max_tokens) reach the flow as context: a handler
+// reads them off turn.Request and can branch on them.
+func TestRequestParamsReachHandler(t *testing.T) {
+	var got agent.Request
+	capture := flow.New().WithId("cap").WithAgent(
+		agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
+			got = turn.Request()
+			turn.Reply("ok")
+			return nil
+		}))
+	s := serverFor(capture)
+	body := `{"model":"acme/x","temperature":0.2,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+	s.openai(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+
+	if got.Model != "acme/x" {
+		t.Fatalf("model = %q", got.Model)
+	}
+	if got.Temperature == nil || *got.Temperature != 0.2 {
+		t.Fatalf("temperature = %v", got.Temperature)
+	}
+	if got.MaxTokens == nil || *got.MaxTokens != 16 {
+		t.Fatalf("max_tokens = %v", got.MaxTokens)
+	}
+}
+
+// A streaming OpenAI request emits one SSE delta per model chunk (live), not one
+// buffered blob.
+func TestServeOpenAIStreaming(t *testing.T) {
+	// A terminal default agent over a multi-chunk mock streams each chunk.
+	f := flow.New().WithId("talk").WithAgent(
+		agent.New().WithModel(model.Bound(&model.Mock{Chunks: []string{"al", "pha"}}))).Next(flow.Respond)
+	s := serverFor(f)
+	body := `{"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	rec := httptest.NewRecorder()
+	s.openai(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+
+	out := rec.Body.String()
+	if strings.Count(out, `"content":"al"`) != 1 || strings.Count(out, `"content":"pha"`) != 1 {
+		t.Fatalf("expected two live deltas, got:\n%s", out)
+	}
+	if !strings.Contains(out, "[DONE]") {
+		t.Fatalf("missing DONE:\n%s", out)
+	}
+}
+
+// A mid-stream model error becomes an SSE error frame (not a 500 — bytes are
+// already on the wire).
+func TestServeOpenAIStreamError(t *testing.T) {
+	f := flow.New().WithId("talk").WithAgent(
+		agent.New().WithModel(model.Bound(&model.Mock{Chunks: []string{"ok"}, Fail: context.DeadlineExceeded}))).Next(flow.Respond)
+	s := serverFor(f)
+	body := `{"stream":true,"messages":[]}`
+	rec := httptest.NewRecorder()
+	s.openai(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+	if rec.Code != 200 { // header already committed as SSE
+		t.Fatalf("status = %d, want 200 (SSE)", rec.Code)
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, `"content":"ok"`) { // the token before the error still went out
+		t.Fatalf("expected the pre-error delta:\n%s", out)
+	}
+	if !strings.Contains(out, `"error"`) {
+		t.Fatalf("expected SSE error frame:\n%s", out)
+	}
+}
+
+// A non-streaming request is unaffected: one full JSON reply.
+func TestServeOpenAINonStreamingStillBuffers(t *testing.T) {
+	s := serverFor(talkFlow("whole thing"))
+	rec := httptest.NewRecorder()
+	s.openai(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`)))
+	if !strings.Contains(rec.Body.String(), "whole thing") || strings.Contains(rec.Body.String(), "data:") {
+		t.Fatalf("non-streaming should be plain JSON:\n%s", rec.Body.String())
+	}
+}
+
+// Handler accepts a chained (seq) flow — regression for the unhashable-Flow
+// panic when flows were deduped via a map key.
+func TestHandlerAcceptsChainedFlow(t *testing.T) {
+	f := talkFlow("x").Next(flow.Respond)
+	if _, err := Handler(f); err != nil {
+		t.Fatalf("Handler(seq) = %v", err)
 	}
 }

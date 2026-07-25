@@ -24,8 +24,52 @@ type Option = serve.Option
 // HTTP until ctx is cancelled, shutting down gracefully. It is the single point
 // where flow/agent wiring errors surface (before binding a port). Zero-config
 // defaults: ":8080", jsonl-less diagnostics ring, four workers.
+//
+// f is the explicit default flow (highest precedence). Any flows registered
+// with WithFlow are also served; a request's model name selects a named flow,
+// and a request naming no (or an unknown) model gets the default. Pass a nil f
+// to serve only the registered flows (see WithFlow(...).Serve).
 func Serve(ctx context.Context, f Flow, opts ...Option) error {
 	return serve.Serve(ctx, f, opts...)
+}
+
+// RegisterFlow is the handle WithFlow / WithDefaultFlow return: an unnamed
+// (default-by-convention) flow. It can be named with As, or served with Serve.
+// It intentionally has no WithFlow method — a chain can hold only one default.
+type RegisterFlow struct{ h serve.Handle }
+
+// RegisterNamedFlow is the handle As returns: a named flow. It can register more
+// flows with WithFlow (building a chain) or be served with Serve. It has no As —
+// naming a flow twice is a compile error by construction.
+type RegisterNamedFlow struct{}
+
+// WithFlow registers f as an unnamed flow and returns a handle. The last unnamed
+// WithFlow is the default flow (used for requests that name no model), unless a
+// WithDefaultFlow or a Serve(ctx, f) default outranks it.
+func WithFlow(f Flow) RegisterFlow { return RegisterFlow{h: serve.AddUnnamed(f)} }
+
+// WithDefaultFlow registers f as an explicit default flow (no name). It outranks
+// an unnamed WithFlow but is outranked by a flow passed straight to Serve.
+func WithDefaultFlow(f Flow) RegisterFlow { return RegisterFlow{h: serve.AddDefault(f)} }
+
+// As names the flow this handle registered, so requests for that model id route
+// to it. It demotes the flow from default-by-convention to named.
+func (r RegisterFlow) As(name string) RegisterNamedFlow {
+	serve.SetName(r.h, name)
+	return RegisterNamedFlow{}
+}
+
+// Serve serves every registered flow (no explicit default). See Serve.
+func (r RegisterFlow) Serve(ctx context.Context, opts ...Option) error {
+	return serve.Serve(ctx, nil, opts...)
+}
+
+// WithFlow registers another unnamed flow, continuing the chain.
+func (RegisterNamedFlow) WithFlow(f Flow) RegisterFlow { return WithFlow(f) }
+
+// Serve serves every registered flow (no explicit default). See Serve.
+func (RegisterNamedFlow) Serve(ctx context.Context, opts ...Option) error {
+	return serve.Serve(ctx, nil, opts...)
 }
 
 // Handler validates the flow and returns its http.Handler for embedding in an

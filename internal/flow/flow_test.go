@@ -34,6 +34,37 @@ func TestBasicDefaultAgent(t *testing.T) {
 	}
 }
 
+// A model-less agent inherits the flow's model, and — with no flow model — the
+// process default. First match on the ladder wins.
+func TestModelInheritanceLadder(t *testing.T) {
+	model.ResetRegistry()
+	t.Cleanup(model.ResetRegistry)
+	model.SetDefault(model.Bound(&model.Mock{Chunks: []string{"default"}}))
+
+	// no agent model, flow model set -> flow's model wins over the default.
+	f := New().WithId("t").WithModel(model.Bound(&model.Mock{Chunks: []string{"flow"}})).
+		WithAgent(agent.New())
+	out, err := Run(context.Background(), f, chat("hi"), nil)
+	if err != nil || out.Chat[len(out.Chat)-1].Content != "flow" {
+		t.Fatalf("flow model = %+v err %v", out.Chat, err)
+	}
+
+	// no agent model, no flow model -> falls back to the default.
+	f2 := New().WithId("t2").WithAgent(agent.New())
+	out2, err := Run(context.Background(), f2, chat("hi"), nil)
+	if err != nil || out2.Chat[len(out2.Chat)-1].Content != "default" {
+		t.Fatalf("default model = %+v err %v", out2.Chat, err)
+	}
+
+	// agent model set -> wins over both.
+	f3 := New().WithId("t3").WithModel(model.Bound(&model.Mock{Chunks: []string{"flow"}})).
+		WithAgent(mockAgent("agent"))
+	out3, err := Run(context.Background(), f3, chat("hi"), nil)
+	if err != nil || out3.Chat[len(out3.Chat)-1].Content != "agent" {
+		t.Fatalf("agent model = %+v err %v", out3.Chat, err)
+	}
+}
+
 // Multiple agents run concurrently; all get the chat; their replies accumulate
 // (order-independent); agreeing on the same select id is fine.
 func TestBasicMultiAgentConcurrent(t *testing.T) {

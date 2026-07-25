@@ -12,6 +12,7 @@ import (
 // the pending selection an agent made for the next Select group to consume.
 type State struct {
 	Chat     []model.Message
+	Req      agent.Request // the client's request params, carried as context
 	selected string
 	hasSel   bool
 }
@@ -33,6 +34,9 @@ func Run(ctx context.Context, f Flow, in State, tr Tracer) (State, error) {
 	if tr == nil {
 		tr = NoTrace{}
 	}
+	// The request params are constant for the whole chain; set them on ctx once
+	// so every turn under this run can read them via Turn.Request.
+	ctx = agent.WithRequest(ctx, in.Req)
 	return f.run(withTracer(ctx, tr), in)
 }
 
@@ -41,6 +45,7 @@ func Run(ctx context.Context, f Flow, in State, tr Tracer) (State, error) {
 // Select an agent makes becomes the flow's selection.
 type Basic struct {
 	fid    string
+	model  model.Spec
 	agents []agent.Agent
 }
 
@@ -51,8 +56,34 @@ func New() *Basic { return &Basic{} }
 // to be a Select-group member.
 func (f *Basic) WithId(id string) *Basic { f.fid = id; return f }
 
+// WithModel sets the flow's default model: every agent in it that set no model
+// of its own asks this one.
+func (f *Basic) WithModel(m model.Spec) *Basic { f.model = m; return f }
+
 // WithAgent adds one or more agents. All of them receive the incoming chat.
 func (f *Basic) WithAgent(a ...agent.Agent) *Basic { f.agents = append(f.agents, a...); return f }
+
+// resolved returns the flow's agents with the model ladder applied, so the rest
+// of the runtime only ever sees an agent that already knows which model it asks.
+func (f *Basic) resolved() []agent.Agent {
+	out := make([]agent.Agent, len(f.agents))
+	for i, ag := range f.agents {
+		out[i] = ag.WithModel(f.modelFor(ag))
+	}
+	return out
+}
+
+// modelFor resolves the model an agent actually asks, walking the inheritance
+// ladder: the agent's own model, else the flow's, else the process default.
+func (f *Basic) modelFor(ag agent.Agent) model.Spec {
+	if s := ag.Model(); s.IsSet() {
+		return s
+	}
+	if f.model.IsSet() {
+		return f.model
+	}
+	return model.Default()
+}
 
 func (f *Basic) id() string       { return f.fid }
 func (f *Basic) Next(n Flow) Flow { return then(f, n) }
@@ -73,7 +104,7 @@ func (f *Basic) run(ctx context.Context, in State) (State, error) {
 	}
 	start := time.Now()
 	tr.Event(ctx, Event{Kind: "flow.start", Flow: f.fid, At: start})
-	replies, sel, hasSel, err := runAgents(ctx, f.fid, f.agents, in.Chat)
+	replies, sel, hasSel, err := runAgents(ctx, f.fid, f.resolved(), in.Chat)
 	if err != nil {
 		return in, err
 	}
@@ -113,7 +144,20 @@ func runAgent(ctx context.Context, ag agent.Agent, turn *agent.Turn, chat []mode
 	if err != nil {
 		return err
 	}
-	turn.Reply(reply.ReadAll())
+	// A default agent streams automatically when it is terminal and the client
+	// asked for it; otherwise it buffers. Either way the model error surfaces.
+	if out, ok := turn.Stream(); ok {
+		for tok := range reply.Stream() {
+			out <- tok
+		}
+		close(out)
+		return reply.Err()
+	}
+	text := reply.ReadAll()
+	if e := reply.Err(); e != nil {
+		return e
+	}
+	turn.Reply(text)
 	return nil
 }
 
@@ -125,13 +169,32 @@ func (s seq) id() string       { return "" }
 func (s seq) Next(f Flow) Flow { return then(s, f) }
 
 func (s seq) run(ctx context.Context, in State) (State, error) {
+	term := terminalStep(s.steps)
 	var err error
 	for i, f := range s.steps {
-		if in, err = f.run(indexPath(ctx, i), in); err != nil {
+		c := indexPath(ctx, i)
+		if i != term {
+			// Only the terminal step may stream to the client; strip the sink
+			// everywhere else so upstream flows still hand off complete messages.
+			c = agent.WithoutSink(c)
+		}
+		if in, err = f.run(c, in); err != nil {
 			return in, err
 		}
 	}
 	return in, nil
+}
+
+// terminalStep is the index of the step whose reply is the client's answer: the
+// step just before the first Respond, else the last step. -1 if none (a leading
+// Respond). Streaming is armed only there.
+func terminalStep(steps []Flow) int {
+	for i, f := range steps {
+		if _, ok := f.(respond); ok {
+			return i - 1
+		}
+	}
+	return len(steps) - 1
 }
 
 // then appends b after a, flattening when a is already a sequence, so chaining
