@@ -3,6 +3,8 @@ package flow
 import (
 	"errors"
 	"fmt"
+
+	"github.com/force1267/big-brain/pkg/model"
 )
 
 // Validate walks a flow tree and returns every wiring/config problem joined
@@ -16,46 +18,53 @@ import (
 // It returns nil when the tree is sound.
 func Validate(f Flow) error {
 	var errs []error
-	walk(f, &errs)
+	walk(f, model.Spec{}, &errs)
 	return errors.Join(errs...)
 }
 
-func walk(f Flow, errs *[]error) {
+// walk recurses the tree carrying scope — the nearest enclosing flow/group
+// default model — so a Basic whose model comes from an enclosing group's
+// WithModel validates correctly (the runtime resolves it the same way via ctx).
+func walk(f Flow, scope model.Spec, errs *[]error) {
 	switch v := f.(type) {
+	case *decorated:
+		if v.hasModel {
+			scope = v.model
+		}
+		walk(v.inner, scope, errs)
 	case *Basic:
-		validateAgents(v, errs)
+		validateAgents(v, scope, errs)
 	case seq:
 		for i, step := range v.steps {
-			walk(step, errs)
+			walk(step, scope, errs)
 			if i+1 < len(v.steps) {
 				checkSelectAdjacency(step, v.steps[i+1], errs)
 			}
 		}
 	case *selectGroup:
-		for _, m := range v.members {
-			walk(m, errs)
-		}
+		walkAll(v.members, scope, errs)
 	case allGroup:
-		walkAll(v.members, errs)
+		walkAll(v.members, scope, errs)
 	case oneGroup:
-		walkAll(v.members, errs)
+		walkAll(v.members, scope, errs)
 	case groupGroup:
-		walkAll(v.members, errs)
+		walkAll(v.members, scope, errs)
 	case respond:
 		// nothing to validate
 	}
 }
 
-func walkAll(members []Flow, errs *[]error) {
+func walkAll(members []Flow, scope model.Spec, errs *[]error) {
 	for _, m := range members {
-		walk(m, errs)
+		walk(m, scope, errs)
 	}
 }
 
-func validateAgents(f *Basic, errs *[]error) {
+func validateAgents(f *Basic, scope model.Spec, errs *[]error) {
 	for _, ag := range f.agents {
-		// the effective model: the agent's own, else the flow's, else the default.
-		spec := f.modelFor(ag)
+		// the effective model: the agent's own, else the flow's, else the
+		// enclosing group's, else the default.
+		spec := resolveModel(ag, f.model, scope)
 		if !spec.IsSet() {
 			if ag.Handler() == nil {
 				*errs = append(*errs, fmt.Errorf("flow %q: a default (no-OnMessage) agent has no model on the agent, the flow, or as default", f.fid))

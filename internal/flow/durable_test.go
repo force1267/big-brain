@@ -32,7 +32,7 @@ func countingAgent(counter *atomic.Int64, reply string) agent.Agent {
 func TestCheckpointResumes(t *testing.T) {
 	store := newMemStore()
 	var calls atomic.Int64
-	f := New().WithId("work").WithAgent(countingAgent(&calls, "done"))
+	f := New().WithAgent(countingAgent(&calls, "done")).WithId("work")
 
 	// first run: executes, saves.
 	ctx := WithCheckpoint(context.Background(), store, "run-1")
@@ -62,7 +62,7 @@ func TestCheckpointResumes(t *testing.T) {
 func TestCheckpointPerRun(t *testing.T) {
 	store := newMemStore()
 	var calls atomic.Int64
-	f := New().WithId("work").WithAgent(countingAgent(&calls, "x"))
+	f := New().WithAgent(countingAgent(&calls, "x")).WithId("work")
 
 	Run(WithCheckpoint(context.Background(), store, "a"), f, chat("go"), nil)
 	Run(WithCheckpoint(context.Background(), store, "b"), f, chat("go"), nil)
@@ -76,19 +76,19 @@ func TestCheckpointPerRun(t *testing.T) {
 func TestCheckpointChainPartial(t *testing.T) {
 	store := newMemStore()
 	var a, b atomic.Int64
-	fa := New().WithId("A").WithAgent(countingAgent(&a, "ra"))
+	fa := New().WithAgent(countingAgent(&a, "ra")).WithId("A")
 
 	// First run completes A but we cut it off before B by making B fail once.
 	failB := &atomic.Bool{}
 	failB.Store(true)
-	fb2 := New().WithId("B").WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
+	fb2 := New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
 		b.Add(1)
 		if failB.CompareAndSwap(true, false) {
 			return context.Canceled
 		}
 		turn.Reply("rb")
 		return nil
-	}))
+	})).WithId("B")
 	chain2 := fa.Next(fb2)
 
 	// run 1: A runs and saves; B fails → whole run errors, A is checkpointed.
@@ -125,4 +125,75 @@ func lastOf(s State) string {
 		return ""
 	}
 	return s.Chat[len(s.Chat)-1].Content
+}
+
+// Opt-in: with a store available (WithStore) but the flow NOT Durable, nothing
+// is checkpointed — the agent runs again on the second run.
+func TestNoDurableNoCheckpoint(t *testing.T) {
+	store := newMemStore()
+	var calls atomic.Int64
+	f := New().WithAgent(countingAgent(&calls, "done")).WithId("work") // not Durable
+
+	ctx := WithStore(context.Background(), store, "run-1")
+	if _, err := Run(ctx, f, chat("go"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(ctx, f, chat("go"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("non-durable flow should re-run: calls=%d, want 2", calls.Load())
+	}
+}
+
+// A Durable flow checkpoints: the second run resumes and the agent does not
+// re-execute.
+func TestDurableCheckpoints(t *testing.T) {
+	store := newMemStore()
+	var calls atomic.Int64
+	f := New().WithAgent(countingAgent(&calls, "done")).WithId("work").Durable()
+
+	ctx := WithStore(context.Background(), store, "run-1")
+	if _, err := Run(ctx, f, chat("go"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(ctx, f, chat("go"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("durable flow should resume: calls=%d, want 1", calls.Load())
+	}
+}
+
+// The structure-version guard: a durable flow whose graph changed is not resumed
+// into (its checkpoint is discarded) — unless ForwardCompatible.
+func TestDurableStructureGuard(t *testing.T) {
+	store := newMemStore()
+	var calls atomic.Int64
+
+	v1 := New().WithAgent(countingAgent(&calls, "a")).WithId("work").Durable()
+	ctx := WithStore(context.Background(), store, "run-1")
+	if _, err := Run(ctx, v1, chat("go"), nil); err != nil {
+		t.Fatal(err)
+	}
+	// v2 has a different shape (two agents) under the same id and run.
+	v2 := New().WithAgent(countingAgent(&calls, "a"), countingAgent(&calls, "b")).WithId("work").Durable()
+	if _, err := Run(ctx, v2, chat("go"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() < 2 {
+		t.Fatalf("changed structure should re-run, not resume: calls=%d", calls.Load())
+	}
+
+	// ForwardCompatible resumes despite the change.
+	store2 := newMemStore()
+	var calls2 atomic.Int64
+	ctx2 := WithStore(context.Background(), store2, "run-2")
+	w1 := New().WithAgent(countingAgent(&calls2, "a")).WithId("work").Durable(ForwardCompatible())
+	Run(ctx2, w1, chat("go"), nil)
+	w2 := New().WithAgent(countingAgent(&calls2, "a"), countingAgent(&calls2, "b")).WithId("work").Durable(ForwardCompatible())
+	Run(ctx2, w2, chat("go"), nil)
+	if calls2.Load() != 1 {
+		t.Fatalf("ForwardCompatible should resume despite change: calls=%d, want 1", calls2.Load())
+	}
 }

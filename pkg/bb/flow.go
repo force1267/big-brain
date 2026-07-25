@@ -2,6 +2,7 @@ package bb
 
 import (
 	"context"
+	"time"
 
 	"github.com/force1267/big-brain/internal/flow"
 )
@@ -17,10 +18,65 @@ type Flow = flow.Flow
 // incoming chat), and Next (chaining).
 func NewFlow() *flow.Basic { return flow.New() }
 
+// NamedFlow is a flow given an id via WithId — the only thing Durable accepts.
+type NamedFlow = flow.NamedFlow
+
+// DurableFlow is a named flow made durable via Durable.
+type DurableFlow = flow.DurableFlow
+
+// DurableOpt configures a Durable flow.
+type DurableOpt = flow.DurableOpt
+
+// ForwardCompatible lets a durable flow resume from its checkpoint even if its
+// graph changed since (the author asserts the change is compatible). By default
+// a changed structure is not resumed into.
+func ForwardCompatible() DurableOpt { return flow.ForwardCompatible() }
+
+// ResumeOnReregister resumes a crashed durable run when its id is registered
+// again, rather than automatically at startup (for dynamic flows).
+func ResumeOnReregister() DurableOpt { return flow.ResumeOnReregister() }
+
+// Retries sets how many times a durable flow is retried on failure.
+func Retries(n int) DurableOpt { return flow.Retries(n) }
+
+// TTL bounds how long a pending durable run is kept before it is dropped.
+func TTL(d time.Duration) DurableOpt { return flow.TTL(d) }
+
 // Select groups flows so an upstream agent picks one by id (turn.Select). A
 // member without WithId is not selectable and is ignored with a warning. A
 // selected id with no matching member is a loud error at request time.
 func Select(members ...Flow) Flow { return flow.Select(members...) }
+
+// Every defers the flow after it to run on the cron schedule spec. Reaching it
+// splits the chain: what follows becomes a deferred, durable body. The body
+// should be a named flow (WithId) so it resolves after a restart.
+func Every(spec string) Flow { return flow.Every(spec) }
+
+// Once defers the flow after it to run a single time at t — how a brain keeps
+// working past the reply ("I'll text you when it's done").
+func Once(t time.Time) Flow { return flow.Once(t) }
+
+// TriggerChain is the head of a non-request pipeline (see Trigger).
+type TriggerChain = flow.TriggerChain
+
+// TriggerOpt seeds a trigger chain's initial state.
+type TriggerOpt = flow.TriggerOpt
+
+// Trigger starts a chain that runs at startup (when Serve boots): a bare
+// Trigger().Next(f) is a boot task; Trigger().Next(Every/Once)... schedules what
+// follows. It self-registers, so Serve picks it up. Options seed a synthetic
+// request/chat for flows that read them.
+func Trigger(opts ...TriggerOpt) *TriggerChain { return flow.Trigger(opts...) }
+
+// WithSeedRequest seeds the synthetic request params a startup flow reads.
+func WithSeedRequest(r Request) TriggerOpt { return flow.WithSeedRequest(r) }
+
+// WithSeedChat seeds the initial chat a startup flow runs over.
+func WithSeedChat(msgs ...Message) TriggerOpt { return flow.WithSeedChat(msgs...) }
+
+// WithSeedPayload seeds arbitrary trigger data, readable in the chain via
+// bb.Payload[T] — how a custom entry point passes its data in.
+func WithSeedPayload(v any) TriggerOpt { return flow.WithSeedPayload(v) }
 
 // All runs every member flow concurrently, each over its own copy of the chat;
 // all their replies merge into the output. It ends when all members end.

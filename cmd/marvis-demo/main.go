@@ -23,6 +23,8 @@ var (
 	FlowList                   = "List"
 	FlowHouse                  = "House"
 	FlowExtra                  = "Extra"
+	FlowCapabilities           = "Capabilities"
+	FlowNightly                = "Nightly"
 )
 
 func main() {
@@ -81,6 +83,13 @@ func main() {
 	// and agent can call Select and pass a string. each flow must have a call to WithId to set an Id.
 	// the last call to Select inside a flow selects the next flow from the group defined.
 	// bb.Select ignores (and warning logs) any flow that didn't call WithId and is not selectable.
+	// WithId and WithModel are methods of bb.Flow — EVERY flow implements them (basic, Select, All, Group, a
+	// Next chain), each in its own sense. On a group, WithModel is the DEFAULT model for the agents inside that
+	// set none of their own (the ladder: agent → its flow → enclosing group → bb.WithDefaultModel → first
+	// registered). WithId names the whole group as one unit, so it can be Selected, Triggered, or made Durable:
+	//   capabilities := bb.Select(talking, remembering, recalling, listing, house).
+	//       WithModel(bb.NewModel(ModelCheap)). // group default model for member agents that set none
+	//       WithId(FlowCapabilities)             // name the composite so it is addressable as one unit
 	var capabilities bb.Flow = bb.Select(talking, remembering, recalling, listing, house)
 	// there exist other grouping strategies:
 	// bb.All   // gives separate chat contents to all flows. all the replies from all of the flows gets added to the final output. it ends when all of them are ended.
@@ -89,9 +98,31 @@ func main() {
 
 	// bb.Respond is a prebuilt bb.Flow that replays the last message in the chat content it receives to the user.
 	// there exists another types of outgoing prebuilt Flow: bb.Notify(...)
-	var flow bb.Flow = intentDiscovery.Next(capabilities).Next(bb.Respond) // .Next(...) this can continue after a reply was sent to user
-	// a flow is a durable execution, marked, pausable and resumable.
-	// if the process crashes, it can continue from the start of a flow it was running
+	var flow bb.Flow = intentDiscovery.Next(capabilities).Next(bb.Respond) // .Next(...) can keep working after the reply is sent
+
+	// Durability is opt-in and LOUD, never a silent effect of configuring a store. A flow is durable only if it
+	// was named and then made durable — WithId returns a NamedFlow, and only a NamedFlow has .Durable(), so the
+	// two are adjacent by construction and a durable flow always carries the id the engine resolves against after
+	// a restart. .Durable() also configures the resume trigger (at startup vs on re-registration), retries, and a
+	// TTL (inherited down the tree like the model). Without .Durable() a flow is ephemeral even with a store:
+	//   var remember bb.Flow = bb.NewFlow().WithAgent(agent).WithId(FlowRemember).Durable()
+	// A changed graph is not silently resumed into: on a structure mismatch the checkpoint is discarded (opt out
+	// with .ForwardCompatible()); the --no-resume flag wipes pending state for a clean redeploy.
+
+	// Initiative — marvis acts on its own, not only per request. Triggers are flows too:
+	//   bb.Trigger() runs its chain as soon as it can (when Serve starts); a bare bb.Trigger().Next(f) is a boot task.
+	//   bb.Every(spec) defers the flow after it to run on a cron; bb.Once(t) runs it once at time t.
+	// Reaching a trigger SPLITS the chain: what follows is deferred to run later, on its own (repeatedly for Every,
+	// once for Once). The deferred body should be a Durable named flow so it survives a restart:
+	//   var nightly bb.Flow = bb.NewFlow().WithAgent(summarizer).WithId(FlowNightly).Durable().Next(bb.Notify(text))
+	//   bb.Trigger().Next(bb.Every("0 21 * * *")).Next(nightly) // registered outside Serve; fires every night at 21:00
+	// bb.Once also works mid-flow, after Respond, to keep working past the reply ("I'll text you when it's done"):
+	//   intentDiscovery.Next(capabilities).Next(bb.Respond).Next(bb.Once(when)).Next(followUp)
+	// A flow that re-triggers itself (an agent scheduling FlowNightly again) is how you loop or recurse durably —
+	// each run is a fresh, checkpointed run. Cycles are re-triggers, not Next loops.
+	// A trigger can seed data a flow reads back: bb.Trigger(bb.WithSeedPayload(x)). Inside an agent,
+	// turn.Request() is the protocol envelope (model/temperature/…) and bb.Payload[T](turn) is arbitrary
+	// trigger-specific data — both captured and replayed when a scheduled body fires.
 
 	// it serves the combined flow in openapi and anthropic API style.
 	// ctx drives graceful shutdown; opts (bb.Addr/bb.Store/bb.Trace/bb.Workers)
@@ -304,7 +335,7 @@ func flowTalk(ctx context.Context) (bb.Flow, error) {
 	// stream is a parallel tee that only exists at the terminus.
 
 	// return ..., nil
-	var flow bb.Flow = bb.NewFlow().WithId(FlowTalking).WithAgent(agent)
+	var flow bb.Flow = bb.NewFlow().WithAgent(agent).WithId(FlowTalking)
 	return flow, nil
 }
 
@@ -323,7 +354,7 @@ func flowRemember(ctx context.Context) (bb.Flow, error) {
 		WithModel(model).
 		WithRole(role)
 
-	var flow bb.Flow = bb.NewFlow().WithId(FlowRemember).WithAgent(agent)
+	var flow bb.Flow = bb.NewFlow().WithAgent(agent).WithId(FlowRemember)
 	return flow, nil
 }
 
@@ -336,7 +367,7 @@ func flowRecall(ctx context.Context) (bb.Flow, error) {
 		WithModel(model).
 		WithRole(role)
 
-	var flow bb.Flow = bb.NewFlow().WithId(FlowRecall).WithAgent(agent)
+	var flow bb.Flow = bb.NewFlow().WithAgent(agent).WithId(FlowRecall)
 	return flow, nil
 }
 
@@ -349,7 +380,7 @@ func flowList(ctx context.Context) (bb.Flow, error) {
 		WithModel(model).
 		WithRole(role)
 
-	var flow bb.Flow = bb.NewFlow().WithId(FlowList).WithAgent(agent)
+	var flow bb.Flow = bb.NewFlow().WithAgent(agent).WithId(FlowList)
 	return flow, nil
 }
 
@@ -362,7 +393,7 @@ func flowHouse(ctx context.Context) (bb.Flow, error) {
 		WithModel(model).
 		WithRole(role)
 
-	var flow bb.Flow = bb.NewFlow().WithId(FlowHouse).WithAgent(agent)
+	var flow bb.Flow = bb.NewFlow().WithAgent(agent).WithId(FlowHouse)
 	return flow, nil
 }
 

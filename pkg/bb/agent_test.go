@@ -62,3 +62,22 @@ func TestExtractZeroOnMissingField(t *testing.T) {
 func newTurnFor(a Agent, incoming ...Message) Turn {
 	return agent.NewTurn(context.Background(), a, incoming)
 }
+
+// Payload[T] decodes a turn's trigger payload; ok is false when absent or the
+// wrong shape.
+func TestPayloadDecode(t *testing.T) {
+	type note struct {
+		Text string `json:"text"`
+	}
+	// no payload -> ok false
+	turn := agent.NewTurn(context.Background(), agent.New(), nil)
+	if _, ok := Payload[note](turn); ok {
+		t.Fatal("no payload should give ok=false")
+	}
+	// seeded payload -> decoded
+	ctx := agent.WithPayload(context.Background(), []byte(`{"text":"hi"}`))
+	turn2 := agent.NewTurn(ctx, agent.New(), nil)
+	if v, ok := Payload[note](turn2); !ok || v.Text != "hi" {
+		t.Fatalf("payload decode = %+v ok=%v", v, ok)
+	}
+}

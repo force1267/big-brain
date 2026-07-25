@@ -44,7 +44,7 @@ func TestTerminalStep(t *testing.T) {
 func TestDefaultAgentStreamsAtTerminal(t *testing.T) {
 	sink, got, mu := collectingSink()
 	// cap.Next(Respond): cap is terminal, so its agent should stream.
-	f := New().WithId("cap").WithAgent(mockAgent("he", "llo")).Next(Respond)
+	f := New().WithAgent(mockAgent("he", "llo")).WithId("cap").Next(Respond)
 	ctx := agent.WithSink(context.Background(), sink)
 	out, err := Run(ctx, f, chat("hi"), nil)
 	if err != nil {
@@ -68,8 +68,8 @@ func TestDefaultAgentStreamsAtTerminal(t *testing.T) {
 func TestUpstreamAgentDoesNotStream(t *testing.T) {
 	sink, got, mu := collectingSink()
 	// router is step 0, Respond makes the terminal step -1... use router.Next(cap).
-	router := New().WithId("router").WithAgent(mockAgent("routed"))
-	capFlow := New().WithId("cap").WithAgent(mockAgent("answer"))
+	router := New().WithAgent(mockAgent("routed")).WithId("router")
+	capFlow := New().WithAgent(mockAgent("answer")).WithId("cap")
 	f := router.Next(capFlow) // cap is terminal, router is not
 	ctx := agent.WithSink(context.Background(), sink)
 	if _, err := Run(ctx, f, chat("hi"), nil); err != nil {

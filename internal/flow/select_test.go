@@ -21,8 +21,8 @@ func router(selectID string) Flow {
 // Select routes to the member whose id matches the upstream selection.
 func TestSelectRoutes(t *testing.T) {
 	group := Select(
-		New().WithId("talk").WithAgent(mockAgent("talked")),
-		New().WithId("house").WithAgent(mockAgent("housed")),
+		New().WithAgent(mockAgent("talked")).WithId("talk"),
+		New().WithAgent(mockAgent("housed")).WithId("house"),
 	)
 	head := router("house").Next(group)
 
@@ -38,7 +38,7 @@ func TestSelectRoutes(t *testing.T) {
 
 // An unknown selected id is a loud error.
 func TestSelectUnknownId(t *testing.T) {
-	group := Select(New().WithId("talk").WithAgent(mockAgent("x")))
+	group := Select(New().WithAgent(mockAgent("x")).WithId("talk"))
 	head := router("ghost").Next(group)
 	_, err := Run(context.Background(), head, chat("x"), nil)
 	if !errors.Is(err, ErrUnknownSelect) {
@@ -49,7 +49,7 @@ func TestSelectUnknownId(t *testing.T) {
 // No upstream selection: the group runs nothing and passes the chat through.
 func TestSelectNoSelection(t *testing.T) {
 	rec := &Recorder{}
-	group := Select(New().WithId("talk").WithAgent(mockAgent("x")))
+	group := Select(New().WithAgent(mockAgent("x")).WithId("talk"))
 	// a plain flow that selects nothing, then the group
 	plain := New().WithAgent(agent.New().WithModel(model.Bound(&model.Mock{Chunks: []string{"noop"}})))
 	out, err := Run(context.Background(), plain.Next(group), chat("hi"), rec)
@@ -68,7 +68,7 @@ func TestSelectNoSelection(t *testing.T) {
 func TestSelectIgnoresIdlessMember(t *testing.T) {
 	group := Select(
 		New().WithAgent(mockAgent("no-id")), // no WithId → ignored
-		New().WithId("talk").WithAgent(mockAgent("talked")),
+		New().WithAgent(mockAgent("talked")).WithId("talk"),
 	).(*selectGroup)
 	if len(group.ids()) != 1 || group.ids()[0] != "talk" {
 		t.Fatalf("idless member not ignored: %v", group.ids())

@@ -38,3 +38,19 @@ func Extract[T any](r Reply) T {
 	_ = json.Unmarshal([]byte(r.ReadAll()), &v)
 	return v
 }
+
+// Payload decodes this turn's trigger payload into T (a webhook body, a cron
+// seed, a custom entry point's data). ok is false when the run carries no payload
+// or it does not decode into T. It is the open-ended companion to turn.Request
+// (the protocol envelope). A free function, like Extract, because Go methods
+// cannot be generic.
+func Payload[T any](turn Turn) (v T, ok bool) {
+	raw := turn.Payload()
+	if len(raw) == 0 {
+		return v, false
+	}
+	if json.Unmarshal(raw, &v) != nil {
+		return v, false
+	}
+	return v, true
+}

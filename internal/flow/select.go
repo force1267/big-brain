@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/sirupsen/logrus"
+
+	"github.com/force1267/big-brain/pkg/model"
 )
 
 // selectGroup routes to exactly one member — the one whose id matches the
@@ -26,8 +28,10 @@ func Select(members ...Flow) Flow {
 	return &selectGroup{members: kept}
 }
 
-func (g *selectGroup) id() string       { return "" }
-func (g *selectGroup) Next(f Flow) Flow { return then(g, f) }
+func (g *selectGroup) id() string                  { return "" }
+func (g *selectGroup) Next(f Flow) Flow            { return then(g, f) }
+func (g *selectGroup) WithId(id string) NamedFlow  { return named(g, id) }
+func (g *selectGroup) WithModel(m model.Spec) Flow { return scoped(g, m) }
 
 func (g *selectGroup) run(ctx context.Context, in State) (State, error) {
 	tr := tracerFrom(ctx)
@@ -67,8 +71,10 @@ type respond struct{}
 // Respond is the prebuilt flow that replays the last message to the user.
 var Respond Flow = respond{}
 
-func (respond) id() string       { return "" }
-func (respond) Next(f Flow) Flow { return then(respond{}, f) }
+func (respond) id() string                  { return "" }
+func (respond) Next(f Flow) Flow            { return then(respond{}, f) }
+func (respond) WithId(id string) NamedFlow  { return named(respond{}, id) }
+func (respond) WithModel(m model.Spec) Flow { return scoped(respond{}, m) }
 
 func (respond) run(ctx context.Context, in State) (State, error) {
 	tracerFrom(ctx).Event(ctx, Event{Kind: "respond"})

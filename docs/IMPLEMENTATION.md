@@ -97,12 +97,43 @@ at startup, via `flow.Validate`) and `Ask` (schema mismatch + transport, at
 runtime, because it depends on live model output). Builders only record;
 `Extract` is a pure typed getter.
 
-**Durability.** With a `Store` configured, each leaf flow's result is
-checkpointed, keyed by `(run id, structural path)`. A request carries its run
-id via the `X-Run-Id` header; a client that retries a crashed run with the same
-id resumes — flows that already completed replay from the savepoint (a
-`flow.cached` trace event) instead of re-asking the model. Structural path (not
-completion order) keeps keys stable under concurrency.
+**Durability (loud, opt-in).** Durability is a per-flow, typed choice, not an
+ambient effect of configuring a store. `WithId` yields a `NamedFlow`; only a
+`NamedFlow` has `Durable(opts…) DurableFlow`, so durable-but-anonymous is a
+compile error. `Serve` puts the store on the run context (`WithStore`) but
+checkpoints nothing by itself; a `Durable` flow activates a checkpoint for its
+subtree (`activateDurable`), and the leaf flows under it save/load keyed by
+`(run id, structural path)`. A flow without `Durable` never persists, even with
+a `Store`. A request carries its run id via `X-Run-Id`; a retry resumes
+completed sub-flows (a `flow.cached` trace event) instead of re-asking. A
+structure-version guard discards a checkpoint whose graph changed since (unless
+`ForwardCompatible`), so a redeploy is not resumed into a different tree.
+`Durable` also records resume-trigger / retries / TTL options for the trigger
+work (Phase C) to honour. Structural path (not completion order) keeps keys
+stable under concurrency.
+
+`WithId`/`WithModel` are `Flow`-interface methods (every flow kind, not just
+`Basic`): naming a composite makes it one addressable unit; `WithModel` on a
+group is the default model for its agents, so model resolution is lexical scope
+over the tree (a ctx-carried "nearest flow model", innermost wins). Composites
+carry id/model/durability via a shared `decorated` wrapper; `Basic` carries its
+own.
+
+**Triggers & initiative.** Scheduling is composition: `Every(spec)`/`Once(t)` are
+flow nodes, and reaching one in a chain **splits** it — `seq.run` hands the flows
+after the trigger to a `Scheduler` (on ctx) as a deferred body and stops the
+pass. `flow` defines only the `Scheduler` seam; `serve` provides the engine-backed
+impl (`engineScheduler`) that registers each body once by id and schedules it —
+`engine.Every` for a cron, `engine.Enqueue` for a one-shot — then runs
+`engine.Run` as a worker under `Serve`. `Trigger(opts…)` heads a startup chain
+(self-registers; `Serve` runs it at boot, which reaches its `Every`/`Once` and
+schedules the rest); a bare `Trigger().Next(f)` is a boot task. A mid-request
+`Once` works the same way (the scheduler is on the request ctx too), capturing the
+chat + request params as the payload so the fired body replays the request
+context. The body runs durably at **job** granularity (the engine re-runs it on
+crash); it must be a named flow so it resolves after a restart (an unnamed body is
+warned and skipped). Triggers require a `Store` (durable scheduling); with none,
+initiative is off. `Handler` schedules but only `Serve` runs the worker.
 
 **Observability.** Every flow boundary, select, response, and cached-resume is a
 timed trace `Event`. Tracers: the diagnostics ring (always on, exposed at
@@ -128,6 +159,32 @@ whole text). A default (no-handler) agent does this tee automatically. Errors
 after the first streamed byte cannot be an HTTP status: `Serve` emits an SSE
 error frame and truncates. At-least-once still holds — a crash mid-stream
 re-runs the terminal flow and re-streams from the top.
+
+## Planned surface (design decided, not yet built)
+
+Recorded so the built system and the goal post (`cmd/marvis-demo/main.go`) don't
+silently diverge; the reasoning is in `docs/discussion.md` ("Everything is a
+flow…") and the plan in `next.md` (#2). Phase A (`WithId`/`WithModel` on the
+interface), Phase B (loud typed durability), Phase C (triggers + engine wiring),
+and Phase D's turn data model (`bb.Payload[T]`) are now built (above). The
+payload — arbitrary trigger data — rides the context as raw JSON (`agent.WithPayload`),
+is seeded by `WithSeedPayload`, captured into a scheduled body's payload, and
+replayed when it fires, so `bb.Payload[T](turn)` reads the same data in a request,
+a startup chain, or a fired body. Still to come:
+
+- **`Webhook` trigger** — needs an inbound HTTP endpoint in `serve` that fires a
+  trigger on request (not just startup); `bb.Payload` already provides the data
+  half, so this is the reception half.
+- **`Respond` as sink finalizer** — deferred. It was unnecessary for triggers: a
+  cron/once body runs on the engine worker, not through `Serve`'s HTTP delivery,
+  so `Respond` is already a no-op there. `Serve` still emits the response for
+  requests; folding delivery into `Respond` is a later cleanup.
+- **Finer durability inside a triggered body** — a fired body is durable at job
+  granularity (engine re-run on crash); a `Durable` flow *inside* it does not yet
+  checkpoint (the worker ctx has no `WithStore`). Honoring `Durable`'s
+  retries/TTL via the engine's cron/enqueue options is also pending.
+- **Cycles as re-triggers** — supported in principle (a body re-schedules its id);
+  no guard/observability yet.
 
 ## The Go-impossible bit (one deliberate divergence from the goal post)
 

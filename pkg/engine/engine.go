@@ -17,10 +17,10 @@ import (
 // finds the earliest-due run in O(log n) instead of an O(n) sorted insert.
 type runHeap []Run
 
-func (h runHeap) Len() int            { return len(h) }
-func (h runHeap) Less(i, j int) bool  { return h[i].Wake.Before(h[j].Wake) }
-func (h runHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *runHeap) Push(x any)         { *h = append(*h, x.(Run)) }
+func (h runHeap) Len() int           { return len(h) }
+func (h runHeap) Less(i, j int) bool { return h[i].Wake.Before(h[j].Wake) }
+func (h runHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *runHeap) Push(x any)        { *h = append(*h, x.(Run)) }
 func (h *runHeap) Pop() any {
 	old := *h
 	n := len(old)

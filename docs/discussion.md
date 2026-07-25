@@ -444,3 +444,173 @@ reply as it lands.
 The through-line of the whole session: *write the call site first, let only
 dispatch points be interfaces, name why each shortcut is honest before taking
 it, and surface impossibilities instead of hacking around them.*
+
+## Post-bb evolution: ladder, multi-flow, request params, streaming (2026-07-24/25)
+
+After the bb framework shipped, a run of feature discussions pushed the surface
+forward, each one starting from the goal-post `marvis-demo/main.go` — the file
+the author edits to *state* the desired API before any of it exists.
+
+**Model inheritance ladder.** "No agent is model-less." An agent inherits its
+model from the flow it runs in, and a flow from a default model. The registration
+call became fluent — `bb.WithModel(m).WithTag("cheap","fast")` — with a
+`WithDefaultModel` and an implicit "first registered is the default", resolved
+along agent → flow → default. The point was ergonomic honesty: leaving `WithModel`
+off should mean "use what the flow/deployment provides", not a silent nil.
+
+**Multi-flow serving.** One process, several named flows, chosen by the request's
+`model` id, with a default for unnamed/unknown — `bb.WithFlow(f).As("acme/coder")`.
+This forced a reconciliation with the "one brain per process" framing: the
+resolution was *one deployment, one owner, several flows* — a routing convenience,
+explicitly **not** first-class multi-tenancy (no tenant boundary, no isolated
+memories; that stays somebody else's product built around this one).
+
+**Request params as context.** A client's sampling params (`model`,
+`temperature`, `max_tokens`) reach the flow read-only via `turn.Request()` — for
+the handler to honor, clamp, ignore, or branch on. Never auto-applied to the
+agent's own model config. The principle: a brain stays a brain, not a passthrough
+model the caller reconfigures.
+
+**Streaming — the design conversation that mattered most.** The author's first
+instinct was a `turn.Stream()` that threads a live channel flow-to-flow, each
+agent teeing the previous stream onward. The load-bearing objection came from the
+author themselves: durability means sequential flows with *complete*-message
+handoff — the checkpoint between flows is a whole message — so a live stream
+cannot cross a flow boundary and stay resumable. That killed the thread-it-
+everywhere design and collapsed the problem to its tractable core:
+
+> There are two output paths. The durable one (`State`) always carries complete
+> messages. The live one is a parallel tee to the client that exists only at the
+> **terminal** boundary (the flow before `Respond`, else the last flow).
+
+The interface settled on `reply.Stream()` (live, backed by a record-replay buffer
+so `ReadAll`/`Extract` coexist — the developer is never forced to choose) and
+`turn.Stream() (chan<-, ok)` — a **claim-once** client sink, `ok=false` for
+non-terminal / concurrent / non-streaming turns. The framework tees the author's
+channel to the client and records the whole message into `State`, so downstream
+and durability see complete text. A default agent auto-streams. Errors after the
+first byte become SSE error frames (no HTTP status left). Coextensive discovery:
+a latent panic — `Handler` deduped flows via a map keyed by `Flow`, but a `seq`
+is unhashable.
+
+## The trigger redesign — "time is a flow" (2026-07-25)
+
+Surfacing `pkg/engine` for *initiative* (durable background + scheduled work)
+started as a `bb.Task`/`bb.Later` proposal and was replaced, by the author, with
+something far more in the grain of the framework: **scheduling is composition.**
+
+`WithId` already names flows, so there is no need for a separate "task" concept —
+a named flow is already the addressable unit. The missing piece is triggers:
+
+- `bb.Every(spec)` and `bb.Once(t)` are **flows** that split the chain — reaching
+  one defers the flow after it to the engine (repeatedly for `Every`, once for
+  `Once`) and ends the current pass.
+- `bb.Trigger(opts...)` is the non-request entry point: a chain headed by it runs
+  at startup (a bare `Trigger.Next(f)` is a boot task), and it can seed a
+  synthetic context — `bb.Trigger(bb.WithRequest(...))`.
+
+The unifying realization: **an HTTP request is just a synchronous trigger seeded
+with the request envelope, carrying a response sink.** `bb.Respond` is not a
+special node — it is the sink finalizer: deliver to the response sink if one is on
+the context, else do nothing (so `Respond` after a cron trigger is a genuine
+no-op). That is the same sink the streaming work already threads flow-by-flow. A
+webhook is then just `bb.Trigger(payload)` sugar.
+
+Two distinctions were drawn deliberately:
+
+- **Unify the abstraction, not the execution.** One `Trigger` primitive and one
+  flow-execution path — but request triggers run *inline and ephemeral* (no store
+  write per request), while cron/once triggers are *enqueued and durable*. Routing
+  every chat request through the durable job queue would be write amplification
+  and latency for nothing.
+- **Tier durability instead of forbidding dynamism.** The author rejected
+  restricting schedulers to the top level. Because the engine resolves a scheduled
+  body by its flow *id* at fire time, the honest line is: a **startup-registered
+  named flow** is durable across restart; a **dynamic/anonymous** body runs while
+  the process lives but not across a restart (its registration was code that only
+  ran for that request). Not a chosen limit — a forced one. Scheduling is allowed
+  anywhere sequential; only inside a concurrent group is "what comes after me"
+  undefined.
+
+Data on the turn split cleanly: `turn.Request()` for the well-known protocol
+envelope, and a generic `bb.Payload[T](turn)` for arbitrary trigger-specific data
+(free function, since Go methods can't be generic — the `Extract`/`Schema`
+precedent). `Trigger` options seed both.
+
+## Everything is a flow: interface-level WithId/WithModel, loud durability, scheduling (2026-07-25)
+
+The trigger discussion kept going and settled the flow *interface* itself.
+
+**WithId and WithModel belong on `Flow`, not just `Basic`.** Every implementation
+(basic, Select, All, Group, a Next chain) defines them in its own sense. The
+consequence the author liked: `WithModel` on a group means "the default model for
+the agents inside me", which turns the model ladder into **lexical scope over the
+composition tree** — agent → nearest enclosing flow/group that set a model →
+`WithDefaultModel` → first registered — implemented by each composite pushing its
+model onto the context as it descends, innermost wins. `WithId` on any flow names
+a whole composite as one addressable unit (selectable, triggerable, durable).
+
+**Durability made loud and typed.** The author rejected durability as an ambient
+effect of configuring a store — it should be visible in the code and controlled
+per flow. So a type-state builder: `Flow.WithId() → NamedFlow`, and
+`NamedFlow.Durable() → DurableFlow`. You cannot make an anonymous flow durable —
+`Durable` only exists on `NamedFlow`, which only `WithId` produces — so the
+id-before-durability rule the discussions kept restating becomes a *compile
+error*, in the same spirit as Agent-can't-Ask. `Store` demotes to "the backend
+for flows that opted in." A flow without `.Durable()` is ephemeral even with a
+store configured. Durability tiers by registration: a **startup-registered named
+flow** survives restart (its id re-resolves after reload); a dynamic/anonymous one
+runs while the process lives but not across a restart — a forced line, not a
+chosen one. Options on `Durable()`: resume trigger (at-startup vs on-reregister),
+retries, TTL (inherited down the tree like the model), and `.ForwardCompatible()`
+to opt out of the discard-on-structure-change guard; a `--no-resume` flag wipes
+pending state for a clean redeploy.
+
+**What `WithId`/`Durable` scope over — and why "sticky" was wrong.** The author
+probed `A.Next(B).WithId("x").Durable().Next(C)`: what is named/durable? The
+resolution: `WithId`/`Durable` are **properties of a flow value**, so they attach
+to the **receiver** — everything composed so far, to their left — as a *suffix*,
+not a forward-opening prefix (that distinction is what separates them from the
+scheduler nodes `Every`/`Once`, whose meaning *is* forward). So the durable named
+unit is `A→B`; `C` is a sibling outside it, because naming creates a boundary that
+does not flatten. This killed an earlier "sticky NamedFlow" idea (letting
+`Durable` be called after more `.Next`s): it let the name and the durable boundary
+*drift apart*, reintroducing the exact ambiguity the type-state removes. The
+crisp rule instead: **`WithId` and `Durable` are adjacent, together defining one
+boundary = the receiver; `.Next` closes it and starts a sibling.** Whole-chain
+durability → name+durable at the end; sub-span → build it, name+durable it, embed
+it. Nested names fall out as the zoom hierarchy for the monitoring UI, and the
+same names anchor the checkpoint keys — identity, persistence, and observability
+all ride one tree.
+
+**Schedulers inside groups — defined, not forbidden.** An earlier instinct to ban
+`Every`/`Once` inside `All`/`One`/`Group` was wrong: a scheduler sits inside a
+*member*, and a member is sequential, so its suffix is well-defined. Reaching a
+scheduler **resolves** that member (it contributes its chat-so-far plus a deferred
+continuation). The subtle part is `One`: registering a schedule is a durable side
+effect, and `One` cancels losers, so *whether the cron exists* would depend on a
+race. The fix ties the side effect to the chat: **a schedule commits iff the
+member's contribution is kept** — all members in `All`/`Group`, only the winner in
+`One` — implemented by staging enqueues per member and flushing on acceptance
+(immediate everywhere non-concurrent).
+
+**Cycles are re-triggers.** `Next` builds an acyclic chain; loops and recursion
+are expressed by a flow (or its agent) scheduling its own id again — each
+iteration a fresh, checkpointed run. No cycles in the static graph, no in-memory
+recursion; the only hazard (runaway self-trigger) is met with observability and an
+optional cap, not a prohibition.
+
+**Durability, right-sized.** The author's sharp observation: durability is, in
+practice, "a big word for persisted crons" — and the trigger design makes that
+*more* true, since request triggers run inline and ephemeral (no store write) and
+only enqueued (cron/once/background) runs touch the store. The one thing it adds
+beyond persisted schedules is **mid-run resume across expensive/side-effecting
+steps** (skip the model call already paid for, don't re-run the tool that already
+booked) — latent today because runs are short, valuable exactly for the complex
+tool-pipeline brains the product keeps aiming at. So: keep the flow-checkpoint
+resume (cheap, built), scope it to opted-in durable flows, don't gold-plate.
+
+The through-line: *everything is a flow; the interface methods mean what each flow
+kind makes them mean; make the load-bearing rules unrepresentable-when-violated
+rather than documented; and let the composition tree be the one spine that carries
+identity, model scope, durability keys, and trace spans at once.*

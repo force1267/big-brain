@@ -13,7 +13,7 @@ import (
 )
 
 func talkFlow(reply string) flow.Flow {
-	return flow.New().WithId("talk").WithAgent(agent.New().WithModel(model.Bound(&model.Mock{Chunks: []string{reply}})))
+	return flow.New().WithAgent(agent.New().WithModel(model.Bound(&model.Mock{Chunks: []string{reply}}))).WithId("talk")
 }
 
 func serverFor(f flow.Flow) *server {
@@ -84,7 +84,7 @@ func TestServeFlowError(t *testing.T) {
 
 // Handler validates: a bad flow fails before serving.
 func TestHandlerValidates(t *testing.T) {
-	bad := flow.New().WithId("x").WithAgent(agent.New()) // default agent, no model
+	bad := flow.New().WithAgent(agent.New()).WithId("x") // default agent, no model
 	if _, err := Handler(bad); err == nil {
 		t.Fatal("Handler should reject an invalid flow")
 	}
@@ -120,12 +120,12 @@ func TestModels(t *testing.T) {
 // reads them off turn.Request and can branch on them.
 func TestRequestParamsReachHandler(t *testing.T) {
 	var got agent.Request
-	capture := flow.New().WithId("cap").WithAgent(
+	capture := flow.New().WithAgent(
 		agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
 			got = turn.Request()
 			turn.Reply("ok")
 			return nil
-		}))
+		})).WithId("cap")
 	s := serverFor(capture)
 	body := `{"model":"acme/x","temperature":0.2,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
 	s.openai(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
@@ -145,8 +145,8 @@ func TestRequestParamsReachHandler(t *testing.T) {
 // buffered blob.
 func TestServeOpenAIStreaming(t *testing.T) {
 	// A terminal default agent over a multi-chunk mock streams each chunk.
-	f := flow.New().WithId("talk").WithAgent(
-		agent.New().WithModel(model.Bound(&model.Mock{Chunks: []string{"al", "pha"}}))).Next(flow.Respond)
+	f := flow.New().WithAgent(
+		agent.New().WithModel(model.Bound(&model.Mock{Chunks: []string{"al", "pha"}}))).WithId("talk").Next(flow.Respond)
 	s := serverFor(f)
 	body := `{"stream":true,"messages":[{"role":"user","content":"hi"}]}`
 	rec := httptest.NewRecorder()
@@ -164,8 +164,8 @@ func TestServeOpenAIStreaming(t *testing.T) {
 // A mid-stream model error becomes an SSE error frame (not a 500 — bytes are
 // already on the wire).
 func TestServeOpenAIStreamError(t *testing.T) {
-	f := flow.New().WithId("talk").WithAgent(
-		agent.New().WithModel(model.Bound(&model.Mock{Chunks: []string{"ok"}, Fail: context.DeadlineExceeded}))).Next(flow.Respond)
+	f := flow.New().WithAgent(
+		agent.New().WithModel(model.Bound(&model.Mock{Chunks: []string{"ok"}, Fail: context.DeadlineExceeded}))).WithId("talk").Next(flow.Respond)
 	s := serverFor(f)
 	body := `{"stream":true,"messages":[]}`
 	rec := httptest.NewRecorder()

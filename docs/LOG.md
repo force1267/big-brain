@@ -1032,3 +1032,56 @@ Docs: PRODUCT (streaming non-promise rewritten), IMPLEMENTATION (agent/serve/
 flow entries + a Streaming mechanism section), authoring-guide (Streaming to the
 client section with the tee pattern), next.md (#1 marked done). Tests cover
 streamBuf, Turn.Stream, terminalStep, serve live/error/buffered; all -race clean.
+
+## 2026-07-25 — Triggers & durability, phases A–D (the "everything is a flow" surface)
+
+Implemented the design worked out across the trigger/durability discussions
+(docs/discussion.md, "Everything is a flow…"; plan in next.md #2). Built in four
+green phases (build + vet + -race clean at each).
+
+**Phase A — WithId/WithModel on the Flow interface.** Moved WithId/WithModel off
+Basic onto the Flow interface, so every flow kind (Basic, seq, Select, All/One/
+Group, respond, notify) implements them. Composites carry id/model via a shared
+`decorated` wrapper (internal/flow/decorate.go); Basic carries its own. WithModel
+on a group is the default model for its agents → model resolution is now lexical
+scope over the tree (ctx-carried "nearest flow model", innermost wins), one
+shared resolveModel used by run (scope from ctx) and Validate (scope threaded
+through the static walk, which now unwraps `decorated`). Consequence: WithId/
+WithModel return interface types, so they come after Basic's WithAgent — reordered
+~25 call sites across jarvis + tests to .WithAgent().WithId().
+
+**Phase B — loud, typed, opt-in durability.** WithId() → NamedFlow, NamedFlow.
+Durable() → DurableFlow (durable-but-anonymous is a compile error). Serve now puts
+the store on ctx (WithStore) but checkpoints nothing by itself; a Durable flow
+calls activateDurable to turn on checkpointing for its subtree, so a flow without
+.Durable() never persists even with a store. Added a structure-version guard
+(discard a checkpoint whose graph changed, unless ForwardCompatible) and the
+DurableOpt set (ForwardCompatible/ResumeOnReregister/Retries/TTL). jarvis's
+remember flow marked .Durable() to keep its advertised durability honest.
+
+**Phase C — triggers as flows + engine wiring.** Every(spec)/Once(t) are flow
+nodes; reaching one splits the chain — seq.run hands the rest to a flow.Scheduler
+(seam kept engine-free) as a deferred body and stops. serve's engineScheduler
+adapts pkg/engine (register body once by id; engine.Every for cron, Enqueue for
+one-shot) and Serve runs engine.Run as a worker. Trigger(opts) heads a startup
+chain (self-registers; Serve runs it at boot to schedule). Mid-request Once works
+the same way (scheduler on the request ctx), capturing chat + request params as
+payload. Bodies run durably at job granularity; an unnamed body is warned and
+skipped. Also fixed a latent Handler panic (deduped flows via a map keyed by the
+unhashable seq).
+
+**Phase D — turn data model.** bb.Payload[T](turn): arbitrary trigger data, the
+open-ended companion to turn.Request(). Rides ctx as raw JSON (agent.WithPayload),
+seeded by WithSeedPayload, captured into a scheduled body and replayed on fire, so
+the same accessor reads it in a request, a startup chain, or a fired body.
+
+Deferred (recorded in IMPLEMENTATION.md, not accidentally unfinished): a Webhook
+inbound-HTTP trigger, Respond-as-sink-finalizer cleanup, finer bb-flow durability
+inside a triggered body (job-level today), and honoring Retries/TTL via engine
+options.
+
+Docs updated with the code: IMPLEMENTATION (durability rewritten to opt-in +
+triggers mechanism + trimmed planned section), authoring-guide (naming/models on
+any flow, opt-in Durability, Initiative/triggers + Payload), discussion.md (the
+design reasoning), marvis-demo goal spec (illustrative comments for the new
+surface). Tests added for every phase; all -race clean.

@@ -20,8 +20,10 @@ func All(members ...Flow) Flow { return allGroup{members} }
 
 type allGroup struct{ members []Flow }
 
-func (g allGroup) id() string       { return "" }
-func (g allGroup) Next(f Flow) Flow { return then(g, f) }
+func (g allGroup) id() string                  { return "" }
+func (g allGroup) Next(f Flow) Flow            { return then(g, f) }
+func (g allGroup) WithId(id string) NamedFlow  { return named(g, id) }
+func (g allGroup) WithModel(m model.Spec) Flow { return scoped(g, m) }
 
 func (g allGroup) run(ctx context.Context, in State) (State, error) {
 	tracerFrom(ctx).Event(ctx, Event{Kind: "all.start"})
@@ -38,8 +40,10 @@ func One(members ...Flow) Flow { return oneGroup{members} }
 
 type oneGroup struct{ members []Flow }
 
-func (g oneGroup) id() string       { return "" }
-func (g oneGroup) Next(f Flow) Flow { return then(g, f) }
+func (g oneGroup) id() string                  { return "" }
+func (g oneGroup) Next(f Flow) Flow            { return then(g, f) }
+func (g oneGroup) WithId(id string) NamedFlow  { return named(g, id) }
+func (g oneGroup) WithModel(m model.Spec) Flow { return scoped(g, m) }
 
 func (g oneGroup) run(ctx context.Context, in State) (State, error) {
 	tracerFrom(ctx).Event(ctx, Event{Kind: "one.start"})
@@ -58,8 +62,10 @@ func Group(members ...Flow) Flow { return groupGroup{members} }
 
 type groupGroup struct{ members []Flow }
 
-func (g groupGroup) id() string       { return "" }
-func (g groupGroup) Next(f Flow) Flow { return then(g, f) }
+func (g groupGroup) id() string                  { return "" }
+func (g groupGroup) Next(f Flow) Flow            { return then(g, f) }
+func (g groupGroup) WithId(id string) NamedFlow  { return named(g, id) }
+func (g groupGroup) WithModel(m model.Spec) Flow { return scoped(g, m) }
 
 func (g groupGroup) run(ctx context.Context, in State) (State, error) {
 	tracerFrom(ctx).Event(ctx, Event{Kind: "group.start"})

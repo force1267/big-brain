@@ -160,7 +160,7 @@ func (j *jarvis) talk() bb.Flow {
 			turn.Reply(reply.ReadAll())
 			return nil
 		})
-	return bb.NewFlow().WithId(idTalk).WithModel(bb.NewModel("chat")).WithAgent(a)
+	return bb.NewFlow().WithAgent(a).WithModel(bb.NewModel("chat")).WithId(idTalk)
 }
 
 // remember stores a fact from the user's message. No model needed.
@@ -176,7 +176,9 @@ func (j *jarvis) remember() bb.Flow {
 		turn.Reply("Got it — I'll remember that " + fact + ".")
 		return nil
 	})
-	return bb.NewFlow().WithId(idRemember).WithAgent(a)
+	// Durable: committing a fact to memory is worth resuming, so mark this flow
+	// durable — with bb.Store configured, a crash mid-remember resumes here.
+	return bb.NewFlow().WithAgent(a).WithId(idRemember).Durable()
 }
 
 // recall reports what the brain has been told.
@@ -190,7 +192,7 @@ func (j *jarvis) recall() bb.Flow {
 		turn.Reply("Here's what I know: " + strings.Join(facts, "; ") + ".")
 		return nil
 	})
-	return bb.NewFlow().WithId(idRecall).WithAgent(a)
+	return bb.NewFlow().WithAgent(a).WithId(idRecall)
 }
 
 // house acts on the dummy world: set a device, or read a sensor.
@@ -218,7 +220,7 @@ func (j *jarvis) house() bb.Flow {
 		}
 		return nil
 	})
-	return bb.NewFlow().WithId(idHouse).WithAgent(a)
+	return bb.NewFlow().WithAgent(a).WithId(idHouse)
 }
 
 // briefing reads several sensors concurrently and summarises them in one reply.
@@ -242,7 +244,7 @@ func (j *jarvis) briefing() bb.Flow {
 		turn.Reply("Briefing — " + strings.Join(readings, ", ") + ".")
 		return nil
 	})
-	return bb.NewFlow().WithId(idBriefing).WithAgent(a)
+	return bb.NewFlow().WithAgent(a).WithId(idBriefing)
 }
 
 // notify echoes the final reply to the world's notification sink. It sits after

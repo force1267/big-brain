@@ -24,7 +24,7 @@ func chat(texts ...string) State {
 
 // A default (no-handler) agent flow asks and replies; the reply is appended.
 func TestBasicDefaultAgent(t *testing.T) {
-	f := New().WithId("talk").WithAgent(mockAgent("hi ", "there"))
+	f := New().WithAgent(mockAgent("hi ", "there")).WithId("talk")
 	out, err := Run(context.Background(), f, chat("hello"), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -42,23 +42,23 @@ func TestModelInheritanceLadder(t *testing.T) {
 	model.SetDefault(model.Bound(&model.Mock{Chunks: []string{"default"}}))
 
 	// no agent model, flow model set -> flow's model wins over the default.
-	f := New().WithId("t").WithModel(model.Bound(&model.Mock{Chunks: []string{"flow"}})).
-		WithAgent(agent.New())
+	f := New().WithAgent(agent.New()).
+		WithModel(model.Bound(&model.Mock{Chunks: []string{"flow"}})).WithId("t")
 	out, err := Run(context.Background(), f, chat("hi"), nil)
 	if err != nil || out.Chat[len(out.Chat)-1].Content != "flow" {
 		t.Fatalf("flow model = %+v err %v", out.Chat, err)
 	}
 
 	// no agent model, no flow model -> falls back to the default.
-	f2 := New().WithId("t2").WithAgent(agent.New())
+	f2 := New().WithAgent(agent.New()).WithId("t2")
 	out2, err := Run(context.Background(), f2, chat("hi"), nil)
 	if err != nil || out2.Chat[len(out2.Chat)-1].Content != "default" {
 		t.Fatalf("default model = %+v err %v", out2.Chat, err)
 	}
 
 	// agent model set -> wins over both.
-	f3 := New().WithId("t3").WithModel(model.Bound(&model.Mock{Chunks: []string{"flow"}})).
-		WithAgent(mockAgent("agent"))
+	f3 := New().WithAgent(mockAgent("agent")).
+		WithModel(model.Bound(&model.Mock{Chunks: []string{"flow"}})).WithId("t3")
 	out3, err := Run(context.Background(), f3, chat("hi"), nil)
 	if err != nil || out3.Chat[len(out3.Chat)-1].Content != "agent" {
 		t.Fatalf("agent model = %+v err %v", out3.Chat, err)
@@ -141,7 +141,7 @@ func TestBasicAgentError(t *testing.T) {
 	boom := agent.New().OnMessage(func(context.Context, *agent.Turn) error {
 		return errors.New("boom")
 	})
-	_, err := Run(context.Background(), New().WithId("bad").WithAgent(boom), chat("x"), nil)
+	_, err := Run(context.Background(), New().WithAgent(boom).WithId("bad"), chat("x"), nil)
 	if !errors.Is(err, ErrAgent) {
 		t.Fatalf("want ErrAgent, got %v", err)
 	}
@@ -159,9 +159,9 @@ func TestBasicDefaultAgentUpstreamError(t *testing.T) {
 // Next threads state and returns the head: a→b→c run in order.
 func TestNextChainsInOrder(t *testing.T) {
 	rec := &Recorder{}
-	a := New().WithId("A").WithAgent(mockAgent("1"))
-	b := New().WithId("B").WithAgent(mockAgent("2"))
-	c := New().WithId("C").WithAgent(mockAgent("3"))
+	a := New().WithAgent(mockAgent("1")).WithId("A")
+	b := New().WithAgent(mockAgent("2")).WithId("B")
+	c := New().WithAgent(mockAgent("3")).WithId("C")
 	head := a.Next(b).Next(c)
 
 	out, err := Run(context.Background(), head, chat("start"), rec)

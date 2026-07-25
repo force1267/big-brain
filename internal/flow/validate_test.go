@@ -14,7 +14,7 @@ func TestValidateOK(t *testing.T) {
 	router := New().WithAgent(
 		agent.New().WithModel(model.Bound(&model.Mock{})).Selects("talk"),
 	)
-	group := Select(New().WithId("talk").WithAgent(mockAgent("x")))
+	group := Select(New().WithAgent(mockAgent("x")).WithId("talk"))
 	if err := Validate(router.Next(group)); err != nil {
 		t.Fatalf("expected clean, got %v", err)
 	}
@@ -25,7 +25,7 @@ func TestValidateBadSelect(t *testing.T) {
 	router := New().WithAgent(
 		agent.New().WithModel(model.Bound(&model.Mock{})).Selects("ghost"),
 	)
-	group := Select(New().WithId("talk").WithAgent(mockAgent("x")))
+	group := Select(New().WithAgent(mockAgent("x")).WithId("talk"))
 	err := Validate(router.Next(group))
 	if !errors.Is(err, ErrUnknownSelect) {
 		t.Fatalf("want ErrUnknownSelect, got %v", err)
@@ -34,7 +34,7 @@ func TestValidateBadSelect(t *testing.T) {
 
 // A default agent with no model fails validation.
 func TestValidateDefaultAgentNoModel(t *testing.T) {
-	f := New().WithId("x").WithAgent(agent.New()) // no model, no handler
+	f := New().WithAgent(agent.New()).WithId("x") // no model, no handler
 	if err := Validate(f); err == nil {
 		t.Fatal("expected error for modelless default agent")
 	}
@@ -53,7 +53,7 @@ func TestValidateBadModel(t *testing.T) {
 	model.ResetRegistry()
 	t.Cleanup(model.ResetRegistry)
 	bad := agent.New().WithModel(model.Resolve("ghost")) // records ErrUnknownModelTags
-	if err := Validate(New().WithId("x").WithAgent(bad)); !errors.Is(err, model.ErrUnknownModelTags) {
+	if err := Validate(New().WithAgent(bad).WithId("x")); !errors.Is(err, model.ErrUnknownModelTags) {
 		t.Fatalf("want ErrUnknownModelTags, got %v", err)
 	}
 }

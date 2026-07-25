@@ -26,6 +26,33 @@ type Flow interface {
 	// Next runs f after this flow, threading the resulting State. It returns
 	// the head of the chain, so a.Next(b).Next(c) runs a→b→c.
 	Next(f Flow) Flow
+	// WithId names any flow — not just a Basic — so a whole composite (a Select,
+	// a group, a chain) is one addressable unit: selectable, and (via Durable)
+	// nameable for durability. It returns a NamedFlow so Durable can follow.
+	WithId(id string) NamedFlow
+	// WithModel sets a flow's default model. On a group it is the default for the
+	// agents inside that set none of their own — model resolution is lexical
+	// scope over the tree (agent → nearest flow/group → WithDefaultModel → first).
+	WithModel(m model.Spec) Flow
+}
+
+// NamedFlow is a flow that has been given an id. It is the only thing Durable
+// can be called on, so durable-but-anonymous is unrepresentable: the id is what
+// the checkpoint keys against and what survives a restart.
+type NamedFlow interface {
+	Flow
+	// Durable makes this flow checkpoint its work, so a re-run (same run id, after
+	// a crash) resumes from the last completed sub-flow instead of redoing it.
+	// Durability is opt-in and loud: a flow without Durable never checkpoints,
+	// even with a Store configured.
+	Durable(opts ...DurableOpt) DurableFlow
+}
+
+// DurableFlow is a named flow that has been made durable. It is a Flow (chains,
+// nests, is Selectable) but has no Durable of its own — durable-twice is
+// unrepresentable.
+type DurableFlow interface {
+	Flow
 }
 
 // Run drives a flow with an initial State and a tracer (nil = no tracing). It
@@ -44,43 +71,64 @@ func Run(ctx context.Context, f Flow, in State, tr Tracer) (State, error) {
 // incoming chat; their replies are appended to the outgoing chat; the last
 // Select an agent makes becomes the flow's selection.
 type Basic struct {
-	fid    string
-	model  model.Spec
-	agents []agent.Agent
+	fid     string
+	model   model.Spec
+	agents  []agent.Agent
+	durable bool
+	dcfg    durableConfig
 }
 
 // New starts a basic flow builder.
 func New() *Basic { return &Basic{} }
 
-// WithId sets the id this flow is selected by (see Select). Required for a flow
-// to be a Select-group member.
-func (f *Basic) WithId(id string) *Basic { f.fid = id; return f }
+// WithId names this flow (see Select). It returns a NamedFlow, so it comes after
+// the Basic-only builders (WithAgent/WithModel) in a fluent chain.
+func (f *Basic) WithId(id string) NamedFlow { f.fid = id; return f }
 
 // WithModel sets the flow's default model: every agent in it that set no model
-// of its own asks this one.
-func (f *Basic) WithModel(m model.Spec) *Basic { f.model = m; return f }
+// of its own asks this one. It returns the Flow interface (a Basic satisfies it).
+func (f *Basic) WithModel(m model.Spec) Flow { f.model = m; return f }
 
-// WithAgent adds one or more agents. All of them receive the incoming chat.
+// Durable marks this flow to checkpoint: with a Store configured, its result is
+// saved so a re-run resumes past it. Requires an id (this is a NamedFlow method).
+func (f *Basic) Durable(opts ...DurableOpt) DurableFlow {
+	f.durable, f.dcfg = true, newDurableConfig(opts)
+	return f
+}
+
+// WithAgent adds one or more agents. All of them receive the incoming chat. It
+// keeps the *Basic type, so call it before WithModel/WithId.
 func (f *Basic) WithAgent(a ...agent.Agent) *Basic { f.agents = append(f.agents, a...); return f }
 
 // resolved returns the flow's agents with the model ladder applied, so the rest
 // of the runtime only ever sees an agent that already knows which model it asks.
-func (f *Basic) resolved() []agent.Agent {
+func (f *Basic) resolved(ctx context.Context) []agent.Agent {
 	out := make([]agent.Agent, len(f.agents))
 	for i, ag := range f.agents {
-		out[i] = ag.WithModel(f.modelFor(ag))
+		out[i] = ag.WithModel(f.modelFor(ctx, ag))
 	}
 	return out
 }
 
-// modelFor resolves the model an agent actually asks, walking the inheritance
-// ladder: the agent's own model, else the flow's, else the process default.
-func (f *Basic) modelFor(ag agent.Agent) model.Spec {
+// modelFor resolves the model an agent actually asks (runtime): the enclosing
+// scope comes from ctx.
+func (f *Basic) modelFor(ctx context.Context, ag agent.Agent) model.Spec {
+	return resolveModel(ag, f.model, flowModelFrom(ctx))
+}
+
+// resolveModel walks the model ladder: the agent's own model, else the flow's,
+// else the nearest enclosing flow/group's, else the process default. It is the
+// single resolver shared by run (scope from ctx) and Validate (scope from the
+// static walk).
+func resolveModel(ag agent.Agent, flowModel, scope model.Spec) model.Spec {
 	if s := ag.Model(); s.IsSet() {
 		return s
 	}
-	if f.model.IsSet() {
-		return f.model
+	if flowModel.IsSet() {
+		return flowModel
+	}
+	if scope.IsSet() {
+		return scope
 	}
 	return model.Default()
 }
@@ -94,6 +142,11 @@ func (f *Basic) Next(n Flow) Flow { return then(f, n) }
 // error.
 func (f *Basic) run(ctx context.Context, in State) (State, error) {
 	tr := tracerFrom(ctx)
+	// A Durable flow activates checkpointing for itself (opt-in). A non-durable
+	// Basic under a Durable ancestor already sees the checkpoint on ctx.
+	if f.durable {
+		ctx = activateDurable(ctx, structureSig(f), f.dcfg)
+	}
 	// Durable resume: if this flow already completed in a prior run, return its
 	// saved result instead of re-asking the model.
 	if cp := cpFrom(ctx); cp != nil {
@@ -104,7 +157,7 @@ func (f *Basic) run(ctx context.Context, in State) (State, error) {
 	}
 	start := time.Now()
 	tr.Event(ctx, Event{Kind: "flow.start", Flow: f.fid, At: start})
-	replies, sel, hasSel, err := runAgents(ctx, f.fid, f.resolved(), in.Chat)
+	replies, sel, hasSel, err := runAgents(ctx, f.fid, f.resolved(ctx), in.Chat)
 	if err != nil {
 		return in, err
 	}
@@ -165,13 +218,19 @@ func runAgent(ctx context.Context, ag agent.Agent, turn *agent.Turn, chat []mode
 // step to the next.
 type seq struct{ steps []Flow }
 
-func (s seq) id() string       { return "" }
-func (s seq) Next(f Flow) Flow { return then(s, f) }
+func (s seq) id() string                  { return "" }
+func (s seq) Next(f Flow) Flow            { return then(s, f) }
+func (s seq) WithId(id string) NamedFlow  { return named(s, id) }
+func (s seq) WithModel(m model.Spec) Flow { return scoped(s, m) }
 
 func (s seq) run(ctx context.Context, in State) (State, error) {
 	term := terminalStep(s.steps)
 	var err error
 	for i, f := range s.steps {
+		// A trigger splits the chain: defer everything after it and stop this pass.
+		if tn, ok := f.(*triggerNode); ok {
+			return deferBody(ctx, tn, s.steps[i+1:], in)
+		}
 		c := indexPath(ctx, i)
 		if i != term {
 			// Only the terminal step may stream to the client; strip the sink

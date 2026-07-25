@@ -64,15 +64,25 @@ type server struct {
 	tracer flow.Tracer
 	ring   *ring
 	store  flow.Store
+	sched  *engineScheduler // nil when no store: triggers/initiative disabled
 }
 
 // Handler validates the flow and returns its http.Handler for embedding. All
 // wiring/config errors surface here (the single startup surface). The flow f is
-// the explicit default (may be nil to serve only registered flows).
+// the explicit default (may be nil to serve only registered flows). Triggers are
+// scheduled, but their worker only runs under Serve (an embedder gets the routes,
+// not the background loop).
 func Handler(f flow.Flow, opts ...Option) (http.Handler, error) {
+	_, h, err := build(f, opts...)
+	return h, err
+}
+
+// build assembles the server and its mux, returning both so Serve can run the
+// scheduler worker while Handler exposes only the routes.
+func build(f flow.Flow, opts ...Option) (*server, http.Handler, error) {
 	named, def := resolveRegistry(f)
 	if def == nil && len(named) == 0 {
-		return nil, ErrNoFlow
+		return nil, nil, ErrNoFlow
 	}
 	// Validate every served flow. No dedup: a Flow (seq) isn't hashable, and
 	// Validate is idempotent, so re-checking a shared default/named flow is fine.
@@ -81,7 +91,7 @@ func Handler(f flow.Flow, opts ...Option) (http.Handler, error) {
 			continue
 		}
 		if err := flow.Validate(fl); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	c := defaults()
@@ -91,12 +101,29 @@ func Handler(f flow.Flow, opts ...Option) (http.Handler, error) {
 	r := &ring{max: 500}
 	s := &server{named: named, def: def, name: c.name, tracer: tee(r, c.tracer), ring: r, store: c.store}
 
+	// Triggers/initiative need durable scheduling, so they require a store. With
+	// one, build the engine-backed scheduler and register the startup trigger
+	// chains (which schedules their crons/one-shots). The worker runs in Serve.
+	if c.store != nil {
+		sched, err := newEngineScheduler(c.store)
+		if err != nil {
+			return nil, nil, err
+		}
+		s.sched = sched
+		sctx := flow.WithScheduler(flow.WithStore(context.Background(), c.store, ""), sched)
+		for _, tc := range flow.RegisteredTriggers() {
+			if err := tc.RunAtStartup(sctx); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/chat/completions", s.openai)
 	mux.HandleFunc("POST /v1/messages", s.anthropic)
 	mux.HandleFunc("GET /v1/models", s.models)
 	mux.HandleFunc("GET /v1/diagnostics/trace", s.diagnostics)
-	return mux, nil
+	return s, mux, nil
 }
 
 // resolve picks the flow for a request's model id: a named match, else the
@@ -119,13 +146,18 @@ func flowsOf(m map[string]flow.Flow) []flow.Flow {
 // Serve runs the brain on the configured address until ctx is cancelled, then
 // shuts down gracefully.
 func Serve(ctx context.Context, f flow.Flow, opts ...Option) error {
-	h, err := Handler(f, opts...)
+	s, h, err := build(f, opts...)
 	if err != nil {
 		return err
 	}
 	c := defaults()
 	for _, o := range opts {
 		o(&c)
+	}
+	// Run the durable job worker alongside HTTP: it fires the scheduled/deferred
+	// flows (crons, one-shots) registered via triggers. Stops when ctx is done.
+	if s.sched != nil {
+		go s.sched.run(ctx, c.workers)
 	}
 	srv := &http.Server{Addr: c.addr, Handler: h}
 	go func() {
@@ -145,7 +177,13 @@ func (s *server) run(ctx context.Context, f flow.Flow, runID string, msgs []mode
 		if runID == "" {
 			runID = uuid.NewString()
 		}
-		ctx = flow.WithCheckpoint(ctx, s.store, runID)
+		// Make the store available; only Durable flows in the tree activate a
+		// checkpoint (opt-in). A brain with no Durable flow persists nothing.
+		ctx = flow.WithStore(ctx, s.store, runID)
+	}
+	if s.sched != nil {
+		// A mid-request Once/Every can defer work to run after the reply.
+		ctx = flow.WithScheduler(ctx, s.sched)
 	}
 	out, err := flow.Run(ctx, f, flow.State{Chat: msgs, Req: req}, s.tracer)
 	if err != nil {

@@ -316,13 +316,72 @@ an unknown model gets the default. Which flow is the default is a precedence
 default — but a named flow can. `Serve(ctx)` with no default is valid when at
 least one named flow is registered.
 
-## Durability
+## Naming and models on any flow
 
-With `bb.Store(...)`, each flow's result is checkpointed per run. A request
-carries its run id in the `X-Run-Id` header; if the process crashes and the
-client retries with the same id, the flows that already completed replay from
-their savepoint (a `flow.cached` trace event) instead of re-asking the model.
-Use `bb.FileStore(dir)` to survive process restarts.
+`WithId` and `WithModel` are methods of **every** flow, not just `NewFlow()` —
+a `Select`, an `All`/`One`/`Group`, or a `Next` chain too. Name a composite to
+make it one addressable unit (Selectable, triggerable, durable); set a model on a
+group to give the agents inside it a default:
+
+```go
+capabilities := bb.Select(talk, remember, house).
+    WithModel(bb.NewModel("cheap")). // default for member agents that set none
+    WithId("capabilities")            // name the whole group
+```
+
+Model resolution is lexical scope over the tree: **agent's own → its flow's →
+nearest enclosing group's → `bb.WithDefaultModel` → first registered.** Because
+these return the `Flow` interface, call them *after* the `Basic`-only `WithAgent`
+(`NewFlow().WithAgent(a).WithModel(m).WithId("x")`).
+
+## Durability (opt-in and loud)
+
+Durability is a deliberate, per-flow choice — never a silent effect of
+configuring a store. Name a flow, then make it durable:
+
+```go
+remember := bb.NewFlow().WithAgent(a).WithId("remember").Durable()
+```
+
+`WithId` returns a `NamedFlow`; only a `NamedFlow` has `.Durable()`, so a durable
+flow always has the id it resumes against — durable-but-anonymous won't compile.
+A flow **without** `.Durable()` never persists, even with `bb.Store(...)`
+configured; the store is just the backend for the flows that opted in. A durable
+flow checkpoints its sub-flows: on a retry with the same `X-Run-Id`, completed
+ones replay from their savepoint (a `flow.cached` trace event) instead of
+re-asking. `.Durable()` takes options — `bb.ForwardCompatible()` (resume even if
+the graph changed; by default a changed structure is discarded, not resumed
+into), `bb.Retries(n)`, `bb.TTL(d)`, `bb.ResumeOnReregister()`. Use
+`bb.FileStore(dir)` to survive restarts.
+
+## Initiative — triggers and scheduling
+
+A brain can act on its own, not only per request. **Triggers are flows.** Reaching
+one *splits the chain*: the flow after it becomes a deferred, durable body that
+runs later, on its own.
+
+```go
+// A nightly job, registered outside Serve (runs at startup, then on the cron):
+nightly := bb.NewFlow().WithAgent(summarize).WithId("nightly").
+    Next(bb.Notify(text))
+bb.Trigger().Next(bb.Every("0 21 * * *")).Next(nightly)
+
+// Keep working past the reply ("I'll text you when it's done"):
+router.Next(capabilities).Next(bb.Respond).Next(bb.Once(when)).Next(followUp)
+```
+
+- `bb.Trigger(opts…)` heads a startup chain; a bare `Trigger().Next(f)` is a boot
+  task. `bb.Every(spec)` schedules on a cron; `bb.Once(t)` fires a single time.
+- The deferred body **must** be a named flow (`WithId`) so it resolves after a
+  restart; an unnamed body is warned and skipped.
+- Triggers require `bb.Store(...)` (durable scheduling) and run their worker under
+  `bb.Serve` (not a bare `bb.Handler`).
+- A scheduled body replays the request context: `turn.Request()` (the protocol
+  params) and `bb.Payload[T](turn)` (arbitrary trigger data, seeded with
+  `bb.WithSeedPayload(x)` or captured from the originating request) both work in
+  the fired body.
+- Loops and recursion are re-triggers: a body scheduling its own id again — each
+  iteration a fresh, durable run. There are no cycles in the static `Next` graph.
 
 ## THE RULES (short list)
 

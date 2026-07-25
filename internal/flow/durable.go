@@ -25,14 +25,53 @@ type Store interface {
 type checkpoint struct {
 	store Store
 	run   string
+	stale bool // structure changed since the saved run: don't resume into it
 }
 
 type checkpointKey struct{}
 type pathKey struct{}
+type storeKey struct{}
 
-// WithCheckpoint installs durable checkpointing for a run: results are keyed by
-// (run, structural path) in store. Without it, flows always execute (no
-// persistence). It is what bb.Store enables on Serve.
+// storeHandle is the durability backend made available for a run, but not yet
+// active: only a Durable flow turns it into an actual checkpoint (opt-in). Serve
+// installs it via WithStore; ambient checkpointing is gone.
+type storeHandle struct {
+	store Store
+	run   string
+}
+
+// WithStore makes a store available to the run without checkpointing anything by
+// itself. A Durable flow reads it (storeFrom) and activates a checkpoint for its
+// subtree. This is the split that makes durability loud and opt-in.
+func WithStore(ctx context.Context, store Store, run string) context.Context {
+	if store == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, storeKey{}, storeHandle{store: store, run: run})
+}
+
+func storeFrom(ctx context.Context) (storeHandle, bool) {
+	h, ok := ctx.Value(storeKey{}).(storeHandle)
+	return h, ok
+}
+
+// activateDurable turns the available store into a live checkpoint for the
+// subtree run under the returned context — called by a Durable flow. cfg governs
+// the structure-version guard. If no store is available, ctx is unchanged.
+func activateDurable(ctx context.Context, sig string, cfg durableConfig) context.Context {
+	h, ok := storeFrom(ctx)
+	if !ok {
+		return ctx
+	}
+	cp := &checkpoint{store: h.store, run: h.run}
+	if !cfg.forwardCompatible {
+		cp.stale = cp.versionChanged(ctx, sig) // a changed graph → don't resume into it
+	}
+	return context.WithValue(ctx, checkpointKey{}, cp)
+}
+
+// WithCheckpoint installs a live checkpoint directly (used by tests and by
+// activateDurable's older callers). Prefer WithStore + Durable.
 func WithCheckpoint(ctx context.Context, store Store, run string) context.Context {
 	if store == nil {
 		return ctx
@@ -61,8 +100,24 @@ func indexPath(ctx context.Context, i int) context.Context {
 	return withPath(ctx, strconv.Itoa(i))
 }
 
-// load returns a memoized State for the current path, if present.
+// versionChanged compares the durable flow's structure signature against the one
+// saved for this run/path, recording the new one. It reports true when they
+// differ (or none was saved), so a changed graph is not resumed into.
+func (c *checkpoint) versionChanged(ctx context.Context, sig string) bool {
+	key := "ver/" + c.run + pathOf(ctx)
+	prev, ok, err := c.store.Get(ctx, key)
+	if err == nil && (!ok || string(prev) != sig) {
+		_ = c.store.Put(ctx, key, []byte(sig))
+	}
+	return err != nil || !ok || string(prev) != sig
+}
+
+// load returns a memoized State for the current path, if present. A stale
+// checkpoint (structure changed) always misses, forcing a fresh run.
 func (c *checkpoint) load(ctx context.Context) (State, bool) {
+	if c.stale {
+		return State{}, false
+	}
 	b, ok, err := c.store.Get(ctx, c.key(ctx))
 	if err != nil || !ok {
 		return State{}, false

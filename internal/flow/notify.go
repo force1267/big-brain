@@ -1,6 +1,10 @@
 package flow
 
-import "context"
+import (
+	"context"
+
+	"github.com/force1267/big-brain/pkg/model"
+)
 
 // Notify is a prebuilt outgoing flow: it sends the last message in the chat to
 // an external sink (a webhook, a log, ...) and passes the chat through
@@ -14,8 +18,10 @@ type notify struct {
 	send func(ctx context.Context, text string) error
 }
 
-func (notify) id() string         { return "" }
-func (n notify) Next(f Flow) Flow { return then(n, f) }
+func (notify) id() string                    { return "" }
+func (n notify) Next(f Flow) Flow            { return then(n, f) }
+func (n notify) WithId(id string) NamedFlow  { return named(n, id) }
+func (n notify) WithModel(m model.Spec) Flow { return scoped(n, m) }
 
 func (n notify) run(ctx context.Context, in State) (State, error) {
 	tracerFrom(ctx).Event(ctx, Event{Kind: "notify"})
