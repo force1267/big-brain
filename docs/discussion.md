@@ -614,3 +614,329 @@ The through-line: *everything is a flow; the interface methods mean what each fl
 kind makes them mean; make the load-bearing rules unrepresentable-when-violated
 rather than documented; and let the composition tree be the one spine that carries
 identity, model scope, durability keys, and trace spans at once.*
+
+## Tool use: two boundaries, three types, and the turn/chat split (2026-07-26)
+
+The design session that settled how a model can *request* a tool call, and how
+caller-declared tools pass through. It started from a rejected sketch
+(`WithTool(...)` plus an automatic tool-call loop inside `Turn.Ask`) and ended
+somewhere structurally different — a split handler signature — so the reasoning
+matters more than the API listing.
+
+**Two tool boundaries, not one.** The clarifying move was noticing that "tools"
+names two opposite conversations:
+
+- *Outer* (bb-as-model ↔ its client): the client declares tools; bb must surface
+  them, emit tool-call requests back, accept tool results, and **never execute the
+  caller's tools itself**. This is mimicry-consistency and PRODUCT already
+  promises it ("caller tools pass through untouched") while `internal/serve`
+  doesn't even parse the field.
+- *Inner* (a bb agent ↔ the upstream model it calls): the agent wants the model
+  to call a tool that **bb's own Go code** runs; the client never sees it. This is
+  just a Go loop the author writes.
+
+Both boundaries need the same load-bearing prerequisite: **`model.Stream` must
+carry tool definitions in and surface tool-call blocks out**, and the
+`internal/openai` + `internal/anthropic` adapters must parse `tools`/`tool_choice`
+on the wire and emit `tool_use`/`tool_calls`. Nothing else is possible until then,
+which is why it's the first commit and why the surface above it is thin.
+
+**Why `WithTool` + an auto-loop lost.** A flow can have several models, some small
+with tiny context; a developer may declare tools for an upstream model that have
+nothing to do with what the end user sees; and running a model agentic-style in a
+loop is *the reason it's called an agent*. Auto-forwarding the caller's tool list
+to every `Ask` takes that control away. So forwarding became explicit and stacked
+(`ForwardTools()` + `WithTools(...)`), and the loop stayed the author's Go — the
+same stance as `Durable()` being opt-in over an ephemeral default.
+
+**The turn/chat split — the change that made tools tractable.** With tool calls
+and tool results flowing in *both* directions, one `Turn` object was carrying two
+opposite conversations, and the verbs collided: was `Add(result)` feeding the LLM
+or answering the client? Was a tool call outbound or inbound? Splitting the
+handler into two handles removed the ambiguity at the type level:
+
+```go
+OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error { … })
+```
+
+`turn` is purely client-facing (`Messages`/`Last`, `Request()`, `Reply`, `Stream`,
+`Call`, `ToolResults`, `Select`); `chat` is purely model-facing (`Add`,
+`WithTools`, `WithToolChoice`, `ForwardTools`, `Ask`/`AskWith` → a `Reply` with
+`ReadAll`/`Stream`/`ToolCalls`/`Messages`). `Ask` was *always* model-facing and
+`Reply`/`Select` *always* client-facing — tools only made the seam impossible to
+ignore. `turn.Add` moves to `chat.Add`. The cost is one extra parameter and
+holding two conversations in your head, but that *is* the shape of an agent: it
+mediates a client and a model. The Turn-only design was hiding the duality behind
+overloaded verbs.
+
+A bonus fell out: separating the model **definition** from the **conversation**.
+`Model` stays immutable config; `Model.Chat() ModelChat` is the live handle the
+handler receives — and is usable standalone, giving bb a "just talk to a model, no
+flow" story for free (tests, scripts, inside a Go tool a flow calls).
+
+**Three types, and the conflation that had to be resolved.** A definition and an
+invocation are not the same thing, and forcing them into one type would have hurt:
+
+```go
+type Tool       struct { Name, Description string; Schema map[string]any } // definition
+type ToolCall   struct { ID, Name string; Input json.RawMessage }          // invocation
+type ToolResult struct { CallID, Content string; IsError bool }            // answer
+```
+
+`WithTools` takes `Tool`s; `reply.ToolCalls()` and `turn.Call(...)` speak
+`ToolCall`. The symmetry felt in the design was real, but it lives on the
+`ToolCall` side: *the same value* comes out of the upstream model and goes into
+`turn.Call`. These are structs and stay structs — pure DTOs, no varying behavior to
+seal; the bb types that are interfaces (`Model`, `Agent`, `Flow`, `Turn`) are
+interfaces because behavior varies or the set is sealed.
+
+**No intersection types, so payloads hang off `Message`.** Go has no
+`Message & ToolResult`, and type assertions at every use site were unacceptable.
+The idiomatic answer is one struct with optional typed payloads — and providers
+put *several* calls in one assistant message and several results in one user
+message, alongside text, so they're plural:
+
+```go
+type Message struct { Role, Content string; Calls []ToolCall; Results []ToolResult }
+```
+
+Access is a typed nil/len check, never an assertion. "Text plus a tool call" then
+exists naturally. `ToolCall.Message()` / `ToolResult.Message()` wrap a lone payload
+so `chat.Add(...Message)` stays single-typed.
+
+**The keystone: the resolution rule.** At `bb.Respond`, a tool-call message with
+**no matching tool-result message in the chat** becomes the client-facing
+`tool_use`/`tool_calls` response; an answered call is resolved history and stays
+internal. That single rule covers all three cases at once — relay to the client
+(call it, don't answer it), handle internally in Go (answer it, loop), and
+cross-agent/cross-flow handoff (agent A calls, flow B answers). Resolution is
+**local to a flow**, because the chat slice is per-flow: a counterpart living in
+another flow's slice, or never returned by the client, resolves to an id-only stub.
+`ToolCall.ToolResult()` / `ToolResult.ToolCall()` are therefore *linked-or-stub* —
+populated when bb hands you the value from a chat, a stub when you constructed it.
+The stub isn't a compromise; it's required precisely *because* bb is stateless: a
+client often resends only the result, not the original call.
+
+**No tool state to persist.** There is no server-side tool loop. bb emits
+`tool_use` and the turn ends; the client runs the tool and resends the whole
+transcript, exactly as a real model API expects — transcripts belong to the client.
+On the next request the flow re-runs from the top and deterministic routing lands
+it on the same path (the same property durable-resume relies on). This is the big
+payoff of mimicking a model faithfully: nothing to checkpoint, no loop to resume.
+
+**Two invariants that are correctness, not taste.** Parallel tool use is *several
+`tool_use` blocks in one message*, so: (1) bb coalesces all of a turn's `Call`s into
+one outgoing message — that, not variadic `Call`, is the mechanism; and (2) all
+results answering parallel calls go in **one** message
+(`bb.NewMessage("").WithResults(r1, r2, r3)`), because splitting them across
+messages is a documented footgun on both providers that trains a model out of
+calling in parallel.
+
+**The naming grammar.** `WithXs()` = setter, `Xs()` = getter, `X(arg)` = action;
+arity reinforces it. Hence `chat.WithTools(...)` / `turn.Request().Tools()` /
+`turn.Call(...)`. Two deliberate deviations from pure symmetry: `turn.Call` over
+`turn.ToolCall` (a noun pretending to be a verb reads worse than it symmetrizes),
+and `ForwardTools()` kept while `ForwardCalls()` was dropped. The latter looks
+arbitrary but isn't — the distinction is the *source*, not the coupling (both
+couple turn and chat equally): the request is singular and stable, so "the client's
+tools" has one obvious meaning and earns a name; a reply is transient and plural in
+an agentic loop, so `ForwardCalls()` would have to guess "the last one." Variadic
+`turn.Call(reply.ToolCalls()...)` keeps that explicit and names its source.
+
+Also rejected: `Tool.ToolCalls()`/`Tool.ToolResults()`. A `Tool` is a static
+definition; listing "every call to this tool" would give it a back-reference to the
+whole chat, turning a value type into a context-bound object. If it's ever real,
+it's a turn query, not a method on the definition.
+
+**Staged builders, matching the library's style** (don't stuff parameters into one
+function); builder weight tracks how many fields are genuinely required:
+
+```go
+bb.NewTool().As(name).Is(desc).WithSchema(bb.Schema[T]())  // 3 required → 3 stages
+bb.NewToolCall().As(name).WithInput(v)                     // id auto-assigned
+bb.NewToolResult().WithId(callID)                          // usable as-is;
+                                                           // .WithContent / .AsError optional
+bb.NewMessage(text).WithCalls(...).WithResults(...).As(role)
+```
+
+Schema belongs on `Tool` **only**. A `ToolCall` is an instance — its shape is
+defined by the `Tool` it names. The write-side `any` on `WithInput` is the honest
+JSON boundary (it's your own Go value); the read side is `json.RawMessage` decoded
+with `bb.Extract[T](call)`. A generic `ToolCall[T]` was rejected: `reply.ToolCalls()`
+is a heterogeneous stream (different tools, different arg types) and the type
+parameter would infect the whole read path. Type safety lives at the two edges that
+can actually carry it — the schema on the definition, `Extract` on the read.
+`ToolResult.Content` is an opaque string the model just reads; no schema, and
+optional (a void result is legal).
+
+**The default agent is a full transparent proxy — and that reversed an earlier
+call.** An earlier position had a bare agent *not* forwarding tools ("control in
+the dev's hands"). The better rule is a hard binary: a bare agent forwards
+everything untouched and replays everything untouched; the moment the author writes
+`OnMessage`, all magic stops and every forward is explicit. No middle ground, no
+surprising partial defaults. The provided default is essentially:
+
+```go
+reply, err := chat.ForwardTools().AskWith(turn.Messages()...)
+if err != nil { return err }
+if out, ok := turn.Stream(); ok { /* stream text */ } else { turn.Reply(reply.ReadAll()) }
+turn.Call(reply.ToolCalls()...)
+```
+
+Two things fall out free: the stateless tool loop just works through the proxy
+(client sends tools → forwarded → model requests a tool → replayed → client runs it
+and resends the transcript → `AskWith(turn.Messages()...)` includes the result →
+model continues, with no special handling); and pointing any OpenAI/Anthropic SDK
+at a bare bb agent makes it behave *exactly* like the underlying model, tools
+included — the "agent disguised as a model" promise honored at its most literal.
+`ForwardTools()` forwards the client's **tools and its tool choice** — it's
+"forward the client's tool intent," not just the list.
+
+**Deferred:** streaming tool-call *arguments*. Text streams live; emitted calls are
+buffered whole in v1. When it returns, `turn.StreamCall(name)` reads better than
+the `CallStream` first floated.
+
+**Left to decide at implementation time**, deliberately not now: what
+`WithSchema` means on a *no-handler* agent (leaning: the default proxy validates
+the replayed output and the error surfaces from `Ask`).
+
+The through-line: *tool calls and tool results are just messages in the chat; the
+direction is disambiguated by which handle you touch, not by an overloaded verb;
+one resolution rule (unanswered call ⇒ client-facing) makes relay, internal
+execution, and cross-flow handoff the same mechanism; and the client owns the
+transcript, so the loop needs no state at all.*
+
+### Sugar over the manual loop: `OnCall` + `Resolve` (2026-07-26)
+
+The design above leaves every tool-using agent writing the same twenty lines: a
+`switch` on `call.Name`, an `Extract`, a `NewToolResult`, coalescing the results
+into one message, and the surrounding loop. That is real boilerplate, and worse,
+dispatching by name in a `switch` **duplicates the tool's name as a magic string**
+— the definition says `"read_sensor"` and so does the case label, and nothing
+checks they agree. So bb should own dispatch. The question was only *how*, and the
+first proposal had the right pieces in the wrong place.
+
+**`OnCall` belongs on the `Tool`.** Not on the agent (`agent.WithTool(t, fn)`),
+which would kill per-ask tool sets and stop tools from being reusable values. The
+rule that keeps `Tool` honest as a DTO: **`OnCall` is local-only.** A `Tool` parsed
+off the wire (`turn.Request().Tools()`) can never carry one, by construction — so
+forwarding a tool drops nothing, because there was nothing to drop. `Tool` stays
+pure data plus an optional local handler.
+
+**`bb.OnCall` is a free generic function that returns a copy** — Go methods can't
+take type parameters, which is the same reason `bb.Schema[T]` and `bb.Extract[T]`
+are already free functions here:
+
+```go
+var readSensor = bb.NewTool().As("read_sensor").Is("read a house sensor").
+    WithSchema(bb.Schema[sensorArgs]())                              // bare definition, reusable
+
+realHouse := bb.OnCall(readSensor, house.Read)   // production binding
+fakeHouse := bb.OnCall(readSensor, stub.Read)    // test binding — same definition
+```
+
+The first draft had the handler *replace* `WithSchema`, deriving the schema from the
+handler's argument type so that schema/handler drift would be unrepresentable. That
+was revised, for two reasons that turned out to matter more:
+
+- **One `Tool` shape, always.** `As` → `Is` → `WithSchema` is how every tool is
+  built, including the ones parsed off the wire, which never had a handler stage to
+  begin with. Two construction shapes for one type is worse than a weaker guarantee.
+- **Copy semantics buy the mock pattern.** A bare definition at package level with
+  different handlers bound per agent — production and stub, or forwarded bare in one
+  agent and handled locally in another — is the project's own
+  mock-for-test-injection rule falling out for free. Fusing definition and handler
+  forecloses it.
+
+So `OnCall` **checks** the schema instead of deriving it: compare `bb.Schema[T]()`
+against the tool's recorded schema and record a wiring error on mismatch. Drift
+still cannot ship; it fails at `Serve` rather than at compile time, alongside every
+other wiring error (unknown model name, bad `Selects` id) — the pattern the `WithX`
+builders already follow. Since `Tool` cannot be generic (heterogeneous `WithTools`,
+wire-parsed values), boot is the earliest honest point anyway.
+
+A raw `.OnCall(func(ctx, bb.ToolCall) (string, error))` method stays as the escape
+hatch for a tool that wants to inspect its own arguments.
+
+**Not staged.** `bb.OnCall(tool).Does(fn)` was considered and rejected. Mechanically
+it can't infer `T` (a method can't introduce a type parameter), so the type would
+have to be written at the first stage *and* again in the closure signature. And
+stylistically, every staged builder here adds a differently-named **required** field
+per stage — the stages exist because there are several things to say and type-state
+orders them. `OnCall` adds exactly one thing; a two-stage builder for one field is
+ceremony, `OnCall(...).Does(...)` reads redundantly, and the intermediate value is
+meaningless on its own ("a tool that will call… something"). `OnCall` belongs to the
+`Schema[T]`/`Extract[T]` family of free generic functions, not to the builder family.
+
+**A consequence of copy semantics, allowed deliberately:** a developer *can* write
+`bb.OnCall(turn.Request().Tools()[0], fn)` and answer a caller's tool themselves.
+That is fine — "never execute the caller's tools" means never *implicitly*; an
+explicit binding is the author choosing to serve that capability. The invariant is
+better stated as: **a forwarded tool never gains a handler by itself.**
+
+**Two `Ask`s with different behavior was the part to reject.** The first sketch had
+plain `chat.Ask()` run `OnCall` handlers without sending their results, and a
+`chat.UsingTools(...)` variant whose `Ask` also fed them back. Both halves are
+wrong:
+
+- `Ask()` must **never** run `OnCall` — not even the run-but-don't-send middle
+  state. That state means `Ask` silently turned on the heater and then declined to
+  tell the model. Executing a side effect cannot be an implicit consequence of
+  asking a question.
+- `WithTools` vs `UsingTools` is a coin-flip pair: nobody remembers which noun runs
+  your Go code. That is precisely the overloaded-noun problem the turn/chat split
+  had just removed, sneaking back in one layer down.
+
+**So the mode goes on the verb, where the call site shows it:**
+
+```go
+chat.WithTools(readSensor, setDevice).Ask()      // one round; never runs your Go; returns the calls
+chat.WithTools(readSensor, setDevice).Resolve()  // ask → run OnCall → feed results back → repeat
+```
+
+`Resolve` is the design's own vocabulary, not a new coinage: a call is *resolved*
+when it has a matching result (the keystone rule). The method reads as exactly what
+it does — **ask, resolve every call I can resolve locally, hand back only the ones
+I can't.**
+
+**The third piece of the proposal — giving client-declared tools a default
+"client-facing `OnCall`" that tags them for an automatic `turn.Call` — was cut, and
+the keystone rule is why it's unnecessary.** A tool with no local handler simply
+comes back unresolved in `reply.ToolCalls()`, and one visible line relays it:
+
+```go
+reply, _ := chat.ForwardTools().WithTools(readSensor).Resolve()
+turn.Call(reply.ToolCalls()...)  // whatever bb could not resolve locally goes to the client
+turn.Reply(reply.ReadAll())
+```
+
+An auto-tag would make a `chat`-facing method produce a `turn`-facing side effect,
+re-coupling the two handles the split had just separated, and it would revive the
+auto-relay that was deliberately killed. The win is that this falls out for free:
+**`Resolve` is the mixed case done right** — server tools execute, client tools fall
+through, in one call, with the boundary decided by nothing more than "does it carry
+a local handler."
+
+Coalescing also stops being a rule the author must remember and becomes bb's
+invariant: `Resolve` batches one round's results into one message itself.
+
+Four semantics pinned with it:
+
+1. **A handler error becomes an `IsError` result, not an aborted `Resolve`.** A
+   failing tool is information the model should see and retry against — that is what
+   `is_error` is for. Only context cancellation and panics abort.
+2. **A round cap.** `Resolve` loops, so a model can loop it forever: a default cap
+   (~8) with `.WithMaxRounds(n)` and an error on exhaustion. This is the
+   runaway-cycle guard already open in `next.md`, arriving early because `Resolve`
+   is the first construct that can spin without the author writing a `for`.
+3. **`Resolve` stays opt-in inside `OnMessage`.** The bare-agent proxy still does
+   not resolve — it forwards and relays, and caller tools have no local handler to
+   run anyway. The hard binary survives untouched.
+4. **Durable flows re-run side-effecting tools.** `OnCall` runs server-side, so an
+   at-least-once resume re-runs it. Identical to the hand-written `switch`, but it
+   now hides inside a framework call, so it is owed an explicit line in the guide.
+
+The manual path is never taken away: `Ask` + `reply.ToolCalls()` + `bb.Extract` +
+`bb.NewToolResult` remains the low-level surface, and `Resolve` is sugar sitting on
+exactly it — the same stance as `Durable()` over the ephemeral default and
+`ForwardTools()` over `WithTools(turn.Request().Tools()...)`.

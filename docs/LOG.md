@@ -1085,3 +1085,134 @@ triggers mechanism + trimmed planned section), authoring-guide (naming/models on
 any flow, opt-in Durability, Initiative/triggers + Payload), discussion.md (the
 design reasoning), marvis-demo goal spec (illustrative comments for the new
 surface). Tests added for every phase; all -race clean.
+
+## 2026-07-25 — jarvis-demo rewritten as a real assistant
+
+Replaced `cmd/jarvis-demo` entirely (marvis-demo untouched — it stays the
+annotated spec). jarvis is now the working, opinionated version of the same
+idea: a home assistant you could actually run.
+
+- `main.go` — wiring and capabilities. A schema router (small "fast" model,
+  `bb.Schema[intent]` with an `enum` over the ids) picks one of eight
+  capabilities in a `bb.Select`; every model-driven capability has a keyword
+  fallback, so the whole brain works with no `BIG_BRAIN_API_KEY` at all.
+  Capabilities: talk (persona, house + memory woven into a system note,
+  streams when terminal), remember/forget (durable), recall (answers from
+  facts in words), lists (durable), house control (structured
+  device/sensor command, reports what the house actually reports back),
+  briefing (a `bb.Group`: a reader posts raw state, a narrator `bb.Wait`s on a
+  checkpoint and speaks it), remind. After `bb.Respond`, `bb.Notify` speaks
+  the answer into the house.
+- Initiative: a boot `bb.Trigger`, a one-minute `bb.Every` sweep that fires due
+  reminders (cheap sweep beats a timer per reminder, and it survives restarts),
+  a 07:00 morning briefing, and a 22:30 goodnight routine whose device plan
+  travels as `bb.WithSeedPayload` / `bb.Payload[goodnightPlan]`. Every deferred
+  body is named + `.Durable()`.
+- `memory.go` — facts, named lists, reminders as one JSON doc in the bb store
+  (`Get`/`Put`), so `BIG_BRAIN_DATA` makes memory outlive the process. `due()`
+  marks and returns in one locked step: a reminder cannot fire twice.
+- `world.go` — the dummy house, enhanced: six sensors derived from the clock
+  and the device states (heater warms, fan cools, daylight/motion follow the
+  hour), six devices incl. a thermostat, `GET /house` snapshot, `/notify` sink,
+  and a `BIG_BRAIN_DEMO_TEMP_OFFSET` calibration knob.
+- `main_test.go` — table tests for every keyword fallback and time parser, a
+  memory reload/fire-once test, and an end-to-end request through `bb.Handler`
+  asserting both the reply and that the house actually changed. All pass.
+- `effective.go` added per the package rule.
+
+No `pkg/` change, so the authoring guide's surface stays correct; refreshed the
+one line describing what jarvis-demo demonstrates.
+
+## 2026-07-26 — Tool-use design captured (docs only, no code)
+
+Design session only; no `pkg/` or `internal/` change, so nothing to verify but
+the prose.
+
+- **`docs/discussion.md`** — appended "Tool use: two boundaries, three types, and
+  the turn/chat split". Records the reasoning, not just the API: why the two tool
+  boundaries (client-facing passthrough vs. inner Go-run tools) are different
+  problems sharing one prerequisite; why the original `WithTool` + auto-loop
+  sketch lost (a flow has several models, small ones with tiny context — the dev
+  runs the loop); why the handler splits into `turn` (client-facing) + `chat`
+  (model-facing); why `Tool`/`ToolCall`/`ToolResult` are three types and not one;
+  the linked-or-stub counterpart accessors and their per-flow locality; the
+  keystone resolution rule; the two coalescing invariants; and the reversal that
+  made a bare agent a *full* transparent proxy.
+- **`next.md`** — #3 rewritten from a sketch into a build spec: types, staged
+  builders, direction table, the four rules, the default proxy, and a six-step
+  build order. Steps 1–2 (tool-aware `model.Stream` + wire adapters parsing
+  `tools`/`tool_choice`) land first because they alone close the PRODUCT
+  "caller tools pass through untouched" promise. Header, suggested order, and the
+  PRODUCT-audit slotting note updated to match.
+- **`docs/authoring-guide.md` deliberately not updated** — the surface isn't real
+  yet and the handler signature change (a second parameter) would make the guide
+  wrong in a different direction. It gets updated as step 6, with the code, per
+  the docs-move-with-code rule.
+
+Next: step 1 — make the model layer tool-aware.
+
+## 2026-07-26 (2) — Tool sugar designed: `OnCall` + `Resolve` (docs only)
+
+Follow-up design pass on top of the same day's tool surface. Still no code.
+
+- **`docs/discussion.md`** — appended "Sugar over the manual loop: `OnCall` +
+  `Resolve`". The motivating problem is not only boilerplate: dispatching by
+  `switch call.Name` duplicates the tool's name as a magic string with nothing
+  checking the two agree. Records what was accepted (an optional handler on the
+  `Tool`, local-only by construction) and what was rejected from the first sketch
+  and why: `Ask` must never run a handler (a run-but-don't-send middle state means
+  `Ask` silently turned on the heater), and `UsingTools` beside `WithTools` is a
+  coin-flip pair that reintroduces the overloaded-noun problem the turn/chat split
+  removed — so the mode lives on the **verb** (`Resolve`), which is also the
+  design's existing word for a call that has a matching result. Also records why
+  the proposed "client tools get a default client-facing OnCall that auto-tags for
+  `turn.Call`" was cut: the keystone rule already makes unresolved calls fall out
+  of the reply, and an auto-tag would make a `chat`-facing method cause a
+  `turn`-facing effect. Open (mild, flagged): whether losing the explicit
+  `WithSchema` stage on handler-carrying tools is worth the drift guarantee.
+- **`next.md`** — #3 gains an "Optional local handlers" subsection with the four
+  semantics to implement (handler error → `IsError` result, not an abort; round
+  cap `.WithMaxRounds(n)` default 8 — the runaway-cycle guard from #2's tail
+  arriving early; `Resolve` opt-in so the bare-agent proxy is untouched; durable
+  re-runs re-run side effects). Direction table updated; build order is now seven
+  steps, with the sugar deliberately **last** — it can only be judged once the
+  manual surface is real and the demo has written the loop by hand.
+- **`cmd/marvis-demo/main.go`** — `flowHouse` keeps the manual loop as live code
+  (the low-level surface is the thing that must stay honest) and carries the
+  `Resolve` version, the `bb.OnCall` tool definitions, and the mixed
+  server-tools/client-tools relay as comments beside it.
+
+Unchanged: the build order still starts at the tool-aware model layer, and the
+authoring guide is still deliberately untouched until the code lands.
+
+## 2026-07-26 (3) — `OnCall` revised: copy + schema check, not fusion (docs only)
+
+Iteration on the sugar from entry (2), after a proposal to stage it
+(`bb.OnCall(tool).Does(fn)`). Outcome: two of the three ideas adopted, staging
+rejected, and the earlier "handler replaces `WithSchema`" claim reversed.
+
+- **`bb.OnCall(tool, fn)` returns a COPY** and never mutates. The reason this
+  matters beyond hygiene: one bare definition can carry many bindings — real vs.
+  stub, or forwarded bare in one agent and handled locally in another — which is
+  the project's mock-for-test-injection rule falling out for free. Fusing the
+  handler into the constructor forecloses it.
+- **`WithSchema` stays on every tool.** `OnCall` now *checks* instead of deriving:
+  `bb.Schema[T]()` vs. the tool's recorded schema, mismatch recorded as a wiring
+  error surfacing at `Serve` beside unknown model names and bad `Selects` ids. The
+  guarantee weakens from "unrepresentable" to "cannot ship, fails at boot" and buys
+  back **one `Tool` construction shape for every tool**, including wire-parsed ones
+  that never had a handler stage. `Tool` can't be generic (heterogeneous
+  `WithTools`, wire-parsed values), so boot is the earliest honest point anyway.
+- **Staging rejected**, for a mechanical and a stylistic reason: a method can't
+  introduce a type parameter, so `OnCall(tool).Does(fn)` can't infer `T` (it would
+  be named at the stage *and* in the closure); and every staged builder here adds a
+  differently-named required field per stage, while `OnCall` adds exactly one thing.
+  `OnCall` belongs to the `Schema[T]`/`Extract[T]` family of free generic functions.
+- **Invariant restated:** "a forwarded tool never gains a handler by itself." An
+  explicit `bb.OnCall(turn.Request().Tools()[0], fn)` is allowed — deliberately
+  serving a caller's capability. "Never execute the caller's tools" means never
+  *implicitly*.
+
+Updated in place: the `discussion.md` sugar section (records the reversal and why),
+`next.md` #3's handler subsection, and the marvis comments (bare tools stay live
+code; the bound copies and `Resolve` remain commented alternatives).

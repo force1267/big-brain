@@ -3,8 +3,10 @@
 How to write a brain with `pkg/bb`. A brain is a Go program that assembles a
 tree of **flows** and serves it. This guide moves with the code; if it disagrees
 with `pkg/bb`, the code wins. Two complete examples live in `cmd/marvis-demo`
-(intent routing with a model + schema) and `cmd/jarvis-demo` (a runnable
-smart-home brain).
+(intent routing with a model + schema, annotated line by line) and
+`cmd/jarvis-demo` (a runnable smart-home brain: schema routing with keyword
+fallbacks, durable memory and lists, a `Group`-based briefing, reminders, and
+cron routines — it runs with no API key).
 
 ## The mental model
 

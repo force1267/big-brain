@@ -216,19 +216,21 @@ func flowDiscoverIntent(ctx context.Context) (bb.Flow, error) {
 		// branch that testing never exercised fails at boot, not in production.
 		Selects(FlowTalking, FlowRemember, FlowRecall, FlowList, FlowHouse, FlowExtra).
 		// the message arrives from the Flow
-		OnMessage(func(ctx context.Context, turn bb.Turn) error {
-			// turn is the agent live, acting on this incoming message. it can Add/Ask/Reply/Select
-			// but NOT reconfigure the agent (no WithModel/WithRole here) — self-modification at
-			// runtime is impossible by construction. the incoming messages are turn.Messages.
+		OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
+			// the agent live, acting on this incoming message, through two handles: turn faces the
+			// CLIENT (Messages/Reply/Select/Call) and chat faces the MODEL (Add/Ask/WithTools).
+			// see flowHouse for why the split exists and what it buys. neither can reconfigure the
+			// agent (no WithModel/WithRole here) — self-modification at runtime is impossible by
+			// construction. the incoming messages are turn.Messages.
 			// ctx is for this turn running in the flow on this message. after this function returns the ctx is done.
 			// the ctx passed to the flowDiscoverIntent outer function is the process' context. the ctx in this function is a child of the outer ctx.
 			// the engine or flow can end the agent by closing the ctx. the agent implementation must respect that. for example cancel an http call by passing the context to the call.
 
 			var reply bb.Reply
-			turn.Add(turn.Last())    // adds the latest incoming message (turn.Last()) to this turn's chat.
-			reply, err := turn.Ask() // sends the turn's chat to the model
+			chat.Add(turn.Last())    // adds the latest incoming message (turn.Last()) to the model conversation.
+			reply, err := chat.Ask() // sends that conversation to the model
 			// can be both in a single call
-			// reply, err := turn.AskWith(turn.Last())
+			// reply, err := chat.AskWith(turn.Last())
 			if err != nil {
 				// schema-mismatch is owned HERE, by Ask: the agent holds the schema
 				// (WithSchema), so it validates the reply against it and this is the
@@ -250,7 +252,7 @@ func flowDiscoverIntent(ctx context.Context) (bb.Flow, error) {
 
 			// here interaction with agent can continue, that is why it is called an agent
 			// newMsg := bb.NewMessage("but what about that other thing").As("system") // or "user" or anything you want. next agents can identify who sent the message
-			// newReply, _ := turn.Ask(newMsg)
+			// newReply, _ := chat.AskWith(newMsg)
 
 			// turn.Select(SomeFlowId) // this works with bb.Select, if the next flow is not a Select, this will not have any effect
 			// validation: at request time Select(id) is checked against the ids of the Select group this flow was linked to via Next — an unknown id is a loud error, not a silent misroute.
@@ -314,8 +316,8 @@ func flowTalk(ctx context.Context) (bb.Flow, error) {
 		WithModel(model).
 		WithRole(role)
 	// to stream from your OWN OnMessage handler, tee the incoming tokens into the outgoing channel
-	// turn.Stream() hands you:
-	//   reply, _ := turn.Ask()
+	// turn.Stream() hands you (chat asks the model, turn streams to the client — see flowHouse):
+	//   reply, _ := chat.Ask()
 	//   if out, ok := turn.Stream(); ok {          // ok only when this turn is terminal + client wants SSE
 	//       for tok := range reply.Stream() {      // live model tokens
 	//           out <- tok                          // forward (or transform / inject as you like)
@@ -384,17 +386,185 @@ func flowList(ctx context.Context) (bb.Flow, error) {
 	return flow, nil
 }
 
+// the arguments of the house tools. the struct is the contract: bb.Schema[T]() turns it
+// into the JSON schema the model sees, and bb.Extract[T](call) turns the model's arguments
+// back into it. the same reflection that powers WithSchema for structured replies.
+type sensorArgs struct {
+	Sensor string `json:"sensor"` // "temperature" | "humidity" | "motion"
+}
+
+type deviceArgs struct {
+	Device string `json:"device"` // "heater" | "fan" | "lights"
+	On     bool   `json:"on"`
+}
+
 func flowHouse(ctx context.Context) (bb.Flow, error) {
 	var model bb.Model = bb.NewModel(ModelCheap) // the model registered under "cheap" in main
 
-	role := bb.Role("You are Marvis controlling the smart house. The user wants to read a sensor, set a device, or check something. Report what you did or read.")
+	role := bb.Role("You are Marvis controlling the smart house. The user wants to read a sensor, set a device, or check something. Use the tools you are given, then report what you did or read.")
+
+	// a Tool is a DEFINITION — name, description, argument schema. it is built in stages
+	// like every other bb type, and it is pure data: it carries no handler and no chat.
+	// (deliberately no readSensor.ToolCalls() — a definition never back-references the chat.)
+	readSensor := bb.NewTool().
+		As("read_sensor").
+		Is("read one of the house sensors").
+		WithSchema(bb.Schema[sensorArgs]())
+
+	setDevice := bb.NewTool().
+		As("set_device").
+		Is("turn a house device on or off").
+		WithSchema(bb.Schema[deviceArgs]())
+
+	// a tool can OPTIONALLY be bound to a local handler, and then bb does the dispatch for you.
+	// bb.OnCall is a free generic function (a Go method cannot take a type parameter — the same
+	// reason bb.Schema[T] and bb.Extract[T] are free functions) and it returns a COPY: the bare
+	// definition above stays bare and reusable, which is what lets one definition have several
+	// bindings — the real house here, a stub in tests, or forwarded bare by another agent entirely.
+	//   realSensor := bb.OnCall(readSensor,
+	//       func(ctx context.Context, a sensorArgs) (string, error) { return readHouseSensor(ctx, a.Sensor), nil })
+	//   realDevice := bb.OnCall(setDevice,
+	//       func(ctx context.Context, a deviceArgs) (string, error) { return setHouseDevice(ctx, a.Device, a.On), nil })
+	// note WithSchema stays where it is: EVERY tool is built As → Is → WithSchema, including the ones
+	// parsed off the wire, and OnCall only CHECKS that bb.Schema[T]() of the handler's argument matches
+	// the schema already on the tool. a mismatch is a wiring error reported at bb.Serve, next to unknown
+	// model names and bad Select ids — one Tool shape, and drift still cannot ship.
+	// for a tool that wants to inspect its own raw arguments there is the untyped escape hatch:
+	//   .OnCall(func(ctx context.Context, call bb.ToolCall) (string, error) { ... })
+	// a tool that arrived over the wire (turn.Request().Tools()) is always bare: a forwarded tool never
+	// gains a handler by itself. binding one explicitly is allowed though — bb.OnCall(turn.Request().Tools()[0], fn)
+	// is marvis deliberately choosing to serve a capability its caller offered. never implicitly, always on purpose.
 
 	var agent bb.Agent = bb.NewAgent().
 		WithModel(model).
-		WithRole(role)
+		WithRole(role).
+		// the handler takes TWO handles, and the split is the whole point of the tool design:
+		//   turn — the CLIENT side (who called marvis): turn.Messages/Last, turn.Request(),
+		//          turn.Reply, turn.Stream, turn.Call, turn.ToolResults, turn.Select.
+		//   chat — the MODEL side (the upstream LLM this agent talks to): chat.Add, chat.WithTools,
+		//          chat.ForwardTools, chat.Ask/AskWith → a reply with ReadAll/Stream/ToolCalls.
+		// same nouns flow both ways (a tool call can come FROM the model or go TO the client), so
+		// direction is carried by WHICH HANDLE you touch, never by an overloaded verb. chat.Ask
+		// asks the model; turn.Reply answers the client. chat.Add builds the prompt (this is where
+		// the old turn.Add went); turn.Call asks the client to run something.
+		// chat is a ModelChat — a live conversation, not the Model definition. bb.NewModel(ModelCheap).Chat()
+		// gives you the same handle outside any flow, if you just want to talk to a model in plain Go.
+		OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
+			// INNER tools: the model asks, MARVIS runs the tool in Go, the user never sees it.
+			// chat.WithTools declares them for this ask only — nothing is forwarded implicitly, because
+			// a flow has several models and a small one must not be handed every tool in the process.
+			// tool choice is optional and defaults to auto: chat.WithTools(...).WithToolChoice("any")
+			// forces the model to call something instead of answering in prose.
+			chat.Add(turn.Last())
+			for {
+				reply, err := chat.WithTools(readSensor, setDevice).Ask()
+				if err != nil {
+					return fmt.Errorf("error at house agent ask: %w", err)
+				}
+
+				// reply.ToolCalls() is what the model REQUESTED — {ID, Name, Input}. an invocation,
+				// not a definition: no schema on it, its shape is the Tool it names. empty means the
+				// model is done asking and answered in prose.
+				calls := reply.ToolCalls()
+				if len(calls) == 0 {
+					turn.Reply(reply.ReadAll())
+					return nil
+				}
+
+				// answer EVERY call of one round in ONE message. the model may ask for several at once
+				// (parallel tool use = several tool_use blocks in one message); splitting the answers
+				// across several messages is what trains a model to stop calling in parallel.
+				results := make([]bb.ToolResult, 0, len(calls))
+				for _, call := range calls {
+					switch call.Name {
+					case "read_sensor":
+						// Extract decodes the call's arguments with the same generic used for schemas.
+						args := bb.Extract[sensorArgs](call)
+						// NewToolResult only REQUIRES the id it answers — content is optional (a void
+						// tool is legal) and .AsError() marks a failure the model should see and retry.
+						results = append(results, bb.NewToolResult().
+							WithId(call.ID).
+							WithContent(readHouseSensor(ctx, args.Sensor)))
+					case "set_device":
+						args := bb.Extract[deviceArgs](call)
+						results = append(results, bb.NewToolResult().
+							WithId(call.ID).
+							WithContent(setHouseDevice(ctx, args.Device, args.On)))
+					}
+				}
+				chat.Add(bb.NewMessage("").WithResults(results...))
+				// a single result can also travel alone: chat.Add(results[0].Message()).
+				// a Message carries Content, Calls and Results together, so "here you go" + two
+				// tool results is one ordinary message — there is no separate tool-message type.
+			}
+			// this loop is the whole "inner tool" story: Ask → run in Go → Add results → Ask again.
+			// it is a plain Go loop, and it stays available forever — Ask NEVER runs your code behind
+			// your back, so a side-effecting tool can only fire because you called it.
+
+			// THE SHORT VERSION. hand it the OnCall-bound copies instead of the bare tools, and the
+			// switch, the Extract, the NewToolResult, the coalescing and the loop are all bb's job:
+			//   reply, err := chat.WithTools(realSensor, realDevice).Resolve(turn.Last())
+			//   if err != nil { return err }
+			//   turn.Reply(reply.ReadAll())
+			//   return nil
+			// Ask and Resolve are two verbs, not two nouns — the call site says which one you meant:
+			//   .Ask()      one round. never runs a handler. hands you reply.ToolCalls() to do as you like.
+			//   .Resolve()  ask → run the OnCall of every call it can → feed the results back → repeat,
+			//               until the model answers in prose. "resolve" is literal: a call is resolved
+			//               when it has a matching result, and that is the same rule bb.Respond uses.
+			// a call bb CANNOT resolve — a tool with no OnCall, and every tool the CLIENT declared —
+			// falls out of the returned reply untouched, so the mixed case needs no special mode:
+			//   reply, _ := chat.ForwardTools().WithTools(realSensor).Resolve(turn.Last())
+			//   turn.Call(reply.ToolCalls()...)  // marvis ran its own tools; the client's go to the client
+			//   turn.Reply(reply.ReadAll())
+			// three things Resolve settles for you: results of one round are coalesced into ONE message;
+			// a handler returning an error becomes an is_error result the model can see and retry against
+			// (only a cancelled ctx aborts); and there is a round cap (.WithMaxRounds(n), default 8) so a
+			// model that keeps calling forever errors instead of spinning.
+			// note Resolve runs your Go on the server, so a Durable flow that resumes runs it AGAIN —
+			// at-least-once, exactly like the manual loop above, just less visible.
+		})
+
+	// OUTER tools — the other direction, when MARVIS is the one being used as a model.
+	// a client (an OpenAI/Anthropic SDK pointed at marvis) can declare its OWN tools on the request.
+	// marvis must never execute those; it relays the request back and the client runs it:
+	//   OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
+	//       reply, err := chat.ForwardTools().AskWith(turn.Messages()...) // the caller's tools AND
+	//       if err != nil { return err }                                  // its tool choice, upstream
+	//       turn.Call(reply.ToolCalls()...)      // relay what the model asked for TO THE CLIENT
+	//       turn.Reply(reply.ReadAll())          // text can accompany the calls in the same answer
+	//       return nil
+	//   })
+	// ForwardTools() is just sugar for chat.WithTools(turn.Request().Tools()...) and the two stack —
+	// chat.ForwardTools().WithTools(readSensor) sends the caller's tools plus marvis' own (bound or bare).
+	// turn.Call is variadic and can be called repeatedly; every call of one turn is coalesced into
+	// ONE outgoing message, which is what makes parallel tool use work over the wire.
+	//
+	// THE RULE that ties both directions together, checked at bb.Respond:
+	//   a tool call with NO matching result in the chat  → goes out to the client (stop_reason tool_use)
+	//   a tool call that HAS a matching result           → resolved history, stays internal
+	// so the house loop above (which answers every call) never leaks a tool to the user, while the relay
+	// above (which answers none) hands them all over. it also means one agent may Call and a LATER agent
+	// or flow may answer it with bb.NewToolResult().WithId(id) — handoff needs no special mechanism.
+	// call.ToolResult() / result.ToolCall() find the counterpart, but only within the messages THIS flow
+	// saw (resolution is per-flow); otherwise you get an id-only stub instead of a nil or a panic.
+	// nothing about this is stateful: marvis emits the call and the turn ENDS. the client runs the tool
+	// and re-sends the whole transcript, exactly like it would to a real model API, and the flow re-runs
+	// from the top with the result now in turn.Messages(). there is no tool loop to checkpoint.
+	//
+	// and if you write no OnMessage at all, a bare agent is a FULL transparent proxy: it forwards the
+	// caller's tools and choice, replays the model's text and tool calls untouched, streaming or not.
+	// point any OpenAI/Anthropic client at it and it behaves exactly like the model behind it. it never
+	// Resolves anything (caller tools have no OnCall to run, and a proxy runs nobody's code). the moment
+	// you write OnMessage, all of that stops and every forward is explicit — like the one above.
 
 	var flow bb.Flow = bb.NewFlow().WithAgent(agent).WithId(FlowHouse)
 	return flow, nil
 }
+
+// the actual house, in plain Go. tools are ordinary functions — bb never sees inside them.
+func readHouseSensor(ctx context.Context, sensor string) string { return "" }
+
+func setHouseDevice(ctx context.Context, device string, on bool) string { return "" }
 
 // the flow for "extra" leave it empty. I want to explore it myself.
