@@ -612,7 +612,12 @@ router.Next(capabilities).Next(bb.Respond).Next(bb.Once(when)).Next(followUp)
 - The deferred body **must** be a named flow (`WithId`) so it resolves after a
   restart; an unnamed body is warned and skipped.
 - Triggers require `bb.Store(...)` (durable scheduling) and run their worker under
-  `bb.Serve` (not a bare `bb.Handler`).
+  `bb.Serve` or `bb.Run` (not a bare `bb.Handler`).
+- `bb.Run(ctx, bb.Store(...), ...)` drives triggers and the engine with **no
+  HTTP endpoint at all** — for a brain that only reacts to crons/timers/
+  internal events, never inbound requests. Same startup wiring as `Serve`
+  (validates trigger chains, requires `Store`), minus the listener; `Addr` and
+  request-only options are ignored.
 - A scheduled body replays the request context: `turn.Request()` (the protocol
   params) and `bb.Payload[T](turn)` (arbitrary trigger data, seeded with
   `bb.WithSeedPayload(x)` or captured from the originating request) both work in

@@ -1531,4 +1531,12 @@ provider-model sense of "name" used elsewhere in `bb` (`Model`, `WithModel`,
 
 `go build ./... && go test ./internal/serve/... ./pkg/bb/...` green.
 
-Next: nothing queued.
+## 2026-07-26 - Add `bb.Run`
+
+- Added `bb.Run(ctx, opts...)` (backed by `serve.Run` in
+  `internal/serve/engine.go`): drives registered triggers and the durable job
+  engine with no HTTP listener at all, for a brain that only reacts to
+  crons/timers/internal events. Requires `bb.Store(...)` (`ErrNoStore`
+  otherwise); refactored the trigger-wiring block out of `build()` into a
+  shared `wireScheduler` helper used by both `Serve`/`Handler` and `Run`.
+  Updated `docs/authoring-guide.md`'s triggers section accordingly.

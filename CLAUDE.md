@@ -5,7 +5,7 @@ Anthropic-compatible APIs and is also embeddable as a library.
 
 ## Absolute rules (read before writing any code)
 
-1. **Log everything you do** in `LOG.md` (append a dated session entry). Other
+1. **Log everything you do** in `docs/LOG.md` (append a dated session entry). Other
    LLM sessions rely on it to understand history.
 2. **All textual artifacts are local markdown** (plans, research, logs).
 3. **Effective Go is law.** The article is saved at `docs/effective_go.html`;

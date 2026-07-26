@@ -20,6 +20,10 @@ import (
 // nor any registered flow is available to serve.
 var ErrNoFlow = errors.New("serve: no flow to serve")
 
+// ErrNoStore is returned by Run, which schedules triggers durably and so has
+// nothing to schedule against without a Store.
+var ErrNoStore = errors.New("serve: Run requires Store (nothing to schedule against)")
+
 // Option configures a served brain.
 type Option func(*config)
 
@@ -102,21 +106,13 @@ func build(f flow.Flow, opts ...Option) (*server, http.Handler, error) {
 	r := &ring{max: 500}
 	s := &server{named: named, def: def, name: c.name, tracer: tee(r, c.tracer), ring: r, store: c.store}
 
-	// Triggers/initiative need durable scheduling, so they require a store. With
-	// one, build the engine-backed scheduler and register the startup trigger
-	// chains (which schedules their crons/one-shots). The worker runs in Serve.
+	// Triggers/initiative need durable scheduling, so they require a store.
 	if c.store != nil {
-		sched, err := newEngineScheduler(c.store)
+		sched, err := wireScheduler(c.store)
 		if err != nil {
 			return nil, nil, err
 		}
 		s.sched = sched
-		sctx := flow.WithScheduler(flow.WithStore(context.Background(), c.store, ""), sched)
-		for _, tc := range flow.RegisteredTriggers() {
-			if err := tc.RunAtStartup(sctx); err != nil {
-				return nil, nil, err
-			}
-		}
 	}
 
 	mux := http.NewServeMux()

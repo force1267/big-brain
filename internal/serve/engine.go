@@ -58,3 +58,39 @@ func (s *engineScheduler) Defer(bodyID, cron string, at time.Time, payload []byt
 func (s *engineScheduler) run(ctx context.Context, workers int) error {
 	return s.eng.Run(ctx, workers)
 }
+
+// wireScheduler builds the engine-backed scheduler over store and runs every
+// registered trigger chain at startup, which schedules their crons/one-shots
+// (Every/Once). Shared by build (HTTP) and Run (no HTTP).
+func wireScheduler(store flow.Store) (*engineScheduler, error) {
+	sched, err := newEngineScheduler(store)
+	if err != nil {
+		return nil, err
+	}
+	sctx := flow.WithScheduler(flow.WithStore(context.Background(), store, ""), sched)
+	for _, tc := range flow.RegisteredTriggers() {
+		if err := tc.RunAtStartup(sctx); err != nil {
+			return nil, err
+		}
+	}
+	return sched, nil
+}
+
+// Run drives registered triggers and their scheduled bodies over the durable
+// job engine, with no HTTP listener at all — for a brain that only reacts to
+// crons/timers/internal events, never inbound requests. Blocks until ctx is
+// cancelled. Requires Store (ErrNoStore otherwise).
+func Run(ctx context.Context, opts ...Option) error {
+	c := defaults()
+	for _, o := range opts {
+		o(&c)
+	}
+	if c.store == nil {
+		return ErrNoStore
+	}
+	sched, err := wireScheduler(c.store)
+	if err != nil {
+		return err
+	}
+	return sched.run(ctx, c.workers)
+}
