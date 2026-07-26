@@ -60,6 +60,18 @@ Provider credentials come from the environment (`BIG_BRAIN_API_KEY`,
 `BIG_BRAIN_BASE_URL`). Flow code names a _role_; deployment decides which
 provider backs it.
 
+By default a name resolves through the OpenAI-compatible client. To consume a
+model natively through Anthropic's own API instead:
+
+```go
+bb.NewModel().WithName("claude-sonnet-5").WithProvider(bb.AnthropicProvider)
+```
+
+`WithProvider` is the only thing that changes — the same registry, tags,
+`WithTemprature`/`WithThink`, and inheritance ladder apply either way. This is
+independent of `bb.Serve`, which always speaks both the OpenAI and Anthropic
+wire protocols to *callers* regardless of which provider a brain *consumes*.
+
 **Which model an agent asks** is resolved along a ladder, first match wins:
 
 1. `agent.WithModel(m)` — the agent's own model.

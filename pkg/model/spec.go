@@ -16,6 +16,7 @@ var ErrNoModelName = errors.New("model: no name set")
 // exposes as bb.Model; the runtime Model (Stream) is produced by Build.
 type Spec struct {
 	name     string
+	provider Provider
 	think    bool
 	thinkSet bool
 	temp     float64
@@ -23,6 +24,16 @@ type Spec struct {
 	err      error // a recorded construction error (e.g. unknown tag); surfaced at Build
 	built    Model // a pre-bound model (Bound); when set, Build returns it directly
 }
+
+// Provider selects which consuming client Build resolves a Spec to. The zero
+// value is OpenAIProvider, so existing Specs (and the OpenAI-compatible
+// default) are unaffected.
+type Provider int
+
+const (
+	OpenAIProvider Provider = iota
+	AnthropicProvider
+)
 
 // Bound returns a Spec whose Build yields the given model directly, bypassing
 // provider resolution. It exists so callers (and tests) can inject a specific
@@ -34,6 +45,11 @@ func (s Spec) WithName(name string) Spec { s.name = name; return s }
 
 // WithThink toggles the model's reasoning/thinking mode.
 func (s Spec) WithThink(on bool) Spec { s.think, s.thinkSet = on, true; return s }
+
+// WithProvider selects which consuming client Build resolves the name
+// against. Unset (the zero value) is OpenAIProvider, so a Spec that never
+// calls this behaves exactly as it always has.
+func (s Spec) WithProvider(p Provider) Spec { s.provider = p; return s }
 
 // WithTemprature sets the sampling temperature. (Spelling matches the API the
 // goal-post main.go uses.)
@@ -79,6 +95,9 @@ func (s Spec) Build() (Model, error) {
 	}
 	if s.name == "" {
 		return nil, ErrNoModelName
+	}
+	if s.provider == AnthropicProvider {
+		return Anthropic(os.Getenv("BIG_BRAIN_BASE_URL"), os.Getenv("BIG_BRAIN_API_KEY"), s.name), nil
 	}
 	return OpenAI(os.Getenv("BIG_BRAIN_BASE_URL"), os.Getenv("BIG_BRAIN_API_KEY"), s.name), nil
 }

@@ -14,6 +14,17 @@ import (
 // the runtime model is resolved (and any config error surfaced) at Serve.
 type Model = model.Spec
 
+// Provider selects which consuming client a Spec resolves against —
+// bb.OpenAIProvider (the default) or bb.AnthropicProvider — via
+// Model.WithProvider. It has nothing to do with which wire protocols
+// bb.Serve speaks to callers; that is always both, regardless of this.
+type Provider = model.Provider
+
+const (
+	OpenAIProvider    = model.OpenAIProvider
+	AnthropicProvider = model.AnthropicProvider
+)
+
 // NewModel returns a model builder. With no tags it starts blank. With one or
 // more tags it is seeded from the model registered (via WithModel) under all of
 // those tags; an unknown tag records an error that surfaces at Serve. The

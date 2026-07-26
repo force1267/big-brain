@@ -13,6 +13,14 @@
 // them without growing a method. Unresolved states the keystone rule in one
 // function: a call with no matching result is what a brain owes its client.
 //
+// OpenAI and Anthropic are two implementations of the same Model interface,
+// each translating the neutral Message/Params/Chunk shapes into its own
+// wire framing (a system message vs. a top-level system field; a dedicated
+// "tool" role vs. tool_result blocks inside a user turn; split-by-index
+// argument deltas either way, just on different event fields). Spec.Build
+// picks between them by Spec.Provider — the only place a caller states
+// which client backs a name.
+//
 // Effective Go justification: a small, single-purpose package named for the
 // client's call site (model.Role, model.OpenAI — no stutter); a one-purpose
 // interface with a single method, satisfied implicitly by provider

@@ -1290,3 +1290,66 @@ and two new entries in THE RULES. `effective.go` updated for `pkg/model`,
 the tool types live where they do.
 
 Next: #4 (native Anthropic consume), or the Tier-3 cleanups.
+
+## 2026-07-26 (5) — Native Anthropic consume (next.md #4)
+
+Added `github.com/anthropics/anthropic-sdk-go` (MIT, pre-approved) and
+`pkg/model/anthropic.go`: a second `Model` implementation, sibling to
+`openai.go`, translating the same neutral `Message`/`Params`/`Chunk` shapes
+into Anthropic's own wire framing instead of going through its
+OpenAI-compatibility shim.
+
+Framing differences from OpenAI, each handled at the translation boundary:
+- **System is a top-level field**, not a message role — `Stream` peels
+  `Role: "system"` messages off into `body.System` instead of the transcript.
+- **No dedicated "tool" role.** OpenAI answers a call with its own
+  `role:"tool"` message; Anthropic has no such role, so a neutral message
+  carrying `Results` renders as `tool_result` content blocks inside an
+  ordinary **user** turn (`anthropicMessage`). A message carrying `Calls`
+  renders as `tool_use` blocks in an **assistant** turn. Anthropic never
+  splits one neutral message into several wire messages the way OpenAI's
+  per-call tool messages do — blocks nest inside one turn either way.
+- **Tool-call arguments stream as `input_json_delta` pieces keyed by content
+  block index**, with id/name arriving on a separate `content_block_start`
+  event rather than interleaved with the first argument piece (OpenAI's
+  shape). `anthropicCallBuf` is the sibling of `callBuf`, keyed to this
+  provider's event fields; same buffer-whole-and-emit-complete v1 stance.
+  Text arrives as `text_delta` on the same `content_block_delta` event type,
+  discriminated by `Delta.Type`.
+- **`ToolInputSchemaParam` has no single raw-JSON-Schema field** — it wants
+  `Properties`/`Required` split out, so `anthropicTool` reads those two keys
+  out of `Tool.Schema` (which `bb.Schema[T]()` always produces) rather than
+  handing the map through whole the way OpenAI's `shared.FunctionParameters`
+  does.
+- **`max_tokens` is required**, unlike OpenAI where it's optional; a Spec with
+  none configured gets a default (`defaultMaxTokens = 4096`) rather than
+  sending a request Anthropic would reject.
+
+**Selecting it.** `Spec` gained `Provider` (`OpenAIProvider`/`AnthropicProvider`,
+zero value OpenAI so every existing Spec is unaffected) and `WithProvider`;
+`Build` branches on it. Aliased into `bb` as `bb.Provider`/`bb.OpenAIProvider`/
+`bb.AnthropicProvider`, matching how every other author-facing model type
+(`bb.Model`, `bb.Tool`, …) is a bare alias over `pkg/model`. This is orthogonal
+to `bb.Serve`, which already speaks both wire protocols to *callers*
+regardless of which provider a brain *consumes* — the PRODUCT gap closed here
+is one-directional (bb.Serve → real Anthropic), not the reverse.
+
+**A snag mid-build, worth recording:** the Anthropic SDK's SSE stream
+dispatch routes on the SSE `event:` line name, not the JSON body's `"type"`
+field — a test frame with only a `data:` line and no matching `event:` line is
+silently skipped (`Next()` loops past it), which read as an empty response
+with no error. Both fake-upstream test helpers now emit `event: <type>`
+derived from each frame's own JSON, so this can't drift back out of sync.
+
+Tests (`pkg/model/anthropic_test.go`, mirroring `openai_test.go`): streamed
+text, upstream failure, context cancellation, split/interleaved tool-call
+argument reassembly (out-of-order block indices), message rendering (calls →
+assistant+tool_use, results → user+tool_result, plain → user+text), tool
+choice mapping. All `-race` clean; full suite green.
+
+Docs: `pkg/model/effective.go` and `docs/authoring-guide.md` (`WithProvider`
+under Models) updated in the same change.
+
+Next: Tier-3 cleanups (`bb.Workers` no-op, unwired `WithThink`, unused
+`Prompt`/Template, `groups.go` duplication, `Reply.Media` stub), or #2's tail
+(Webhook inbound, in-body durability, group-scheduler commit rule).
