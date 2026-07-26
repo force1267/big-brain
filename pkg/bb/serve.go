@@ -81,11 +81,19 @@ func Handler(f Flow, opts ...Option) (http.Handler, error) {
 // Addr sets the listen address (default ":8080").
 func Addr(a string) Option { return serve.Addr(a) }
 
-// Workers sets the concurrent worker count.
+// Workers sets how many triggered/scheduled flow bodies (Trigger/Every/Once)
+// run concurrently in the durable job worker. It does not affect HTTP request
+// concurrency.
 func Workers(n int) Option { return serve.Workers(n) }
 
 // Trace installs a flow tracer.
 func Trace(t Tracer) Option { return serve.Trace(t) }
+
+// DefaultFlowName sets the model id the default flow reports to clients and
+// /v1/models (default "brain"). Only affects a flow served without a name
+// (Serve(ctx, f), Handler(f, ...), or WithDefaultFlow) — a flow named via
+// WithFlow(f).As(...) already reports that name.
+func DefaultFlowName(n string) Option { return serve.Name(n) }
 
 // JSONL returns a Tracer that writes each flow event as one JSON line to w.
 func JSONL(w io.Writer) Tracer { return flow.NewJSONL(w) }

@@ -80,9 +80,59 @@ type ChatRequest struct {
 	Messages    []Message  `json:"messages"`
 	Stream      bool       `json:"stream"`
 	Temperature *float64   `json:"temperature"`
-	MaxTokens   *int64     `json:"max_tokens"`
+	TopP        *float64   `json:"top_p"`
+	Stop        Stop       `json:"stop"`
 	Tools       []Tool     `json:"tools"`
 	ToolChoice  ToolChoice `json:"tool_choice"`
+	// MaxTokens is deprecated by OpenAI in favor of MaxCompletionTokens (and
+	// rejected outright by o-series reasoning models) — MaxOutputTokens
+	// prefers the latter when both are absent/present.
+	MaxTokens           *int64 `json:"max_tokens"`
+	MaxCompletionTokens *int64 `json:"max_completion_tokens"`
+	// ReasoningEffort is this format's reasoning-mode knob ("low"/"medium"/
+	// "high"/…). bb's Think is a bare on/off, so any non-empty value here
+	// means "on" — see Think.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+}
+
+// MaxOutputTokens resolves the token cap the client asked for, preferring the
+// current max_completion_tokens field over the deprecated max_tokens.
+func (r ChatRequest) MaxOutputTokens() *int64 {
+	if r.MaxCompletionTokens != nil {
+		return r.MaxCompletionTokens
+	}
+	return r.MaxTokens
+}
+
+// Think reports whether the request asked for reasoning mode, nil when the
+// client sent no opinion (ReasoningEffort omitted).
+func (r ChatRequest) Think() *bool {
+	if r.ReasoningEffort == "" {
+		return nil
+	}
+	on := true
+	return &on
+}
+
+// Stop accepts both forms this format allows for stop sequences: a single
+// string, or an array of up to 4.
+type Stop []string
+
+// UnmarshalJSON implements the dual string/array decoding.
+func (s *Stop) UnmarshalJSON(b []byte) error {
+	var str string
+	if err := json.Unmarshal(b, &str); err == nil {
+		if str != "" {
+			*s = Stop{str}
+		}
+		return nil
+	}
+	var arr []string
+	if err := json.Unmarshal(b, &arr); err != nil {
+		return err
+	}
+	*s = Stop(arr)
+	return nil
 }
 
 type choice struct {

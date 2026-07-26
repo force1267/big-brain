@@ -47,7 +47,10 @@ func main() {
 	)
 	// .WithProvider(bb.AnthropicProvider) here would consume that name through
 	// Anthropic's native API instead of the OpenAI-compatible default — same
-	// registry, tags, and inheritance ladder either way.
+	// registry, tags, and inheritance ladder either way. WithThink only takes
+	// effect on that provider (Anthropic's extended thinking mode); other
+	// providers ignore it, e.g.:
+	//   bb.NewModel().WithName("claude-sonnet-5").WithProvider(bb.AnthropicProvider).WithThink(true)
 
 	// there is a concept of default model, and flows using that model as their default models. (flows can have a default model for their agents; flow.WithModel just like agent.WithModel)
 	// the first call to bb.WithModel sets a default model that all the flows use as their default model.

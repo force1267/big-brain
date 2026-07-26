@@ -9,6 +9,6 @@
 // kept separate from the implementations so the surface can stay small and the
 // implementations can change behind it. bb holds no business logic; every call
 // here delegates. The small value types that are pure data with no separate
-// concern to justify a package of their own (Prompt templates, typed Schema)
-// are the only things bb implements directly.
+// concern to justify a package of their own (typed Schema) are the only
+// things bb implements directly.
 package bb

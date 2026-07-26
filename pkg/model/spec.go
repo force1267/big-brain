@@ -80,6 +80,10 @@ func (s Spec) Params() Params {
 		t := s.temp
 		p.Temperature = &t
 	}
+	if s.thinkSet {
+		t := s.think
+		p.Think = &t
+	}
 	return p
 }
 

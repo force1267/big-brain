@@ -25,6 +25,9 @@ type Message struct {
 type Params struct {
 	Temperature *float64
 	MaxTokens   *int64
+	// Think requests the model's extended reasoning mode where the provider
+	// supports it (Anthropic). Providers without a thinking mode ignore it.
+	Think *bool
 
 	// Tools the model may call this request. Nothing is forwarded implicitly —
 	// an agent decides what each model sees, because a flow has several models

@@ -14,6 +14,12 @@ import (
 // the way Temperature/MaxTokens are.
 const defaultMaxTokens = 4096
 
+// defaultThinkBudget is the token budget given to extended thinking when
+// Params.Think is on and the caller hasn't sized MaxTokens around it.
+// Anthropic requires budget_tokens < max_tokens; a caller setting a small
+// explicit MaxTokens alongside Think is expected to size both themselves.
+const defaultThinkBudget = 1024
+
 // Anthropic returns a Model backed by the native Anthropic Messages API.
 func Anthropic(baseURL, apiKey, name string) Model {
 	opts := []option.RequestOption{option.WithAPIKey(apiKey)}
@@ -47,6 +53,9 @@ func (m anthropicModel) Stream(ctx context.Context, msgs []Message, p Params) (<
 	}
 	if p.MaxTokens != nil {
 		body.MaxTokens = *p.MaxTokens
+	}
+	if p.Think != nil && *p.Think {
+		body.Thinking = anthropic.ThinkingConfigParamOfEnabled(defaultThinkBudget)
 	}
 	for _, t := range p.Tools {
 		body.Tools = append(body.Tools, anthropicTool(t))

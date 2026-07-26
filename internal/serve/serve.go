@@ -41,8 +41,9 @@ func Addr(a string) Option { return func(c *config) { c.addr = a } }
 // Name sets the model id reported to clients and /models (default "brain").
 func Name(n string) Option { return func(c *config) { c.name = n } }
 
-// Workers sets the number of concurrent request workers (reserved; requests are
-// currently served per-connection by net/http). Kept for API stability.
+// Workers sets how many triggered/scheduled flow bodies (Trigger/Every/Once)
+// run concurrently in the durable job worker (pkg/engine). It does not affect
+// HTTP request concurrency — net/http already serves those per-connection.
 func Workers(n int) Option { return func(c *config) { c.workers = n } }
 
 // Trace installs a flow tracer; events are also kept in a diagnostics ring
@@ -212,8 +213,10 @@ func (s *server) openai(w http.ResponseWriter, r *http.Request) {
 	}
 	msgs := openai.Messages(req.Messages)
 	f, name := s.resolve(req.Model)
-	rp := agent.NewRequest(req.Model, req.Temperature, req.MaxTokens,
-		openai.Tools(req.Tools), string(req.ToolChoice))
+	rp := agent.NewRequest(agent.Request{
+		Model: req.Model, Temperature: req.Temperature, TopP: req.TopP,
+		MaxTokens: req.MaxOutputTokens(), Stop: []string(req.Stop), Think: req.Think(),
+	}, openai.Tools(req.Tools), string(req.ToolChoice))
 	id := "chatcmpl-" + uuid.NewString()
 	runID := r.Header.Get("X-Run-Id")
 
@@ -262,8 +265,10 @@ func (s *server) anthropic(w http.ResponseWriter, r *http.Request) {
 	}
 	msgs = append(msgs, anthropic.Messages(req.Messages)...)
 	f, name := s.resolve(req.Model)
-	rp := agent.NewRequest(req.Model, req.Temperature, req.MaxTokens,
-		anthropic.Tools(req.Tools), string(req.ToolChoice))
+	rp := agent.NewRequest(agent.Request{
+		Model: req.Model, Temperature: req.Temperature, TopP: req.TopP, TopK: req.TopK,
+		MaxTokens: req.MaxTokens, Stop: req.StopSequences, Think: req.Think(),
+	}, anthropic.Tools(req.Tools), string(req.ToolChoice))
 	id := "msg_" + uuid.NewString()
 	runID := r.Header.Get("X-Run-Id")
 

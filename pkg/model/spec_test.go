@@ -26,6 +26,9 @@ func TestSpecBuildersAndImmutability(t *testing.T) {
 	if p := base.Params(); p.Temperature == nil || *p.Temperature != 0.5 {
 		t.Errorf("base temp not preserved: %+v", p)
 	}
+	if p := base.Params(); p.Think == nil || !*p.Think {
+		t.Errorf("base think not preserved: %+v", p)
+	}
 	if p := derived.Params(); *p.Temperature != 0.9 {
 		t.Errorf("derived temp = %v", *p.Temperature)
 	}
@@ -33,8 +36,12 @@ func TestSpecBuildersAndImmutability(t *testing.T) {
 
 // Params leaves unset fields nil.
 func TestSpecParamsUnset(t *testing.T) {
-	if p := (Spec{}).Params(); p.Temperature != nil {
+	p := (Spec{}).Params()
+	if p.Temperature != nil {
 		t.Fatalf("unset temperature should be nil, got %v", *p.Temperature)
+	}
+	if p.Think != nil {
+		t.Fatalf("unset think should be nil, got %v", *p.Think)
 	}
 }
 

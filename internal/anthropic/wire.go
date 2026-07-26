@@ -146,14 +146,36 @@ func (m *Message) UnmarshalJSON(b []byte) error {
 // MessagesRequest is the subset of the messages request body the engine
 // reads. Unknown fields are deliberately ignored, never an error.
 type MessagesRequest struct {
-	Model       string     `json:"model"`
-	System      Content    `json:"system"`
-	Messages    []Message  `json:"messages"`
-	Stream      bool       `json:"stream"`
-	Temperature *float64   `json:"temperature"`
-	MaxTokens   *int64     `json:"max_tokens"`
-	Tools       []Tool     `json:"tools"`
-	ToolChoice  ToolChoice `json:"tool_choice"`
+	Model         string      `json:"model"`
+	System        Content     `json:"system"`
+	Messages      []Message   `json:"messages"`
+	Stream        bool        `json:"stream"`
+	Temperature   *float64    `json:"temperature"`
+	TopP          *float64    `json:"top_p"`
+	TopK          *int64      `json:"top_k"`
+	StopSequences []string    `json:"stop_sequences"`
+	MaxTokens     *int64      `json:"max_tokens"`
+	Tools         []Tool      `json:"tools"`
+	ToolChoice    ToolChoice  `json:"tool_choice"`
+	Thinking      *ThinkParam `json:"thinking"`
+}
+
+// ThinkParam is this format's extended-thinking config: {"type":"enabled",
+// "budget_tokens":N} or {"type":"disabled"}. bb's Think is a bare on/off, so
+// only Type is read — see Think.
+type ThinkParam struct {
+	Type         string `json:"type"`
+	BudgetTokens int64  `json:"budget_tokens,omitempty"`
+}
+
+// Think reports whether the request asked for reasoning mode, nil when the
+// client sent no opinion (Thinking omitted).
+func (r MessagesRequest) Think() *bool {
+	if r.Thinking == nil {
+		return nil
+	}
+	on := r.Thinking.Type == "enabled"
+	return &on
 }
 
 type textBlock struct {

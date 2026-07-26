@@ -12,7 +12,7 @@ func TestRequestDecodesStringAndBlockContent(t *testing.T) {
 		"messages":[
 			{"role":"user","content":"hi"},
 			{"role":"assistant","content":[{"type":"text","text":"hel"},{"type":"text","text":"lo"}]}
-		],"stream":true,"temperature":0.5,"top_k":3}`
+		],"stream":true,"temperature":0.5,"top_k":3,"top_p":0.9,"stop_sequences":["END"]}`
 	var req MessagesRequest
 	if err := json.Unmarshal([]byte(body), &req); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -20,8 +20,31 @@ func TestRequestDecodesStringAndBlockContent(t *testing.T) {
 	if req.System != "be brief" || !req.Stream || *req.Temperature != 0.5 || *req.MaxTokens != 100 {
 		t.Fatalf("req = %+v", req)
 	}
+	if req.TopK == nil || *req.TopK != 3 {
+		t.Fatalf("top_k = %v", req.TopK)
+	}
+	if req.TopP == nil || *req.TopP != 0.9 {
+		t.Fatalf("top_p = %v", req.TopP)
+	}
+	if len(req.StopSequences) != 1 || req.StopSequences[0] != "END" {
+		t.Fatalf("stop_sequences = %v", req.StopSequences)
+	}
 	if req.Messages[0].Content != "hi" || req.Messages[1].Content != "hello" {
 		t.Fatalf("messages = %+v", req.Messages)
+	}
+}
+
+func TestMessagesRequestThink(t *testing.T) {
+	if think := (MessagesRequest{}).Think(); think != nil {
+		t.Fatalf("no thinking field should be nil, got %v", *think)
+	}
+	enabled := MessagesRequest{Thinking: &ThinkParam{Type: "enabled", BudgetTokens: 2048}}
+	if think := enabled.Think(); think == nil || !*think {
+		t.Fatalf("enabled should be true, got %v", think)
+	}
+	disabled := MessagesRequest{Thinking: &ThinkParam{Type: "disabled"}}
+	if think := disabled.Think(); think == nil || *think {
+		t.Fatalf("disabled should be false, got %v", think)
 	}
 }
 

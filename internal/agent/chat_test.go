@@ -62,7 +62,7 @@ func TestAskSendsToolsAndNeverRuns(t *testing.T) {
 func TestForwardTools(t *testing.T) {
 	mock := &model.Mock{Chunks: []string{"ok"}}
 	ctx := WithRequest(context.Background(),
-		NewRequest("m", nil, nil, []model.Tool{toolNamed("client_tool")}, "none"))
+		NewRequest(Request{Model: "m"}, []model.Tool{toolNamed("client_tool")}, "none"))
 	chat := NewChat(ctx, model.Bound(mock))
 
 	if _, err := chat.ForwardTools().WithTools(toolNamed("own_tool")).Ask(); err != nil {

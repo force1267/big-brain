@@ -14,18 +14,25 @@ import (
 type Request struct {
 	Model       string   // the model id the client asked for
 	Temperature *float64 // requested sampling temperature
+	TopP        *float64 // requested nucleus-sampling mass
+	TopK        *int64   // requested top-k sampling (Anthropic only; nil on OpenAI)
 	MaxTokens   *int64   // requested max output tokens
+	Stop        []string // requested stop sequences
+	Think       *bool    // requested extended reasoning (Anthropic "thinking", OpenAI "reasoning_effort")
 
 	tools      []model.Tool // the tools the client declared, bare (no handlers)
 	toolChoice string       // "" auto, "any"/"none", or a tool name
 }
 
-// NewRequest builds a Request including the client's declared tools. Tools are
-// unexported behind accessors because they are read-only context like the rest:
-// an agent decides what to forward, nothing forwards implicitly.
-func NewRequest(modelID string, temperature *float64, maxTokens *int64, tools []model.Tool, choice string) Request {
-	return Request{Model: modelID, Temperature: temperature, MaxTokens: maxTokens,
-		tools: tools, toolChoice: choice}
+// NewRequest builds a Request from its public sampling fields plus the
+// client's declared tools. Tools stay unexported behind accessors — like the
+// rest of Request, they're read-only context; an agent decides what to
+// forward, nothing forwards implicitly. Kept as a struct-plus-tools split
+// (not one flat constructor) because the public fields already have a home
+// on the type and grow independently of the tools/choice pair.
+func NewRequest(r Request, tools []model.Tool, choice string) Request {
+	r.tools, r.toolChoice = tools, choice
+	return r
 }
 
 // Tools returns the tools the client declared on this request. They arrive

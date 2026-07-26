@@ -67,6 +67,43 @@ func TestAnthropicStreamsDeltas(t *testing.T) {
 	}
 }
 
+// Think=true puts a budgeted thinking config on the wire; unset/false sends
+// nothing (the SDK omits a zero-value ThinkingConfigParamUnion).
+func TestAnthropicThinking(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer srv.Close()
+
+	m := Anthropic(srv.URL, "test-key", "claude-test")
+	think := true
+	stream, err := m.Stream(context.Background(), []Message{{Role: "user", Content: "hi"}}, Params{Think: &think})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	Collect(stream)
+	thinking, _ := body["thinking"].(map[string]any)
+	if thinking == nil || thinking["type"] != "enabled" {
+		t.Fatalf("thinking not on wire: %+v", body["thinking"])
+	}
+	if budget, _ := thinking["budget_tokens"].(float64); int64(budget) != defaultThinkBudget {
+		t.Fatalf("budget_tokens = %v, want %d", thinking["budget_tokens"], defaultThinkBudget)
+	}
+
+	body = nil
+	stream, err = m.Stream(context.Background(), []Message{{Role: "user", Content: "hi"}}, Params{})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	Collect(stream)
+	if _, ok := body["thinking"]; ok {
+		t.Fatalf("thinking sent when unset: %+v", body["thinking"])
+	}
+}
+
 func TestAnthropicUpstreamFailure(t *testing.T) {
 	srv := fakeAnthropicUpstream(t, http.StatusInternalServerError)
 	defer srv.Close()

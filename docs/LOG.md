@@ -1353,3 +1353,182 @@ under Models) updated in the same change.
 Next: Tier-3 cleanups (`bb.Workers` no-op, unwired `WithThink`, unused
 `Prompt`/Template, `groups.go` duplication, `Reply.Media` stub), or #2's tail
 (Webhook inbound, in-body durability, group-scheduler commit rule).
+
+## 2026-07-26 (6) — Tier-3 cleanups: all five closed
+
+Worked the Tier-3 punch list from `next.md` in one pass.
+
+1. **`bb.Workers`.** The doc comment was stale, not the code — it still said
+   "reserved; requests served per-connection" from before triggers/#2 shipped,
+   but `workers` has fed `engine.Run(ctx, workers)` (the durable-job worker
+   pool for `Trigger`/`Every`/`Once` bodies) since #2 landed. Reworded the
+   comment on both `internal/serve.Workers` and `bb.Workers` to say what it
+   actually controls; no code change, the wiring was already correct.
+2. **`WithThink` wired.** `model.Params` gained `Think *bool`; `Spec.Params()`
+   sets it from `thinkSet`. The Anthropic provider is the only consumer —
+   `p.Think != nil && *p.Think` sends `Thinking: ThinkingConfigParamOfEnabled`
+   with a fixed `defaultThinkBudget` (1024 tokens); OpenAI's provider doesn't
+   read the field, so it's silently a no-op there, same "nil/unset means not
+   sent" convention the rest of `Params` already uses. Tests: `Spec.Params()`
+   round-trips think (existing immutability/unset tests extended), a new
+   `TestAnthropicThinking` in `pkg/model/anthropic_test.go` asserts the wire
+   body carries `thinking:{type:enabled,budget_tokens:1024}` when set and
+   omits the field entirely when unset. `docs/authoring-guide.md`'s
+   `WithProvider` paragraph corrected — it previously implied `WithThink`
+   applied "either way" across providers, which stopped being true the moment
+   it does something on one of them. `cmd/marvis-demo/main.go` got a one-line
+   comment example next to the existing `WithProvider` note showing
+   `.WithProvider(bb.AnthropicProvider).WithThink(true)`.
+3. **`bb.Prompt`/`Template` deleted.** `pkg/bb/prompt.go` and its test removed
+   — unused by both demos, and the discussion with the user concluded its one
+   real differentiator over `text/template` (idempotent partial-fill: a
+   `{name}` placeholder survives `Render` untouched until every agent in a
+   flow has had a turn filling its own slice) isn't needed by anything today.
+   Re-add when a real multi-agent-prompt-composition need shows up, not
+   speculatively. `pkg/bb/effective.go`'s package doc no longer cites it as an
+   example of a value type bb implements directly.
+4. **`groups.go` duplication extracted.** `fanOut` (backing `All`/`One`) and
+   `groupGroup.run` (backing `Group`) had byte-for-byte identical inline
+   bookkeeping for two things: first-error-wins-and-cancels, and select-
+   conflict accumulation across contributing members. Pulled both into small
+   mutex-guarded types, `firstErr` and `selMerge`, that both call sites now
+   use instead of repeating the logic. Left the two run loops themselves
+   unmerged — their chat-sharing strategy (private clone-and-merge vs. one
+   live `SharedChat`) and `One`'s take-the-first-success-and-cancel path are
+   genuinely different, not incidental duplication, and forcing them into one
+   generic function would've traded readable duplication for a callback maze.
+   `go vet`/`gofmt` clean, `go test -race ./internal/flow/...` green.
+5. **`Reply.Media`/`ListMedia`.** Already flagged in `next.md`'s Tier-3 list
+   ("Fine as a stub, but note it's a promise not yet kept") and in the
+   PRODUCT audit's Missing section. Nothing to add — left as-is.
+
+`go build/vet/test ./...` green after all five. `next.md`'s Tier-3 section
+marked done inline; `bb.Workers`' entry there corrected the same way (it was
+never actually a no-op post-#2, only the doc lied).
+
+Next: #2's tail (Webhook inbound HTTP, in-body durability, group-scheduler
+commit rule, cycle-guard observability) — nothing else queued.
+
+## 2026-07-26 (7) — Serve-side think: the request half of the same gap
+
+Follow-up found immediately after closing the Tier-3 `WithThink` item: that
+work only wired the *consume* direction (bb asking its own upstream Anthropic
+model to think). The *serve* direction — a caller hitting `bb.Serve` and
+asking bb itself to think — was untouched, same shape as the caller-tools gap
+`#3` closed before Tools shipped: the field was silently parsed into nothing.
+
+- `agent.Request` gained `Think *bool`; `NewRequest` takes it as a new
+  parameter (all three call sites — `internal/serve/serve.go` ×2,
+  `internal/agent/chat_test.go` — updated).
+- `internal/anthropic/wire.go`: `MessagesRequest.Thinking *ThinkParam`
+  (`{"type":"enabled"|"disabled","budget_tokens":N}`, matching the real
+  Anthropic wire) plus a `Think() *bool` accessor — nil when the field is
+  absent, `true`/`false` from `Type`.
+- `internal/openai/wire.go`: `ChatRequest.ReasoningEffort string` (OpenAI's
+  actual field is an effort string, not a boolean; bb's `Think` is bare on/off
+  per the outbound design, so any non-empty value maps to `true`) plus a
+  matching `Think() *bool` accessor.
+- Both `internal/serve/serve.go` handlers pass `req.Think()` straight through
+  to `agent.NewRequest` — same "read-only context, never auto-applied" pattern
+  as `Temperature`/`MaxTokens`/`Tools`. A handler decides whether to build a
+  model with `.WithThink(true)` in response; nothing forwards implicitly.
+- Tests: wire-level `Think()` accessors in both `internal/openai/wire_test.go`
+  and `internal/anthropic/wire_test.go` (nil-when-absent, true/false mapping);
+  end-to-end `TestRequestParamsReachHandler`/
+  `TestRequestThinkReachesHandlerAnthropic` in `internal/serve/serve_test.go`
+  assert a real request body's think field lands on `turn.Request().Think`
+  through both protocols, and stays nil when omitted.
+- Docs: `docs/authoring-guide.md`'s Request-parameters section and worked
+  example mention `req.Think` alongside the existing params.
+
+`go build/vet/test -race ./...` green.
+
+Next: #2's tail — nothing else queued.
+
+## 2026-07-26 (8) — Request params audit: a real bug fixed, top_p/stop added
+
+Asked "what other standard request options aren't exposed" and checked both
+`ChatCompletionNewParams` (openai-go) and `MessageNewParams`
+(anthropic-sdk-go) field-by-field against `agent.Request`. Found one actual
+bug and two same-shape gaps worth closing; everything else (seed, penalties,
+logit_bias, service_tier, metadata, user/safety identifiers, `response_format`
+/`output_config`, audio/modalities/web_search) is billing/infra/a bigger
+design question, left alone as YAGNI.
+
+- **Bug fixed:** OpenAI's `max_tokens` is deprecated in favor of
+  `max_completion_tokens` and rejected outright by o-series reasoning
+  models — exactly the clients also likely to send `reasoning_effort`, which
+  we'd just wired. `ChatRequest` only ever parsed `max_tokens`, so a modern
+  client's cap silently vanished. Added `MaxCompletionTokens` alongside it and
+  a `MaxOutputTokens() *int64` accessor that prefers the current field,
+  falling back to the legacy one — `internal/serve/serve.go`'s OpenAI handler
+  now calls it instead of reading `MaxTokens` directly.
+- **`top_p` added** on both wires (`ChatRequest.TopP`, `MessagesRequest.TopP`)
+  — same "sampling knob as read-only context" shape as `Temperature`.
+- **Stop sequences added** — OpenAI's `stop` (`Stop`, a dual string-or-array
+  type mirroring the existing `ToolChoice` decode pattern) and Anthropic's
+  `stop_sequences` (already a plain `[]string` on that wire). Both land on
+  `agent.Request.Stop []string`.
+- **Anthropic's `top_k` added** (`MessagesRequest.TopK`) — Anthropic-only, so
+  `agent.Request.TopK` is nil on every OpenAI-served request; documented as
+  such rather than pretending it's cross-provider.
+- **`agent.NewRequest`'s signature changed shape**, not just grown again: this
+  was its third round of additions (temperature/maxTokens → +think → now
+  +topP/topK/stop), and continuing to add positional pointer params was
+  becoming a footgun (nine same-typed args in a row). Switched to
+  `NewRequest(r Request, tools []model.Tool, choice string) Request` — the
+  public sampling fields go in as a struct literal (self-documenting at each
+  call site via field names), tools/choice stay a separate pair because
+  they're genuinely a different kind of thing (unexported, accessor-gated).
+  All three call sites (`internal/serve/serve.go` ×2,
+  `internal/agent/chat_test.go`) updated to the new shape.
+- Tests: wire-level decode tests for `top_p`/`stop`/`stop_sequences`/`top_k`
+  in both `wire_test.go` files, a dedicated `MaxOutputTokens` precedence test,
+  and end-to-end serve-layer tests (`TestRequestParamsReachHandler` extended,
+  new `TestRequestLegacyMaxTokensStillWorks`) confirming a real request body's
+  values land on `turn.Request()` through both protocols.
+- Docs: `docs/authoring-guide.md`'s Request-parameters section and worked
+  example updated for the new fields and the `MaxOutputTokens` resolution.
+
+`go build/vet/test -race ./...` green.
+
+Next: #2's tail — nothing else queued.
+
+## 2026-07-26 — Expose `bb.DefaultFlowName`, tests for default-flow relabeling
+
+Prompted by noticing `internal/serve.Workers` had no caller anywhere; while
+auditing sibling options found `internal/serve.Name` was likewise wired but
+never exposed through the public `bb` facade (unlike `Addr`/`Workers`/
+`Trace`/`Store`, which all have `bb` wrappers).
+
+Decision: keep `Name`. It's the only knob for the reported model id of a
+flow served *without* going through the named-flow registry (bare
+`Serve(ctx, f)`/`Handler(f, ...)`, or `WithDefaultFlow`) — `WithFlow(f).As()`
+already covers named flows, but has no equivalent for those three unnamed
+paths, and using `.As` on them would demote their default-selection rank
+(see `internal/serve/registry.go`'s precedence table), which isn't what
+relabeling should do.
+
+Exposed it as `bb.DefaultFlowName` rather than `bb.Name` — the bare word was
+ambiguous against `WithFlow(f).As(name)`'s naming vocabulary and against the
+provider-model sense of "name" used elsewhere in `bb` (`Model`, `WithModel`,
+`NewModel`). Internal `serve.Name` left unrenamed; only the facade changed.
+
+- `pkg/bb/serve.go`: added `DefaultFlowName(n string) Option { return
+  serve.Name(n) }`, doc comment cross-references `WithFlow(f).As`.
+- `internal/serve/serve_test.go`: two new tests going through
+  `Handler`/`build` (not just constructing `*server` directly, which
+  wouldn't catch a regression in option wiring or precedence):
+  - `TestNameOptionRelabelsWithoutChangingRouting` — `Name` changes what
+    `/v1/models` and response bodies report for the default, while a
+    separately `WithFlow(...).As("sidekick")`-registered flow still routes
+    and reports correctly, unaffected.
+  - `TestNameOptionDoesNotChangePrecedence` — an explicit `Serve`/`Handler`
+    arg still outranks a registered default even when renamed via `Name`.
+  Verified both tests actually catch regressions by temporarily reintroducing
+  two bugs (option not wired to `c.name`; option a no-op) and confirming
+  failures, then reverting.
+
+`go build ./... && go test ./internal/serve/... ./pkg/bb/...` green.
+
+Next: nothing queued.

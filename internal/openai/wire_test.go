@@ -17,6 +17,65 @@ func TestChatRequestDecodesKnownAndIgnoresUnknown(t *testing.T) {
 	if !req.Stream || *req.Temperature != 0.7 || *req.MaxTokens != 5 || req.Messages[0].Content != "hi" {
 		t.Fatalf("req = %+v", req)
 	}
+	if req.TopP == nil || *req.TopP != 0.9 {
+		t.Fatalf("top_p = %v", req.TopP)
+	}
+}
+
+func TestChatRequestThink(t *testing.T) {
+	if think := (ChatRequest{}).Think(); think != nil {
+		t.Fatalf("no reasoning_effort should be nil, got %v", *think)
+	}
+	req := ChatRequest{ReasoningEffort: "high"}
+	if think := req.Think(); think == nil || !*think {
+		t.Fatalf("reasoning_effort set should be true, got %v", think)
+	}
+}
+
+// max_completion_tokens is the current field (max_tokens is deprecated and
+// rejected by o-series models); MaxOutputTokens must prefer it when both are
+// sent, and fall back to max_tokens when it's the only one present.
+func TestChatRequestMaxOutputTokens(t *testing.T) {
+	if got := (ChatRequest{}).MaxOutputTokens(); got != nil {
+		t.Fatalf("unset should be nil, got %v", *got)
+	}
+	legacyOnly := ChatRequest{}
+	mt := int64(5)
+	legacyOnly.MaxTokens = &mt
+	if got := legacyOnly.MaxOutputTokens(); got == nil || *got != 5 {
+		t.Fatalf("max_tokens fallback = %v", got)
+	}
+	both := legacyOnly
+	mct := int64(9)
+	both.MaxCompletionTokens = &mct
+	if got := both.MaxOutputTokens(); got == nil || *got != 9 {
+		t.Fatalf("max_completion_tokens should win, got %v", got)
+	}
+}
+
+// Stop decodes both wire shapes this format allows.
+func TestChatRequestStop(t *testing.T) {
+	var single ChatRequest
+	if err := json.Unmarshal([]byte(`{"stop":"STOP"}`), &single); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(single.Stop) != 1 || single.Stop[0] != "STOP" {
+		t.Fatalf("single stop = %v", single.Stop)
+	}
+	var multi ChatRequest
+	if err := json.Unmarshal([]byte(`{"stop":["a","b"]}`), &multi); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(multi.Stop) != 2 || multi.Stop[0] != "a" || multi.Stop[1] != "b" {
+		t.Fatalf("array stop = %v", multi.Stop)
+	}
+	var none ChatRequest
+	if err := json.Unmarshal([]byte(`{}`), &none); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if none.Stop != nil {
+		t.Fatalf("omitted stop should be nil, got %v", none.Stop)
+	}
 }
 
 func TestWriteResponseShape(t *testing.T) {

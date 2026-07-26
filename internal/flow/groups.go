@@ -12,6 +12,63 @@ import (
 // The grouping strategies run member flows concurrently, differing in how chat
 // is shared and when the group ends. Select (select.go) is the fourth strategy:
 // route to exactly one member by id.
+//
+// fanOut and groupGroup.run both fan out over members with a WaitGroup and
+// need the same two bits of concurrent bookkeeping — record the first error
+// and cancel the rest, and detect a select disagreement across contributing
+// members — so those two are pulled out as firstErr/selMerge rather than
+// duplicated. Everything else (private clone-and-merge vs. one live shared
+// chat, One's take-the-first-success-and-cancel) is genuinely different
+// between the two and stays that way.
+
+// firstErr records the first error from a set of concurrent goroutines and
+// cancels the rest exactly once.
+type firstErr struct {
+	mu  sync.Mutex
+	err error
+}
+
+func (f *firstErr) set(err error, cancel context.CancelFunc) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err == nil {
+		f.err = err
+		cancel()
+	}
+}
+
+func (f *firstErr) get() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.err
+}
+
+// selMerge accumulates each contributing member's Select outcome and flags a
+// conflict when two disagree.
+type selMerge struct {
+	mu       sync.Mutex
+	selected string
+	hasSel   bool
+	conflict bool
+}
+
+func (s *selMerge) add(sel string, has bool) {
+	if !has {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hasSel && s.selected != sel {
+		s.conflict = true
+	}
+	s.selected, s.hasSel = sel, true
+}
+
+func (s *selMerge) get() (selected string, hasSel, conflict bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.selected, s.hasSel, s.conflict
+}
 
 // All runs every member concurrently, each over its own copy of the incoming
 // chat; all of their new replies merge into the output; it ends when all
@@ -75,40 +132,28 @@ func (g groupGroup) run(ctx context.Context, in State) (State, error) {
 	defer cancel()
 
 	var (
-		mu       sync.Mutex
-		wg       sync.WaitGroup
-		firstErr error
-		selected string
-		hasSel   bool
-		conflict bool
+		wg  sync.WaitGroup
+		fe  firstErr
+		sel selMerge
 	)
 	for i, m := range g.members {
 		wg.Add(1)
 		go func(i int, m Flow) {
 			defer wg.Done()
 			out, err := m.run(indexPath(gctx, i), State{Chat: shared.Snapshot()})
-			mu.Lock()
-			defer mu.Unlock()
 			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-					cancel()
-				}
+				fe.set(err, cancel)
 				return
 			}
-			if out.hasSel {
-				if hasSel && selected != out.selected {
-					conflict = true
-				}
-				selected, hasSel = out.selected, true
-			}
+			sel.add(out.selected, out.hasSel)
 		}(i, m)
 	}
 	wg.Wait()
 
-	if firstErr != nil {
-		return in, firstErr
+	if err := fe.get(); err != nil {
+		return in, err
 	}
+	selected, hasSel, conflict := sel.get()
 	if conflict {
 		return in, fmt.Errorf("%w: group members", ErrSelectConflict)
 	}
@@ -132,15 +177,13 @@ func fanOut(ctx context.Context, members []Flow, in State, first bool) (State, e
 	}
 
 	var (
-		mu       sync.Mutex
-		wg       sync.WaitGroup
-		merged   []model.Message
-		selected string
-		hasSel   bool
-		conflict bool
-		firstErr error
-		won      bool // One: a winner has been taken
-		winner   result
+		mu     sync.Mutex
+		wg     sync.WaitGroup
+		fe     firstErr
+		sel    selMerge
+		merged []model.Message
+		won    bool // One: a winner has been taken
+		winner result
 	)
 	base := len(in.Chat)
 
@@ -149,36 +192,30 @@ func fanOut(ctx context.Context, members []Flow, in State, first bool) (State, e
 		go func(i int, m Flow) {
 			defer wg.Done()
 			out, err := m.run(indexPath(cctx, i), State{Chat: cloneMsgs(in.Chat)})
-			mu.Lock()
-			defer mu.Unlock()
 			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-					cancel()
-				}
+				fe.set(err, cancel)
 				return
 			}
 			r := result{newReplies: out.Chat[base:], selected: out.selected, hasSel: out.hasSel}
 			if first {
+				mu.Lock()
 				if !won {
 					won, winner = true, r
 					cancel() // first success cancels the others
 				}
+				mu.Unlock()
 				return
 			}
+			mu.Lock()
 			merged = append(merged, r.newReplies...)
-			if r.hasSel {
-				if hasSel && selected != r.selected {
-					conflict = true
-				}
-				selected, hasSel = r.selected, true
-			}
+			mu.Unlock()
+			sel.add(r.selected, r.hasSel)
 		}(i, m)
 	}
 	wg.Wait()
 
-	if firstErr != nil && !(first && won) {
-		return in, firstErr
+	if err := fe.get(); err != nil && !(first && won) {
+		return in, err
 	}
 	if first {
 		if !won {
@@ -188,6 +225,7 @@ func fanOut(ctx context.Context, members []Flow, in State, first bool) (State, e
 		out.selected, out.hasSel = winner.selected, winner.hasSel
 		return out, nil
 	}
+	selected, hasSel, conflict := sel.get()
 	if conflict {
 		return in, fmt.Errorf("%w: group members", ErrSelectConflict)
 	}

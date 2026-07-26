@@ -106,6 +106,73 @@ func TestDiagnostics(t *testing.T) {
 	}
 }
 
+// Name relabels the default flow's reported id (responses and /v1/models)
+// without changing which flow is selected as default, and without disturbing
+// routing to flows registered separately by name.
+func TestNameOptionRelabelsWithoutChangingRouting(t *testing.T) {
+	ResetRegistry()
+	t.Cleanup(ResetRegistry)
+
+	SetName(AddUnnamed(talkFlow("named reply")), "sidekick")
+
+	h, err := Handler(talkFlow("default reply"), Name("jarvis"))
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+
+	// /v1/models reports the custom name, plus the independently named flow.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
+	if !strings.Contains(rec.Body.String(), "jarvis") || !strings.Contains(rec.Body.String(), "sidekick") {
+		t.Fatalf("models: %s", rec.Body)
+	}
+
+	// A request naming no model hits the default and echoes the custom name.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`)))
+	var resp struct {
+		Model   string `json:"model"`
+		Choices []struct {
+			Message struct{ Content string } `json:"message"`
+		} `json:"choices"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Model != "jarvis" || resp.Choices[0].Message.Content != "default reply" {
+		t.Fatalf("default response = %+v, want model=jarvis reply=default reply", resp)
+	}
+
+	// A request naming the separately-registered flow still routes to it,
+	// unaffected by the default's relabeling.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"sidekick","messages":[{"role":"user","content":"hi"}]}`)))
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Model != "sidekick" || resp.Choices[0].Message.Content != "named reply" {
+		t.Fatalf("named response = %+v, want model=sidekick reply=named reply", resp)
+	}
+}
+
+// Passing Serve(ctx, f)/Handler(f) directly always outranks any registered
+// flow, whether or not Name is set — Name only relabels, it never affects
+// precedence.
+func TestNameOptionDoesNotChangePrecedence(t *testing.T) {
+	ResetRegistry()
+	t.Cleanup(ResetRegistry)
+
+	AddDefault(talkFlow("explicit default"))
+	explicitDefault := talkFlow("serve-arg default")
+
+	s, _, err := build(explicitDefault, Name("renamed"))
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if s.def != explicitDefault {
+		t.Fatal("Serve/Handler arg should still outrank a registered default even when renamed")
+	}
+	if s.name != "renamed" {
+		t.Fatalf("name = %q, want renamed", s.name)
+	}
+}
+
 // /models lists the brain.
 func TestModels(t *testing.T) {
 	s := &server{def: talkFlow("x"), name: "jarvis", tracer: &ring{max: 1}, ring: &ring{max: 1}}
@@ -127,7 +194,8 @@ func TestRequestParamsReachHandler(t *testing.T) {
 			return nil
 		})).WithId("cap")
 	s := serverFor(capture)
-	body := `{"model":"acme/x","temperature":0.2,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+	body := `{"model":"acme/x","temperature":0.2,"top_p":0.8,"max_completion_tokens":16,
+		"stop":["END"],"reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`
 	s.openai(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
 
 	if got.Model != "acme/x" {
@@ -136,8 +204,72 @@ func TestRequestParamsReachHandler(t *testing.T) {
 	if got.Temperature == nil || *got.Temperature != 0.2 {
 		t.Fatalf("temperature = %v", got.Temperature)
 	}
+	if got.TopP == nil || *got.TopP != 0.8 {
+		t.Fatalf("top_p = %v", got.TopP)
+	}
+	// max_completion_tokens is the current field; it must win over a
+	// (here-absent) legacy max_tokens, per MaxOutputTokens.
 	if got.MaxTokens == nil || *got.MaxTokens != 16 {
 		t.Fatalf("max_tokens = %v", got.MaxTokens)
+	}
+	if len(got.Stop) != 1 || got.Stop[0] != "END" {
+		t.Fatalf("stop = %v", got.Stop)
+	}
+	if got.Think == nil || !*got.Think {
+		t.Fatalf("think = %v", got.Think)
+	}
+}
+
+// The deprecated max_tokens still works when max_completion_tokens is absent.
+func TestRequestLegacyMaxTokensStillWorks(t *testing.T) {
+	var got agent.Request
+	capture := flow.New().WithAgent(
+		agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
+			got = turn.Request()
+			turn.Reply("ok")
+			return nil
+		})).WithId("cap")
+	s := serverFor(capture)
+	body := `{"model":"acme/x","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+	s.openai(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+	if got.MaxTokens == nil || *got.MaxTokens != 16 {
+		t.Fatalf("max_tokens fallback = %v", got.MaxTokens)
+	}
+}
+
+// The Anthropic wire's "thinking" object reaches the handler the same way,
+// and an absent field stays nil rather than defaulting to false.
+func TestRequestThinkReachesHandlerAnthropic(t *testing.T) {
+	var got agent.Request
+	capture := flow.New().WithAgent(
+		agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
+			got = turn.Request()
+			turn.Reply("ok")
+			return nil
+		})).WithId("cap")
+	s := serverFor(capture)
+	body := `{"model":"acme/x","max_tokens":16,"top_p":0.8,"top_k":5,"stop_sequences":["END"],
+		"thinking":{"type":"enabled","budget_tokens":1024},"messages":[{"role":"user","content":"hi"}]}`
+	s.anthropic(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body)))
+
+	if got.Think == nil || !*got.Think {
+		t.Fatalf("think = %v", got.Think)
+	}
+	if got.TopP == nil || *got.TopP != 0.8 {
+		t.Fatalf("top_p = %v", got.TopP)
+	}
+	if got.TopK == nil || *got.TopK != 5 {
+		t.Fatalf("top_k = %v", got.TopK)
+	}
+	if len(got.Stop) != 1 || got.Stop[0] != "END" {
+		t.Fatalf("stop = %v", got.Stop)
+	}
+
+	got = agent.Request{}
+	noThink := `{"model":"acme/x","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+	s.anthropic(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/messages", strings.NewReader(noThink)))
+	if got.Think != nil {
+		t.Fatalf("think should be nil when omitted, got %v", *got.Think)
 	}
 }
 

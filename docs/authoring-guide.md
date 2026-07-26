@@ -68,9 +68,11 @@ bb.NewModel().WithName("claude-sonnet-5").WithProvider(bb.AnthropicProvider)
 ```
 
 `WithProvider` is the only thing that changes — the same registry, tags,
-`WithTemprature`/`WithThink`, and inheritance ladder apply either way. This is
-independent of `bb.Serve`, which always speaks both the OpenAI and Anthropic
-wire protocols to *callers* regardless of which provider a brain *consumes*.
+`WithTemprature`, and inheritance ladder apply either way. `WithThink(true)`
+requests extended reasoning mode; only the Anthropic provider honors it (a
+fixed token budget), OpenAI silently ignores it. This is independent of `bb.Serve`, which always speaks both the
+OpenAI and Anthropic wire protocols to *callers* regardless of which provider
+a brain *consumes*.
 
 **Which model an agent asks** is resolved along a ladder, first match wins:
 
@@ -128,8 +130,9 @@ self-modification stays impossible.
 - `ctx` is this turn's context; it is done when the handler returns. Pass it to
   any I/O you do so cancellation is respected.
 - `turn.Request()` is the client's request as context: the sampling parameters
-  it sent (`model`, `temperature`, `max_tokens`, …). They are **not** applied to
-  your agent automatically — they are an input for the handler to read and act on.
+  it sent (`model`, `temperature`, `top_p`, `max_tokens`, `stop`, `think`, …).
+  They are **not** applied to your agent automatically — they are an input for
+  the handler to read and act on.
 
 **Request parameters.** The engine never silently honors a client's sampling
 knobs; it hands them to the flow so _you_ decide. A handler can honor, clamp,
@@ -142,8 +145,14 @@ OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
         chat.Add(bb.NewMessage("Answer in one short sentence.").As("system"))
     }
     // req.Model is the model id the client asked for (also what selects a
-    // named flow at the serving layer); req.Temperature is theirs to weigh in.
+    // named flow at the serving layer); req.Temperature/TopP/Stop are theirs
+    // to weigh in. req.TopK is Anthropic-only (nil on OpenAI requests).
+    // req.MaxTokens already resolves OpenAI's deprecated max_tokens vs. the
+    // current max_completion_tokens for you — one field either way.
     // req.Tools() / req.ToolChoice() are the tools the client declared.
+    // req.Think (Anthropic "thinking", OpenAI "reasoning_effort") is nil when
+    // the client sent no opinion; non-nil is a request, not a command — the
+    // agent's own model decides whether WithThink means anything to it.
     chat.Add(turn.Last())
     reply, err := chat.Ask() // asks with the agent's own model config, not req's
     // ...
@@ -500,6 +509,7 @@ err := bb.Serve(ctx, flow,                 // or own the listener + shutdown
     bb.Addr(":8080"),
     bb.Trace(bb.JSONL(os.Stdout)),         // jsonl trace of every flow
     bb.Store(bb.MemStore()),               // durable checkpointing
+    bb.DefaultFlowName("jarvis"),          // reported id, default "brain"
 )
 ```
 
@@ -507,6 +517,13 @@ err := bb.Serve(ctx, flow,                 // or own the listener + shutdown
 agents, unbuildable models, and declared Select exits with no matching member
 all fail before the port binds. That is the single place wiring errors surface;
 the other is `Ask` (schema/transport, at runtime).
+
+`bb.DefaultFlowName` only labels a flow served **without** a registry name —
+the `flow` passed straight to `Serve`/`Handler`, or one added via
+`bb.WithDefaultFlow`. It sets what `/v1/models` and every response's `model`
+field report for that flow; it never affects routing. A flow named via
+`bb.WithFlow(f).As("acme/coder")` (below) already reports that name and
+ignores `DefaultFlowName`.
 
 Endpoints: `POST /v1/chat/completions` (OpenAI), `POST /v1/messages`
 (Anthropic), `GET /v1/models`, `GET /v1/diagnostics/trace`.
