@@ -59,21 +59,24 @@ func (s *engineScheduler) run(ctx context.Context, workers int) error {
 	return s.eng.Run(ctx, workers)
 }
 
-// wireScheduler builds the engine-backed scheduler over store and runs every
-// registered trigger chain at startup, which schedules their crons/one-shots
-// (Every/Once). Shared by build (HTTP) and Run (no HTTP).
-func wireScheduler(store flow.Store) (*engineScheduler, error) {
+// wireScheduler builds the engine-backed scheduler over store and a webhook
+// registry, then runs every registered trigger chain at startup — which
+// schedules their crons/one-shots (Every/Once) and registers their webhook
+// endpoints (Webhook). Shared by build (HTTP) and Run (no HTTP); Run has no
+// mux to expose webhook endpoints on, but registration itself is harmless.
+func wireScheduler(store flow.Store) (*engineScheduler, *webhookRegistry, error) {
 	sched, err := newEngineScheduler(store)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	sctx := flow.WithScheduler(flow.WithStore(context.Background(), store, ""), sched)
+	hooks := newWebhookRegistry()
+	sctx := flow.WithWebhooks(flow.WithScheduler(flow.WithStore(context.Background(), store, ""), sched), hooks)
 	for _, tc := range flow.RegisteredTriggers() {
 		if err := tc.RunAtStartup(sctx); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	return sched, nil
+	return sched, hooks, nil
 }
 
 // Run drives registered triggers and their scheduled bodies over the durable
@@ -88,7 +91,7 @@ func Run(ctx context.Context, opts ...Option) error {
 	for _, o := range opts {
 		o(&c)
 	}
-	sched, err := wireScheduler(c.store)
+	sched, _, err := wireScheduler(c.store)
 	if err != nil {
 		return err
 	}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/force1267/big-brain/internal/agent"
+	"github.com/force1267/big-brain/pkg/model"
 )
 
 // recordAgent appends its label when it runs (sequential in these tests).
@@ -18,6 +19,25 @@ func recordAgent(ran *[]string, label string) agent.Agent {
 		turn.Reply(label)
 		return nil
 	})
+}
+
+// mockWebhooks records what was registered and can fire it.
+type mockWebhooks struct {
+	mu    sync.Mutex
+	hooks map[string]WebhookHandler
+}
+
+func (m *mockWebhooks) Register(endpointID string, h WebhookHandler) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.hooks == nil {
+		m.hooks = map[string]WebhookHandler{}
+	}
+	if _, dup := m.hooks[endpointID]; dup {
+		return errors.New("duplicate endpoint id")
+	}
+	m.hooks[endpointID] = h
+	return nil
 }
 
 // mockScheduler records what was deferred and can run it.
@@ -203,5 +223,104 @@ func TestTriggerDepthThreadsThroughFire(t *testing.T) {
 	}
 	if tp.Depth != 2 {
 		t.Fatalf("expected nested body depth 2, got %d", tp.Depth)
+	}
+}
+
+// A Webhook trigger registers under the explicit endpoint id, independent of
+// the body's own WithId (or lack of one) — unlike Once/Every, an unnamed body
+// is not skipped.
+func TestWebhookRegistersUnderEndpointID(t *testing.T) {
+	var ran []string
+	wh := &mockWebhooks{}
+	chain := New().WithAgent(recordAgent(&ran, "before")).
+		Next(Webhook("my-endpoint")).Next(New().WithAgent(recordAgent(&ran, "after")))
+
+	ctx := WithWebhooks(context.Background(), wh)
+	if _, err := Run(ctx, chain, chat("go"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(ran) != 1 || ran[0] != "before" {
+		t.Fatalf("only the pre-trigger flow should run inline, got %v", ran)
+	}
+	h, ok := wh.hooks["my-endpoint"]
+	if !ok {
+		t.Fatalf("endpoint not registered: %+v", wh.hooks)
+	}
+	if _, err := h.Run(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(ran) != 2 || ran[1] != "after" {
+		t.Fatalf("firing the webhook did not run the after-flow: %v", ran)
+	}
+}
+
+// HasReply reflects whether the body reaches a top-level Respond.
+func TestWebhookHasReply(t *testing.T) {
+	wh := &mockWebhooks{}
+
+	withReply := Trigger().Next(Webhook("with-reply")).Next(Respond)
+	t.Cleanup(ResetTriggers)
+	if err := withReply.RunAtStartup(WithWebhooks(context.Background(), wh)); err != nil {
+		t.Fatal(err)
+	}
+	if !wh.hooks["with-reply"].HasReply {
+		t.Fatal("expected HasReply true when the body ends in Respond")
+	}
+
+	noReply := Trigger().Next(Webhook("no-reply")).Next(New().WithAgent(recordAgent(&[]string{}, "x")))
+	if err := noReply.RunAtStartup(WithWebhooks(context.Background(), wh)); err != nil {
+		t.Fatal(err)
+	}
+	if wh.hooks["no-reply"].HasReply {
+		t.Fatal("expected HasReply false with no top-level Respond")
+	}
+}
+
+// A webhook's incoming payload is readable via bb.Payload[T] (agent.PayloadFrom),
+// and Chat/Req seeded on the Trigger chain up to the Webhook node is replayed on
+// every fire, same as Every/Once replay their captured state.
+func TestWebhookPayloadAndSeedReplay(t *testing.T) {
+	var seenPayload []string
+	var seenChat []string
+	reader := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
+		seenPayload = append(seenPayload, string(turn.Payload()))
+		if len(turn.Messages) > 0 {
+			seenChat = append(seenChat, turn.Messages[0].Content)
+		}
+		turn.Reply("ok")
+		return nil
+	})
+	wh := &mockWebhooks{}
+	tc := Trigger(WithSeedChat(model.Message{Role: "system", Content: "seeded"})).
+		Next(Webhook("stripe-payment")).Next(New().WithAgent(reader))
+	t.Cleanup(ResetTriggers)
+
+	if err := tc.RunAtStartup(WithWebhooks(context.Background(), wh)); err != nil {
+		t.Fatal(err)
+	}
+	h := wh.hooks["stripe-payment"]
+
+	for i, payload := range []string{`{"amount":1}`, `{"amount":2}`} {
+		if _, err := h.Run(context.Background(), []byte(payload)); err != nil {
+			t.Fatal(err)
+		}
+		if seenPayload[i] != payload {
+			t.Fatalf("fire %d: expected payload %q, got %q", i, payload, seenPayload[i])
+		}
+		if seenChat[i] != "seeded" {
+			t.Fatalf("fire %d: expected seeded chat to replay, got %q", i, seenChat[i])
+		}
+	}
+}
+
+// The cycle guard applies uniformly to Webhook, not just Once/Every.
+func TestWebhookCycleGuard(t *testing.T) {
+	wh := &mockWebhooks{}
+	tn := &triggerNode{webhook: "deep"}
+	body := New().WithAgent(recordAgent(&[]string{}, "x"))
+
+	ctx := WithWebhooks(withTriggerDepth(context.Background(), maxTriggerDepth), wh)
+	if _, err := deferBody(ctx, tn, []Flow{body}, State{}); !errors.Is(err, ErrTriggerCycle) {
+		t.Fatalf("expected ErrTriggerCycle past the cap, got %v", err)
 	}
 }

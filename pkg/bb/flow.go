@@ -56,6 +56,19 @@ func Every(spec string) Flow { return flow.Every(spec) }
 // working past the reply ("I'll text you when it's done").
 func Once(t time.Time) Flow { return flow.Once(t) }
 
+// Webhook defers the flow after it to run whenever an inbound
+// POST /v1/hooks/{endpointID} arrives — the reception half of bb.Payload.
+// endpointID is the route slug, chosen here explicitly and independent of
+// the body's own WithId (a public URL a caller hardcodes vs. an internal
+// Durable/Select identity — different concerns). The request body is read
+// back inside via bb.Payload[T]. If the body reaches a top-level Respond,
+// Serve waits for it and replies with its content; otherwise it acknowledges
+// immediately (202) and runs the body in the background — don't block a
+// webhook sender on a long job. No auth, rate limiting, or body-size cap is
+// applied — put a reverse proxy/gateway in front before exposing this, and
+// don't rely on endpointID as a secret.
+func Webhook(endpointID string) Flow { return flow.Webhook(endpointID) }
+
 // TriggerChain is the head of a non-request pipeline (see Trigger).
 type TriggerChain = flow.TriggerChain
 

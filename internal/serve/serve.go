@@ -70,6 +70,7 @@ type server struct {
 	ring   *ring
 	store  flow.Store
 	sched  *engineScheduler // nil when no store: triggers/initiative disabled
+	hooks  *webhookRegistry
 }
 
 // Handler validates the flow and returns its http.Handler for embedding. All
@@ -109,15 +110,17 @@ func build(f flow.Flow, opts ...Option) (*server, http.Handler, error) {
 	// Triggers/initiative need a store to schedule against. c.store defaults to
 	// an in-memory one (defaults()), so this always runs unless wiring itself
 	// fails.
-	sched, err := wireScheduler(c.store)
+	sched, hooks, err := wireScheduler(c.store)
 	if err != nil {
 		return nil, nil, err
 	}
 	s.sched = sched
+	s.hooks = hooks
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/chat/completions", s.openai)
 	mux.HandleFunc("POST /v1/messages", s.anthropic)
+	mux.HandleFunc("POST /v1/hooks/{id}", s.webhook)
 	mux.HandleFunc("GET /v1/models", s.models)
 	mux.HandleFunc("GET /v1/diagnostics/trace", s.diagnostics)
 	return s, mux, nil
@@ -182,7 +185,10 @@ type reply struct {
 	calls []model.ToolCall
 }
 
-func (s *server) run(ctx context.Context, f flow.Flow, runID string, msgs []model.Message, req agent.Request) (reply, error) {
+// triggerCtx wires Store/Scheduler/Webhooks onto ctx — everything a flow needs
+// to reach a Durable checkpoint or a mid-flow Once/Every/Webhook, regardless
+// of what kind of request is running it. runID empty gets a fresh one.
+func (s *server) triggerCtx(ctx context.Context, runID string) context.Context {
 	if s.store != nil {
 		if runID == "" {
 			runID = uuid.NewString()
@@ -195,6 +201,15 @@ func (s *server) run(ctx context.Context, f flow.Flow, runID string, msgs []mode
 		// A mid-request Once/Every can defer work to run after the reply.
 		ctx = flow.WithScheduler(ctx, s.sched)
 	}
+	if s.hooks != nil {
+		// A mid-request Webhook registers a new endpoint on the fly.
+		ctx = flow.WithWebhooks(ctx, s.hooks)
+	}
+	return ctx
+}
+
+func (s *server) run(ctx context.Context, f flow.Flow, runID string, msgs []model.Message, req agent.Request) (reply, error) {
+	ctx = s.triggerCtx(ctx, runID)
 	out, err := flow.Run(ctx, f, flow.State{Chat: msgs, Req: req}, s.tracer)
 	if err != nil {
 		return reply{}, err

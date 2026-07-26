@@ -29,9 +29,10 @@ const maxTriggerDepth = 8
 // recurring (a cron), Once fires a single time. Because scheduling is just a flow
 // node, an HTTP request, a cron, and a boot task all run the same executor.
 type triggerNode struct {
-	cron string    // non-empty: recurring
-	at   time.Time // Once: when to fire
-	once bool
+	cron    string    // non-empty: recurring
+	at      time.Time // Once: when to fire
+	once    bool
+	webhook string // non-empty: HTTP-triggered, the endpoint id
 }
 
 // Every defers the flow after it to run on the cron schedule spec.
@@ -39,6 +40,16 @@ func Every(spec string) Flow { return &triggerNode{cron: spec} }
 
 // Once defers the flow after it to run a single time at t.
 func Once(t time.Time) Flow { return &triggerNode{once: true, at: t} }
+
+// Webhook defers the flow after it to run whenever POST /v1/hooks/{endpointID}
+// is called. endpointID is the HTTP route slug, chosen explicitly here —
+// deliberately independent of the body's own WithId, since the two are
+// different concerns: a public URL a third party hardcodes vs. an internal
+// Durable/Select identity. The incoming request's body is what the fired body
+// reads back via bb.Payload[T]; whatever Chat/Req was accumulated up to this
+// node (e.g. via Trigger's WithSeedChat/WithSeedRequest) is replayed on every
+// fire, same as Every/Once replay their captured state.
+func Webhook(endpointID string) Flow { return &triggerNode{webhook: endpointID} }
 
 // A bare trigger run (not inside a seq that splits it) is a pass-through: there
 // is nothing after it to defer.
@@ -69,6 +80,40 @@ func schedulerFrom(ctx context.Context) Scheduler {
 	return s
 }
 
+// Webhooks is where a Webhook trigger registers its body, keyed by the
+// endpoint id an author chose explicitly — not the body's own WithId (see
+// Webhook's doc). Unlike Scheduler, firing a webhook is a normal synchronous
+// run, not a durable schedule, so this needs no Store; Serve wires it
+// unconditionally.
+type Webhooks interface {
+	Register(endpointID string, h WebhookHandler) error
+}
+
+// WebhookHandler is what a Webhook trigger hands the registry. HasReply
+// reports whether the body reaches a top-level Respond (same shallow scan
+// terminalStep uses — it does not see through Select/One/All/Group; see
+// next.md #5): Serve waits for the run and replies with its content only
+// when true, else it acknowledges immediately and runs the body in the
+// background. Run executes the body with the incoming request's raw payload,
+// readable inside via bb.Payload[T], and returns the resulting chat.
+type WebhookHandler struct {
+	HasReply bool
+	Run      func(ctx context.Context, payload []byte) (State, error)
+}
+
+type webhooksKey struct{}
+
+// WithWebhooks puts the webhook registry on ctx (Serve, for both trigger
+// chains at startup and requests that may hit a mid-chain Webhook).
+func WithWebhooks(ctx context.Context, w Webhooks) context.Context {
+	return context.WithValue(ctx, webhooksKey{}, w)
+}
+
+func webhooksFrom(ctx context.Context) Webhooks {
+	w, _ := ctx.Value(webhooksKey{}).(Webhooks)
+	return w
+}
+
 type triggerDepthKey struct{}
 
 // withTriggerDepth carries the current trigger-lineage depth into a fired
@@ -92,6 +137,9 @@ func triggerDepthFrom(ctx context.Context) int {
 // loser. See fanOut's "KNOWN GAP" comment in groups.go for the consequence
 // and the fix this needs (next.md #2's tail).
 func deferBody(ctx context.Context, tn *triggerNode, rest []Flow, in State) (State, error) {
+	if tn.webhook != "" {
+		return registerWebhook(ctx, tn, rest, in)
+	}
 	sch := schedulerFrom(ctx)
 	if sch == nil || len(rest) == 0 {
 		return in, nil // no engine, or nothing to defer — just stop
@@ -124,6 +172,50 @@ func deferBody(ctx context.Context, tn *triggerNode, rest []Flow, in State) (Sta
 		return in, err
 	}
 	return in, nil
+}
+
+// registerWebhook hands the continuation to the webhook registry, keyed by
+// the endpoint id (not the body's id — see Webhook's doc). Unlike
+// Every/Once, there is no fixed payload to capture: the incoming HTTP body
+// supplies fresh Data on every fire, while Chat/Req accumulated up to this
+// node (e.g. a Trigger's seed) is snapshotted here and replayed on every
+// fire, same as Every/Once replay their captured state.
+func registerWebhook(ctx context.Context, tn *triggerNode, rest []Flow, in State) (State, error) {
+	wh := webhooksFrom(ctx)
+	if wh == nil || len(rest) == 0 {
+		return in, nil // no registry wired, or nothing to defer — just stop
+	}
+	depth := triggerDepthFrom(ctx) + 1
+	if depth > maxTriggerDepth {
+		err := fmt.Errorf("%w: webhook %q nested %d triggers deep (max %d)", ErrTriggerCycle, tn.webhook, depth, maxTriggerDepth)
+		logrus.WithField("endpoint", tn.webhook).WithField("depth", depth).Error(err)
+		return in, err
+	}
+	body := seqOf(rest)
+	seedChat := append([]model.Message(nil), in.Chat...)
+	seedReq := in.Req
+	hasReply := containsRespond(rest)
+	run := func(rctx context.Context, payload []byte) (State, error) {
+		rctx = agent.WithPayload(rctx, payload)
+		rctx = withTriggerDepth(rctx, depth)
+		return Run(rctx, body, State{Chat: append([]model.Message(nil), seedChat...), Req: seedReq}, NoTrace{})
+	}
+	if err := wh.Register(tn.webhook, WebhookHandler{HasReply: hasReply, Run: run}); err != nil {
+		return in, err
+	}
+	return in, nil
+}
+
+// containsRespond reports whether a top-level Respond appears among steps —
+// the same shallow scan terminalStep uses. It does not see through
+// Select/One/All/Group (next.md #5).
+func containsRespond(steps []Flow) bool {
+	for _, f := range steps {
+		if _, ok := f.(respond); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // triggerPayload is the request context captured at schedule time and replayed

@@ -124,6 +124,12 @@ func main() {
 	//   bb.Trigger().Next(bb.Every("0 21 * * *")).Next(nightly) // registered outside Serve; fires every night at 21:00
 	// bb.Once also works mid-flow, after Respond, to keep working past the reply ("I'll text you when it's done"):
 	//   intentDiscovery.Next(capabilities).Next(bb.Respond).Next(bb.Once(when)).Next(followUp)
+	// bb.Webhook(endpointID) fires on an inbound POST /v1/hooks/{endpointID} instead of a cron/time — the
+	// reception half of bb.Payload. endpointID is the route slug, deliberately separate from the body's
+	// own WithId (a public URL a caller hardcodes vs. an internal Durable/Select identity):
+	//   bb.Trigger().Next(bb.Webhook("doorbell")).Next(bb.NewFlow().WithAgent(announceVisitor))
+	// with a Respond in that body, Serve waits and replies 200 with it; without one, it replies 202
+	// right away and runs the body in the background — don't block the caller on a long job.
 	// A flow that re-triggers itself (an agent scheduling FlowNightly again) is how you loop or recurse durably —
 	// each run is a fresh, checkpointed run. Cycles are re-triggers, not Next loops.
 	// A trigger can seed data a flow reads back: bb.Trigger(bb.WithSeedPayload(x)). Inside an agent,

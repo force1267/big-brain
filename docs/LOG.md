@@ -1624,3 +1624,93 @@ to on a nil store), already exposed at the `bb` layer as `bb.MemStore()`.
 
 `go build ./... && go vet ./... && go test ./...` green (existing tests
 already ran without `bb.Store(...)` in several places, and still pass).
+
+## 2026-07-26 — Webhook inbound HTTP (next.md #1), design + build
+
+Discussed the design in conversation first (recorded in next.md #1), then
+built it in the same session.
+
+Design decisions, settled in discussion before writing code:
+
+- `bb.Webhook(endpointID string) Flow` — a third trigger-node variant beside
+  `Every`/`Once`, taking its own explicit id (the `POST /v1/hooks/{id}` route
+  slug), deliberately decoupled from the body's `WithId`: a public URL a
+  third party hardcodes vs. an internal Durable/Select identity are different
+  concerns, and coupling them (resolving the route from `body.id()`) would
+  also collide with the pre-existing `seq.id()==""` ambiguity bug (next.md
+  #6, not fixed here).
+- No `Store` required for the base case — firing a webhook is a normal
+  synchronous `flow.Run`, structurally the same as any other served request,
+  not a durable schedule with a time gap to survive a crash across.
+  `Durable()` nested inside still no-ops without a store, unchanged.
+- Response depends on whether the body reaches a top-level `Respond` (reusing
+  the same shallow scan `terminalStep` already does): with one, wait and
+  reply 200 with the resulting chat's last message; without one, reply 202
+  immediately and run the body in the background (detached
+  `context.WithoutCancel`, since `r.Context()` is cancelled the instant the
+  handler returns after `WriteHeader`) — a webhook is often a long job, the
+  caller shouldn't block on it.
+- Data propagation must not special-case webhook: reuses the exact
+  `agent.WithPayload`/`PayloadFrom` ctx-threading `Every`/`Once` already use,
+  confirmed by tracing that a payload set via `WithPayload` already survives
+  into a nested trigger's own `deferBody` call today (verified, not just
+  assumed) and that `pkg/engine`'s `Every` closes over its payload once and
+  replays it identically on every tick. Webhook's own twist: Chat/Req
+  accumulated up to the `Webhook` node (e.g. a `Trigger`'s `WithSeedChat`)
+  plays the same role Every/Once's captured state does (frozen, replayed
+  every fire); Data is the incoming POST body instead, fresh per fire — an
+  external caller supplying its own event data on each call is the whole
+  point of a webhook, not a violation of the "data doesn't change" rule.
+- No auth, rate limiting, or body-size cap in code. Checked: `net/http` has
+  no stdlib default body-size cap to expose (only `MaxHeaderBytes`, headers
+  only). Documented instead: not this package's job, put a reverse
+  proxy/gateway in front, the endpoint id is not a secret.
+- Considered and rejected a `bb`-specific serializable interface for trigger
+  payloads: `encoding/json.Marshaler`/`Unmarshaler` on the payload type
+  itself already gives an author that hook for free.
+
+Built:
+
+- `internal/flow/trigger.go`: `triggerNode.webhook` field, `Webhook(id)`,
+  `Webhooks` interface (`Register(endpointID, WebhookHandler)`) + its ctx
+  seam (`WithWebhooks`/`webhooksFrom`), `registerWebhook` (the webhook branch
+  of `deferBody` — same cycle-guard depth check as Once/Every, reused
+  unchanged), `containsRespond` (the shallow top-level scan).
+- `internal/serve/webhook.go`: `webhookRegistry` (plain mutex-guarded map,
+  implements `flow.Webhooks`, `ErrDupWebhook` sentinel on a collision) and
+  `server.webhook`, the `POST /v1/hooks/{id}` handler (404 unknown id, 400
+  bad body read, 200-sync or 202-async per `HasReply`).
+- `internal/serve/engine.go`: `wireScheduler` now also builds the
+  `webhookRegistry` and threads `flow.WithWebhooks` into the startup ctx
+  alongside the existing `Scheduler`/`Store`; both `build()` and `Run()`
+  updated for the new return value.
+- `internal/serve/serve.go`: `server.hooks` field, `s.run` and the new
+  handler share a `triggerCtx` helper (previously inlined in `s.run`) that
+  wires `Store`/`Scheduler`/`Webhooks` uniformly regardless of which route is
+  running the flow.
+- `pkg/bb/flow.go`: `bb.Webhook(endpointID)` exported.
+- Tests: `internal/flow/trigger_test.go` (`mockWebhooks` +
+  `TestWebhookRegistersUnderEndpointID`, `TestWebhookHasReply`,
+  `TestWebhookPayloadAndSeedReplay`, `TestWebhookCycleGuard`);
+  `internal/serve/webhook_test.go` (sync-with-Respond returns 200 with
+  content, no-Respond returns 202 and runs in the background, unknown
+  endpoint 404s — all through `build()`'s real mux, not the bare handler
+  method, so `r.PathValue("id")` is exercised for real).
+- `docs/authoring-guide.md`'s Initiative section: `Webhook` added to the
+  trigger list, its id-decoupling rationale, the Respond-gated
+  sync/async reply rule, the Store-not-required note, the
+  `bb.Handler`-suffices/`bb.Run`-can't-reach-it split, and the
+  payload/seed-replay clarification.
+- next.md updated during the discussion phase: #1 filled in with the settled
+  design; #5 (`Respond` invisible through `Select`/`One`/`All`/`Group`) and #6
+  (a multi-step trigger body silently resolves to no id) added as bugs found
+  while designing this, deliberately left unfixed; #7 (headers via
+  `bb.Payload[T]`) added as a deferred design question.
+
+`go build ./... && go vet ./... && go test ./... -race` green.
+
+Next: the three items left in next.md's tail — #5, #6, #3 (group-scheduler
+commit rule) — plus #2 (in-body durability) and the newly deferred #7
+(header access), in no particular forced order; #6 is the cheapest and
+unblocks correct behavior for anyone chaining multiple named flows after a
+trigger today.
