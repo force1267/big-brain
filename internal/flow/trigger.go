@@ -85,6 +85,12 @@ func triggerDepthFrom(ctx context.Context) int {
 // deferBody hands the continuation (the flows after the trigger) to the
 // scheduler. The body is captured with the current chat/request as payload, so a
 // request-initiated schedule replays the request context when it fires.
+//
+// This call is unconditional and synchronous — sch.Defer below commits the
+// schedule the moment a member reaches this point, with no awareness of
+// whether an enclosing One is about to discard this very member as the
+// loser. See fanOut's "KNOWN GAP" comment in groups.go for the consequence
+// and the fix this needs (next.md #2's tail).
 func deferBody(ctx context.Context, tn *triggerNode, rest []Flow, in State) (State, error) {
 	sch := schedulerFrom(ctx)
 	if sch == nil || len(rest) == 0 {

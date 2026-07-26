@@ -1590,3 +1590,37 @@ the existing `go test ./internal/flow/...` suite.
 
 Next: Webhook inbound HTTP (next.md #1) — the only remaining tail item with
 no design prerequisite.
+
+## 2026-07-26 - Default Store to in-memory instead of disabling triggers
+
+The `if c.store != nil { wireScheduler(...) }` guard in `build()`
+(`internal/serve/serve.go`) was wrong: its comment claimed triggers "require"
+a store, but the actual effect of no `bb.Store(...)` was that they *silently
+no-op* — `s.sched` stayed nil, the worker never started, and `deferBody`
+(`internal/flow/trigger.go`) saw `schedulerFrom(ctx) == nil` and dropped every
+`Every`/`Once`/`Trigger` schedule with no error. `pkg/engine` already has a
+real default for this (`engine.MemStore`, what `engine.New` itself falls back
+to on a nil store), already exposed at the `bb` layer as `bb.MemStore()`.
+
+- `defaults()` (`internal/serve/serve.go`) now seeds `config.store` with
+  `engine.NewMemStore()`, so `c.store` is never nil after option application.
+  `build()`'s guard is gone — `wireScheduler` always runs.
+- `Run` (`internal/serve/engine.go`) no longer requires an explicit `Store`:
+  removed the `ErrNoStore` sentinel and its check. `Run` now works with the
+  same in-memory default as `Serve`/`Handler`.
+- Net behavior change: `Trigger`/`Every`/`Once` chains and `.Durable()` flows
+  now work out of the box with zero config (in-process only — a restart
+  loses everything, same caveat `bb.MemStore()` already carried). Previously
+  they were dead without an explicit `bb.Store(...)`.
+- Updated doc comments on `Store`, `Run` (both `internal/serve/engine.go` and
+  `pkg/bb/serve.go`) to state the in-memory default and recommend
+  `bb.FileStore(dir)` for anything that must survive a restart.
+- `docs/authoring-guide.md`: Serving section notes the in-memory default;
+  Durability section no longer implies a store is only present when
+  configured explicitly; Triggers section's "requires Store" bullet rewritten
+  to describe the default/opt-out-of-ephemeral behavior, same note added to
+  the `bb.Run` bullet since a store-less headless process has the least to
+  show for an in-memory-only default.
+
+`go build ./... && go vet ./... && go test ./...` green (existing tests
+already ran without `bb.Store(...)` in several places, and still pass).

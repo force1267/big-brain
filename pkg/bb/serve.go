@@ -81,8 +81,11 @@ func Handler(f Flow, opts ...Option) (http.Handler, error) {
 // Run drives registered triggers (bb.Trigger) and their scheduled Every/Once
 // bodies over the durable job engine, with no HTTP endpoint at all — for a
 // brain that only reacts to crons/timers/internal events, never inbound
-// requests. Blocks until ctx is cancelled. Requires Store (there's nothing to
-// schedule against otherwise); Addr/DefaultFlowName/Trace are ignored.
+// requests. Blocks until ctx is cancelled. Store defaults to an in-memory
+// backend if not set — triggers still fire, but a restart loses every pending
+// schedule and checkpoint; pass Store(FileStore(dir)) (or another persistent
+// backend) for anything beyond a quick test. Addr/DefaultFlowName/Trace are
+// ignored.
 func Run(ctx context.Context, opts ...Option) error {
 	return serve.Run(ctx, opts...)
 }

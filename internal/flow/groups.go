@@ -166,6 +166,19 @@ func (g groupGroup) run(ctx context.Context, in State) (State, error) {
 // merges every member's new replies (All/Group). With first=true it takes the
 // first successful member's contribution and cancels the rest (One). A
 // divergent select across members that contributed is ErrSelectConflict.
+//
+// KNOWN GAP (next.md #2's tail, "scheduler-inside-concurrent-group commit
+// rule" — unfixed): a member that reaches a Once/Every trigger node finishes
+// (from this function's point of view) the instant deferBody hands the body to
+// the Scheduler — Defer is synchronous and returns immediately, well before
+// this function decides won/winner below. So with first=true (One), a losing
+// member's trigger can already be durably registered with the engine before
+// cancel() ever reaches it: One is supposed to keep exactly one member's
+// contribution, but a discarded member's schedule fires anyway. All/Group are
+// unaffected — they keep every member's contribution, so committing a
+// trigger immediately is already correct there. The fix needs a two-phase
+// Scheduler.Defer, gated on won/winner being settled, applied only when
+// first is true; not implemented.
 func fanOut(ctx context.Context, members []Flow, in State, first bool) (State, error) {
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()

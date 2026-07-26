@@ -12,6 +12,7 @@ import (
 	"github.com/force1267/big-brain/internal/anthropic"
 	"github.com/force1267/big-brain/internal/flow"
 	"github.com/force1267/big-brain/internal/openai"
+	"github.com/force1267/big-brain/pkg/engine"
 	"github.com/force1267/big-brain/pkg/model"
 	"github.com/google/uuid"
 )
@@ -19,10 +20,6 @@ import (
 // ErrNoFlow is returned by Serve/Handler when neither an explicit default flow
 // nor any registered flow is available to serve.
 var ErrNoFlow = errors.New("serve: no flow to serve")
-
-// ErrNoStore is returned by Run, which schedules triggers durably and so has
-// nothing to schedule against without a Store.
-var ErrNoStore = errors.New("serve: Run requires Store (nothing to schedule against)")
 
 // Option configures a served brain.
 type Option func(*config)
@@ -36,7 +33,7 @@ type config struct {
 }
 
 func defaults() config {
-	return config{addr: ":8080", name: "brain", workers: 4}
+	return config{addr: ":8080", name: "brain", workers: 4, store: engine.NewMemStore()}
 }
 
 // Addr sets the listen address (default ":8080").
@@ -54,10 +51,13 @@ func Workers(n int) Option { return func(c *config) { c.workers = n } }
 // regardless, so /v1/diagnostics/trace always works.
 func Trace(t flow.Tracer) Option { return func(c *config) { c.tracer = t } }
 
-// Store enables durable flow checkpointing. A request carries a run id via the
-// X-Run-Id header; on a crash, the client retries with the same id and the
-// flows that already completed are skipped (resumed). Without a header a random
-// id is used (correct, but no cross-request resume).
+// Store sets the durability backend flows checkpoint to and triggers schedule
+// against. A request carries a run id via the X-Run-Id header; on a crash, the
+// client retries with the same id and the flows that already completed are
+// skipped (resumed). Without a header a random id is used (correct, but no
+// cross-request resume). Without Store, an in-memory backend is used (see
+// defaults()) — triggers/checkpoints work, but nothing survives a process
+// restart; pass engine.NewFileStore or another persistent Store for that.
 func Store(s flow.Store) Option { return func(c *config) { c.store = s } }
 
 // server holds the running brain: a default flow (used when a request names no,
@@ -106,14 +106,14 @@ func build(f flow.Flow, opts ...Option) (*server, http.Handler, error) {
 	r := &ring{max: 500}
 	s := &server{named: named, def: def, name: c.name, tracer: tee(r, c.tracer), ring: r, store: c.store}
 
-	// Triggers/initiative need durable scheduling, so they require a store.
-	if c.store != nil {
-		sched, err := wireScheduler(c.store)
-		if err != nil {
-			return nil, nil, err
-		}
-		s.sched = sched
+	// Triggers/initiative need a store to schedule against. c.store defaults to
+	// an in-memory one (defaults()), so this always runs unless wiring itself
+	// fails.
+	sched, err := wireScheduler(c.store)
+	if err != nil {
+		return nil, nil, err
 	}
+	s.sched = sched
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/chat/completions", s.openai)

@@ -508,10 +508,15 @@ h, err := bb.Handler(flow, opts...)        // http.Handler for embedding
 err := bb.Serve(ctx, flow,                 // or own the listener + shutdown
     bb.Addr(":8080"),
     bb.Trace(bb.JSONL(os.Stdout)),         // jsonl trace of every flow
-    bb.Store(bb.MemStore()),               // durable checkpointing
+    bb.Store(bb.FileStore(dir)),           // durable checkpointing, survives restarts
     bb.DefaultFlowName("jarvis"),          // reported id, default "brain"
 )
 ```
+
+`Serve`/`Handler`/`Run` default `Store` to an in-memory backend
+(`bb.MemStore()`) when it's not set — durability and triggers work with zero
+config, but nothing survives a process restart. Pass `bb.FileStore(dir)` (or
+another persistent backend) once that matters.
 
 `Serve`/`Handler` **validate the whole flow at startup** — modelless default
 agents, unbuildable models, and declared Select exits with no matching member
@@ -582,8 +587,9 @@ remember := bb.NewFlow().WithAgent(a).WithId("remember").Durable()
 
 `WithId` returns a `NamedFlow`; only a `NamedFlow` has `.Durable()`, so a durable
 flow always has the id it resumes against — durable-but-anonymous won't compile.
-A flow **without** `.Durable()` never persists, even with `bb.Store(...)`
-configured; the store is just the backend for the flows that opted in. A durable
+A flow **without** `.Durable()` never persists, even with a store (explicit or
+the in-memory default) configured; the store is just the backend for the flows
+that opted in. A durable
 flow checkpoints its sub-flows: on a retry with the same `X-Run-Id`, completed
 ones replay from their savepoint (a `flow.cached` trace event) instead of
 re-asking. `.Durable()` takes options — `bb.ForwardCompatible()` (resume even if
@@ -611,13 +617,20 @@ router.Next(capabilities).Next(bb.Respond).Next(bb.Once(when)).Next(followUp)
   task. `bb.Every(spec)` schedules on a cron; `bb.Once(t)` fires a single time.
 - The deferred body **must** be a named flow (`WithId`) so it resolves after a
   restart; an unnamed body is warned and skipped.
-- Triggers require `bb.Store(...)` (durable scheduling) and run their worker under
-  `bb.Serve` or `bb.Run` (not a bare `bb.Handler`).
-- `bb.Run(ctx, bb.Store(...), ...)` drives triggers and the engine with **no
-  HTTP endpoint at all** — for a brain that only reacts to crons/timers/
-  internal events, never inbound requests. Same startup wiring as `Serve`
-  (validates trigger chains, requires `Store`), minus the listener; `Addr` and
-  request-only options are ignored.
+- Triggers schedule against whatever `Store` resolves to — an explicit one, or
+  the in-memory default — and run their worker under `bb.Serve` or `bb.Run`
+  (not a bare `bb.Handler`, which only exposes routes). The in-memory default
+  means triggers fire with zero config, but a restart loses every pending
+  schedule; pass `bb.Store(bb.FileStore(dir))` for anything that must survive
+  one.
+- `bb.Run(ctx, ...)` drives triggers and the engine with **no HTTP endpoint at
+  all** — for a brain that only reacts to crons/timers/internal events, never
+  inbound requests. Same startup wiring as `Serve` (validates trigger chains),
+  minus the listener; `Addr` and request-only options are ignored. Store
+  defaults to in-memory here too — for `Run` in particular, that usually means
+  pairing it with `bb.Store(bb.FileStore(dir))`, since an in-memory-only
+  process with no HTTP surface has nothing to show for itself across a
+  restart.
 - A scheduled body replays the request context: `turn.Request()` (the protocol
   params) and `bb.Payload[T](turn)` (arbitrary trigger data, seeded with
   `bb.WithSeedPayload(x)` or captured from the originating request) both work in

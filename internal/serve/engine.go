@@ -79,14 +79,14 @@ func wireScheduler(store flow.Store) (*engineScheduler, error) {
 // Run drives registered triggers and their scheduled bodies over the durable
 // job engine, with no HTTP listener at all — for a brain that only reacts to
 // crons/timers/internal events, never inbound requests. Blocks until ctx is
-// cancelled. Requires Store (ErrNoStore otherwise).
+// cancelled. Store defaults to in-memory (see defaults()): triggers still
+// fire, but a process restart loses every pending schedule and checkpoint —
+// for anything but a quick test, pass a persistent Store (e.g.
+// engine.NewFileStore) via the Store option.
 func Run(ctx context.Context, opts ...Option) error {
 	c := defaults()
 	for _, o := range opts {
 		o(&c)
-	}
-	if c.store == nil {
-		return ErrNoStore
 	}
 	sched, err := wireScheduler(c.store)
 	if err != nil {
