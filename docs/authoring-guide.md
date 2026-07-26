@@ -623,7 +623,13 @@ router.Next(capabilities).Next(bb.Respond).Next(bb.Once(when)).Next(followUp)
   `bb.WithSeedPayload(x)` or captured from the originating request) both work in
   the fired body.
 - Loops and recursion are re-triggers: a body scheduling its own id again — each
-  iteration a fresh, durable run. There are no cycles in the static `Next` graph.
+  iteration a fresh, durable run. There are no cycles in the static `Next`
+  graph — but a *lineage* of re-triggers (a body whose flow itself reaches
+  another trigger, which reaches another, ...) is capped at 8 nested levels.
+  Past the cap, scheduling fails loudly with `flow.ErrTriggerCycle` instead of
+  spinning forever. A plain recurring `Every`/`Once` ticker never counts
+  against this — the engine re-fires the same registered body directly,
+  without passing back through a trigger node.
 
 ## THE RULES (short list)
 

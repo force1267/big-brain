@@ -3,6 +3,7 @@ package flow
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -11,6 +12,16 @@ import (
 	"github.com/force1267/big-brain/internal/agent"
 	"github.com/force1267/big-brain/pkg/model"
 )
+
+// maxTriggerDepth caps how many times a triggered body may itself contain
+// another trigger that defers yet another body, in one lineage. A plain
+// recurring Every/Once ticker never touches this (the engine re-fires the same
+// registered body directly); depth only grows when a fired body's own flow
+// reaches a further trigger node — the shape a runaway self-rescheduling cycle
+// takes. Same order of magnitude as tools' Resolve round cap, for the same
+// reason: a generous but finite ceiling on an author mistake that would
+// otherwise spin forever.
+const maxTriggerDepth = 8
 
 // A trigger is a flow node that defers what follows it to run later, on its own.
 // Reaching one in a chain SPLITS the chain: the flow(s) after it become the
@@ -58,6 +69,19 @@ func schedulerFrom(ctx context.Context) Scheduler {
 	return s
 }
 
+type triggerDepthKey struct{}
+
+// withTriggerDepth carries the current trigger-lineage depth into a fired
+// body's ctx, so a further trigger reached inside it knows how deep it is.
+func withTriggerDepth(ctx context.Context, d int) context.Context {
+	return context.WithValue(ctx, triggerDepthKey{}, d)
+}
+
+func triggerDepthFrom(ctx context.Context) int {
+	d, _ := ctx.Value(triggerDepthKey{}).(int)
+	return d
+}
+
 // deferBody hands the continuation (the flows after the trigger) to the
 // scheduler. The body is captured with the current chat/request as payload, so a
 // request-initiated schedule replays the request context when it fires.
@@ -72,7 +96,13 @@ func deferBody(ctx context.Context, tn *triggerNode, rest []Flow, in State) (Sta
 		logrus.Warn("flow: a triggered body has no id (WithId); it cannot be resolved after a restart and is skipped")
 		return in, nil
 	}
-	payload, err := json.Marshal(triggerPayload{Chat: in.Chat, Req: in.Req, Data: agent.PayloadFrom(ctx)})
+	depth := triggerDepthFrom(ctx) + 1
+	if depth > maxTriggerDepth {
+		err := fmt.Errorf("%w: body %q nested %d triggers deep (max %d)", ErrTriggerCycle, bodyID, depth, maxTriggerDepth)
+		logrus.WithField("body", bodyID).WithField("depth", depth).Error(err)
+		return in, err
+	}
+	payload, err := json.Marshal(triggerPayload{Chat: in.Chat, Req: in.Req, Data: agent.PayloadFrom(ctx), Depth: depth})
 	if err != nil {
 		return in, err
 	}
@@ -80,6 +110,7 @@ func deferBody(ctx context.Context, tn *triggerNode, rest []Flow, in State) (Sta
 		var tp triggerPayload
 		_ = json.Unmarshal(p, &tp)
 		rctx = agent.WithPayload(rctx, tp.Data)
+		rctx = withTriggerDepth(rctx, tp.Depth)
 		_, err := Run(rctx, body, State{Chat: tp.Chat, Req: tp.Req}, NoTrace{})
 		return err
 	}
@@ -92,9 +123,10 @@ func deferBody(ctx context.Context, tn *triggerNode, rest []Flow, in State) (Sta
 // triggerPayload is the request context captured at schedule time and replayed
 // when the deferred body fires.
 type triggerPayload struct {
-	Chat []model.Message `json:"chat"`
-	Req  agent.Request   `json:"req"`
-	Data []byte          `json:"data,omitempty"` // arbitrary trigger payload (bb.Payload[T])
+	Chat  []model.Message `json:"chat"`
+	Req   agent.Request   `json:"req"`
+	Data  []byte          `json:"data,omitempty"`  // arbitrary trigger payload (bb.Payload[T])
+	Depth int             `json:"depth,omitempty"` // nested trigger-lineage depth (cycle guard)
 }
 
 // seqOf wraps the remaining steps as a single flow.

@@ -1540,3 +1540,53 @@ provider-model sense of "name" used elsewhere in `bb` (`Model`, `WithModel`,
   otherwise); refactored the trigger-wiring block out of `build()` into a
   shared `wireScheduler` helper used by both `Serve`/`Handler` and `Run`.
   Updated `docs/authoring-guide.md`'s triggers section accordingly.
+
+## 2026-07-26 - Trigger cycle guard (next.md #2 tail, item #4)
+
+Verified the four remaining items in #2's tail against the actual code before
+touching anything (grepped for cycle-guard logic in `internal/flow` and
+`pkg/engine` — zero hits — confirming "no guard/observability yet" was still
+true). Built the cycle guard, the cheapest of the four:
+
+- `internal/flow/trigger.go`: a per-lineage depth counter carried through
+  `triggerPayload.Depth` (context key `triggerDepthKey`, helpers
+  `withTriggerDepth`/`triggerDepthFrom`). `deferBody` increments it each time a
+  fired body's own flow reaches *another* trigger node — not on a plain
+  recurring `Every`/`Once` tick, which the engine re-fires the same registered
+  body directly without passing back through `deferBody`. Past
+  `maxTriggerDepth` (8, matching the order of magnitude of tools'
+  `Resolve`/`WithMaxRounds`), scheduling is refused and `flow.ErrTriggerCycle`
+  (new sentinel, `internal/flow/errors.go`) is returned and logged via
+  `logrus.Error` with the body id and depth.
+- **Found and fixed a real gap while wiring the test for this**: the depth
+  check was unreachable in production. `Serve` (`internal/serve/serve.go`)
+  ran the engine worker (`s.sched.run(ctx, c.workers)`) on the bare request
+  ctx, with no `Scheduler` installed — so a fired body's nested trigger hit
+  `schedulerFrom(ctx) == nil` and silently no-op'd, same early-return path as
+  "no engine configured." The cycle guard sits after that check, so it never
+  ran. Fixed by wrapping the worker ctx with `flow.WithScheduler(ctx,
+  s.sched)` before handing it to `s.sched.run`, mirroring the per-request path
+  (`internal/serve/serve.go`'s `server.run`) that already did this. Without
+  this fix, the old next.md claim "cycles as re-triggers — supported in
+  principle" wasn't actually true: a nested trigger inside a fired body just
+  silently dropped.
+- Tests in `internal/flow/trigger_test.go`: `TestTriggerCycleGuard` (depth
+  math directly, via `deferBody` with a fabricated depth on ctx — allowed
+  through depth 8, refused at 9); `TestTriggerDepthThreadsThroughFire` (an
+  actual outer→mid→inner trigger chain, verifying the depth survives the JSON
+  round-trip through a real fire and that the fired body's ctx needs
+  `WithScheduler` to reach the nested trigger at all — a bare
+  `context.Background()` silently no-ops instead, which is what caught the
+  `serve.go` gap above).
+- `docs/authoring-guide.md`'s re-trigger note updated: mentions the 8-level
+  cap, `flow.ErrTriggerCycle`, and that a plain recurring ticker never counts
+  against it.
+- `next.md` updated: item #4 marked SHIPPED with the same detail as above;
+  three items remain in #2's tail (Webhook inbound HTTP, in-body durability,
+  group-scheduler commit rule).
+
+`go build ./... && go vet ./... && go test ./...` green, `-race` included via
+the existing `go test ./internal/flow/...` suite.
+
+Next: Webhook inbound HTTP (next.md #1) — the only remaining tail item with
+no design prerequisite.

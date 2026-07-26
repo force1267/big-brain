@@ -153,8 +153,12 @@ func Serve(ctx context.Context, f flow.Flow, opts ...Option) error {
 	}
 	// Run the durable job worker alongside HTTP: it fires the scheduled/deferred
 	// flows (crons, one-shots) registered via triggers. Stops when ctx is done.
+	// The worker ctx carries the scheduler too, so a fired body that itself
+	// contains a trigger (a self-rescheduling job) can defer further work
+	// instead of silently no-oping — the trigger cycle guard in
+	// internal/flow/trigger.go only engages on this path.
 	if s.sched != nil {
-		go s.sched.run(ctx, c.workers)
+		go s.sched.run(flow.WithScheduler(ctx, s.sched), c.workers)
 	}
 	srv := &http.Server{Addr: c.addr, Handler: h}
 	go func() {

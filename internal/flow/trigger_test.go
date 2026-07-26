@@ -2,6 +2,8 @@ package flow
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -137,5 +139,69 @@ func TestPayloadSeedAndReplay(t *testing.T) {
 	}
 	if len(seen) != 2 || seen[1] != `{"k":"v"}` {
 		t.Fatalf("payload not replayed to deferred body: %v", seen)
+	}
+}
+
+// A trigger lineage nested deeper than maxTriggerDepth is refused loudly
+// instead of scheduling forever.
+func TestTriggerCycleGuard(t *testing.T) {
+	sch := &mockScheduler{}
+	tn := &triggerNode{once: true, at: time.Now()}
+	body := New().WithAgent(recordAgent(&[]string{}, "x")).WithId("body")
+
+	for depth := 1; depth <= maxTriggerDepth; depth++ {
+		ctx := WithScheduler(withTriggerDepth(context.Background(), depth-1), sch)
+		if _, err := deferBody(ctx, tn, []Flow{body}, State{}); err != nil {
+			t.Fatalf("depth %d should still be allowed: %v", depth, err)
+		}
+	}
+
+	ctx := WithScheduler(withTriggerDepth(context.Background(), maxTriggerDepth), sch)
+	if _, err := deferBody(ctx, tn, []Flow{body}, State{}); !errors.Is(err, ErrTriggerCycle) {
+		t.Fatalf("expected ErrTriggerCycle past the cap, got %v", err)
+	}
+}
+
+// A body that itself contains another trigger deepens the lineage by one, and
+// the depth survives the JSON round-trip to the fired body's ctx.
+func TestTriggerDepthThreadsThroughFire(t *testing.T) {
+	sch := &mockScheduler{}
+	var ran []string
+	inner := New().WithAgent(recordAgent(&ran, "inner")).WithId("inner")
+	// WithId at the end names the whole mid+Once+inner chain (a bare WithId in
+	// the middle would leave the tail unnamed — same shape as
+	// TestTriggerUnnamedBodySkipped — so the trigger it defers would be skipped
+	// instead of scheduled).
+	nested := New().WithAgent(recordAgent(&ran, "mid")).
+		Next(Once(time.Now())).Next(inner).WithId("mid")
+	chain := New().WithAgent(recordAgent(&ran, "outer")).WithId("outer").
+		Next(Once(time.Now())).Next(nested)
+
+	ctx := WithScheduler(context.Background(), sch)
+	if _, err := Run(ctx, chain, chat("go"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(sch.calls) != 1 {
+		t.Fatalf("expected one top-level deferral, got %d", len(sch.calls))
+	}
+
+	// Firing the first deferred body reaches the nested trigger and defers a
+	// second, deeper body — depth 2. Real firing happens on the engine worker's
+	// ctx, which Serve wires with WithScheduler for exactly this reason (see
+	// internal/serve/serve.go); a bare context.Background() would make the
+	// nested trigger silently no-op instead.
+	fireCtx := WithScheduler(context.Background(), sch)
+	if err := sch.calls[0].run(fireCtx, sch.calls[0].payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(sch.calls) != 2 {
+		t.Fatalf("expected the fired body to defer a nested body, got %d calls", len(sch.calls))
+	}
+	var tp triggerPayload
+	if err := json.Unmarshal(sch.calls[1].payload, &tp); err != nil {
+		t.Fatal(err)
+	}
+	if tp.Depth != 2 {
+		t.Fatalf("expected nested body depth 2, got %d", tp.Depth)
 	}
 }

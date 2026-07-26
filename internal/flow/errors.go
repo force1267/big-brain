@@ -16,4 +16,10 @@ var (
 	// flow, or All/Group) selected different ids. Same id is fine; divergent is
 	// a loud error, not a wall-clock last-writer race.
 	ErrSelectConflict = errors.New("flow: conflicting concurrent selects")
+
+	// ErrTriggerCycle means a triggered body itself deferred another trigger
+	// more than maxTriggerDepth times in one lineage — a body re-scheduling
+	// itself (or a chain of bodies scheduling each other) with no end in
+	// sight. It is loud rather than a silent infinite background loop.
+	ErrTriggerCycle = errors.New("flow: trigger cycle limit exceeded")
 )
