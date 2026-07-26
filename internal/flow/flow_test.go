@@ -68,12 +68,12 @@ func TestModelInheritanceLadder(t *testing.T) {
 // Multiple agents run concurrently; all get the chat; their replies accumulate
 // (order-independent); agreeing on the same select id is fine.
 func TestBasicMultiAgentConcurrent(t *testing.T) {
-	h1 := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
+	h1 := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 		turn.Reply("a1")
 		turn.Select("same")
 		return nil
 	})
-	h2 := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
+	h2 := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 		turn.Reply("a2")
 		turn.Select("same")
 		return nil
@@ -96,11 +96,11 @@ func TestBasicMultiAgentConcurrent(t *testing.T) {
 
 // Two concurrent agents selecting different ids is a loud conflict.
 func TestBasicMultiAgentSelectConflict(t *testing.T) {
-	h1 := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
+	h1 := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 		turn.Select("A")
 		return nil
 	})
-	h2 := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
+	h2 := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 		turn.Select("B")
 		return nil
 	})
@@ -114,14 +114,14 @@ func TestBasicMultiAgentSelectConflict(t *testing.T) {
 func TestCheckpointCoordination(t *testing.T) {
 	cp := NewCheckpoint()
 	order := make(chan string, 2)
-	waiter := agent.New().OnMessage(func(ctx context.Context, turn *agent.Turn) error {
+	waiter := agent.New().OnMessage(func(ctx context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 		if err := Wait(ctx, cp); err != nil {
 			return err
 		}
 		order <- "waiter"
 		return nil
 	})
-	reacher := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
+	reacher := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 		order <- "reacher"
 		Reached(cp)
 		return nil
@@ -138,7 +138,7 @@ func TestCheckpointCoordination(t *testing.T) {
 
 // An agent that returns an error fails the flow, wrapped.
 func TestBasicAgentError(t *testing.T) {
-	boom := agent.New().OnMessage(func(context.Context, *agent.Turn) error {
+	boom := agent.New().OnMessage(func(context.Context, *agent.Turn, *agent.ModelChat) error {
 		return errors.New("boom")
 	})
 	_, err := Run(context.Background(), New().WithAgent(boom).WithId("bad"), chat("x"), nil)

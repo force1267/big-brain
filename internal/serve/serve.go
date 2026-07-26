@@ -172,7 +172,16 @@ func Serve(ctx context.Context, f flow.Flow, opts ...Option) error {
 	return nil
 }
 
-func (s *server) run(ctx context.Context, f flow.Flow, runID string, msgs []model.Message, req agent.Request) (string, error) {
+// reply is what one served request produced: the text to send back, plus the
+// tool calls nobody answered. The keystone rule lives here — an unanswered call
+// is what the brain owes its client, and it is the only tool state that leaves
+// the process, because the client owns the transcript.
+type reply struct {
+	text  string
+	calls []model.ToolCall
+}
+
+func (s *server) run(ctx context.Context, f flow.Flow, runID string, msgs []model.Message, req agent.Request) (reply, error) {
 	if s.store != nil {
 		if runID == "" {
 			runID = uuid.NewString()
@@ -187,9 +196,12 @@ func (s *server) run(ctx context.Context, f flow.Flow, runID string, msgs []mode
 	}
 	out, err := flow.Run(ctx, f, flow.State{Chat: msgs, Req: req}, s.tracer)
 	if err != nil {
-		return "", err
+		return reply{}, err
 	}
-	return lastContent(out.Chat), nil
+	// The keystone rule over the whole transcript: a call with no matching result
+	// anywhere in the chat is owed to the client; one the client already answered,
+	// or a brain resolved internally, is settled history and stays in.
+	return reply{text: lastContent(out.Chat), calls: model.Unresolved(out.Chat)}, nil
 }
 
 func (s *server) openai(w http.ResponseWriter, r *http.Request) {
@@ -198,12 +210,10 @@ func (s *server) openai(w http.ResponseWriter, r *http.Request) {
 		openai.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	msgs := make([]model.Message, len(req.Messages))
-	for i, m := range req.Messages {
-		msgs[i] = model.Message{Role: m.Role, Content: m.Content}
-	}
+	msgs := openai.Messages(req.Messages)
 	f, name := s.resolve(req.Model)
-	rp := agent.Request{Model: req.Model, Temperature: req.Temperature, MaxTokens: req.MaxTokens}
+	rp := agent.NewRequest(req.Model, req.Temperature, req.MaxTokens,
+		openai.Tools(req.Tools), string(req.ToolChoice))
 	id := "chatcmpl-" + uuid.NewString()
 	runID := r.Header.Get("X-Run-Id")
 
@@ -216,26 +226,28 @@ func (s *server) openai(w http.ResponseWriter, r *http.Request) {
 			}
 			return fl.Flush()
 		}}
-		reply, err := s.run(agent.WithSink(r.Context(), sink), f, runID, msgs, rp)
+		out, err := s.run(agent.WithSink(r.Context(), sink), f, runID, msgs, rp)
 		if err != nil {
 			openai.WriteStreamError(w, err.Error())
 			fl.Flush()
 			return
 		}
 		if !sink.Claimed() { // nobody streamed: emit the buffered reply as one delta
-			openai.WriteChunk(w, id, name, reply)
+			openai.WriteChunk(w, id, name, out.text)
 		}
-		openai.WriteDone(w, id, name)
+		calls := openai.Calls(out.calls)
+		openai.WriteToolCalls(w, id, name, calls)
+		openai.WriteDone(w, id, name, calls)
 		fl.Flush()
 		return
 	}
 
-	reply, err := s.run(r.Context(), f, runID, msgs, rp)
+	out, err := s.run(r.Context(), f, runID, msgs, rp)
 	if err != nil {
 		openai.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	openai.WriteResponse(w, id, name, reply)
+	openai.WriteResponse(w, id, name, out.text, openai.Calls(out.calls))
 }
 
 func (s *server) anthropic(w http.ResponseWriter, r *http.Request) {
@@ -248,11 +260,10 @@ func (s *server) anthropic(w http.ResponseWriter, r *http.Request) {
 	if s := string(req.System); s != "" {
 		msgs = append(msgs, model.Message{Role: "system", Content: s})
 	}
-	for _, m := range req.Messages {
-		msgs = append(msgs, model.Message{Role: m.Role, Content: string(m.Content)})
-	}
+	msgs = append(msgs, anthropic.Messages(req.Messages)...)
 	f, name := s.resolve(req.Model)
-	rp := agent.Request{Model: req.Model, Temperature: req.Temperature, MaxTokens: req.MaxTokens}
+	rp := agent.NewRequest(req.Model, req.Temperature, req.MaxTokens,
+		anthropic.Tools(req.Tools), string(req.ToolChoice))
 	id := "msg_" + uuid.NewString()
 	runID := r.Header.Get("X-Run-Id")
 
@@ -267,26 +278,26 @@ func (s *server) anthropic(w http.ResponseWriter, r *http.Request) {
 			}
 			return fl.Flush()
 		}}
-		reply, err := s.run(agent.WithSink(r.Context(), sink), f, runID, msgs, rp)
+		out, err := s.run(agent.WithSink(r.Context(), sink), f, runID, msgs, rp)
 		if err != nil {
 			anthropic.WriteStreamError(w, err.Error())
 			fl.Flush()
 			return
 		}
 		if !sink.Claimed() {
-			anthropic.WriteDelta(w, reply)
+			anthropic.WriteDelta(w, out.text)
 		}
-		anthropic.WriteStop(w)
+		anthropic.WriteStop(w, anthropic.Calls(out.calls))
 		fl.Flush()
 		return
 	}
 
-	reply, err := s.run(r.Context(), f, runID, msgs, rp)
+	out, err := s.run(r.Context(), f, runID, msgs, rp)
 	if err != nil {
 		anthropic.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	anthropic.WriteResponse(w, id, name, reply)
+	anthropic.WriteResponse(w, id, name, out.text, anthropic.Calls(out.calls))
 }
 
 func (s *server) models(w http.ResponseWriter, _ *http.Request) {

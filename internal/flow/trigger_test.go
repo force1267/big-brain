@@ -11,7 +11,7 @@ import (
 
 // recordAgent appends its label when it runs (sequential in these tests).
 func recordAgent(ran *[]string, label string) agent.Agent {
-	return agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
+	return agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 		*ran = append(*ran, label)
 		turn.Reply(label)
 		return nil
@@ -107,7 +107,7 @@ func TestTriggerUnnamedBodySkipped(t *testing.T) {
 // replayed across a scheduled fire.
 func TestPayloadSeedAndReplay(t *testing.T) {
 	var seen []string
-	reader := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
+	reader := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 		seen = append(seen, string(turn.Payload()))
 		turn.Reply("ok")
 		return nil

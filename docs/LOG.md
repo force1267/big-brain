@@ -1216,3 +1216,77 @@ rejected, and the earlier "handler replaces `WithSchema`" claim reversed.
 Updated in place: the `discussion.md` sugar section (records the reversal and why),
 `next.md` #3's handler subsection, and the marvis comments (bare tools stay live
 code; the bound copies and `Resolve` remain commented alternatives).
+
+## 2026-07-26 (4) — Tools implemented, end to end (next.md #3, all seven steps)
+
+Built the whole tool surface designed in entries (1)–(3) in one pass. Everything
+green, `-race` clean, both demos build. Steps in the order `next.md` listed them.
+
+**1. Tool-aware model layer** (`pkg/model/tool.go`, new). `Tool`/`ToolCall`/
+`ToolResult` as plain structs with staged builders (`NewTool().As().Is().
+WithSchema()`), linked-or-stub counterpart accessors, `.Message()` adapters, and
+`Unresolved(msgs)` — the keystone rule as one function. `Message` gained
+`Calls []ToolCall` / `Results []ToolResult` (plural: providers put several in one
+message alongside text), so reading a payload is a `len` check, never an
+assertion. Tools travel in on `Params`, calls come back on `Chunk.Call`, so the
+one-method `Model` interface was not widened. `SameSchema` compares
+**structurally** (drops `description`, sorts `required`) exactly as flagged —
+byte comparison would have failed on map ordering alone. Side effect worth
+knowing: `Message` is no longer comparable with `==` (it holds slices).
+
+**2. Wire adapters.** `internal/openai` + `internal/anthropic` now parse
+`tools`/`tool_choice` inbound and emit calls outbound, each in its own framing —
+OpenAI puts a result in its own `role:"tool"` message and arguments in a JSON
+*string*; Anthropic nests `tool_use`/`tool_result` inside content *blocks* and
+wants input as an object. Both normalize `tool_choice`'s two spellings to one
+neutral value. New `convert.go` in each. **This closes the PRODUCT promise
+"caller tools pass through untouched"**, which had been silently dropping the
+field.
+
+**3. The turn/chat split.** `internal/agent/chat.go` (new) holds `ModelChat` and
+`Asker`; `Turn` lost `Add`/`Ask`/`AskWith` and gained `Call`/`ToolResults`.
+`NewTurn` now returns both handles. Every handler in the repo migrated, plus
+both demos. `turn.Call` coalesces a turn's calls onto its last reply, so text and
+calls leave as one message (what parallel tool use requires).
+
+**4. Serve.** `run` returns text *plus* `model.Unresolved(out.Chat)`; the two
+handlers emit `finish_reason: tool_calls` / `stop_reason: tool_use` accordingly.
+The stateless loop needed no state: a client re-sending a transcript with its
+result just re-runs the flow, and the answered call is filtered out by the same
+rule that emitted it.
+
+**5. `OnCall` + `Resolve`.** As designed — copy-not-mutate, schema *checked* not
+derived, `Ask` never runs a handler, mode on the verb.
+
+**Three deviations from the design, all recorded in `next.md` "As built":**
+- the schema mismatch surfaces at `Ask` (`ErrTool`), not at `Serve` — a tool is a
+  per-ask runtime value, so startup has nothing to inspect;
+- `Resolve` treats a round as **all-or-nothing** (a mixed batch runs nothing and
+  is handed back whole) — a partly-answered round is not a legal transcript for
+  either provider, and this was caught by a test that had passed for the wrong
+  reason: the first implementation silently dropped the client's call;
+- `bb.Chat(ctx, m)` replaces `Model.Chat()` — `pkg/model` cannot import the agent
+  package the handle lives in.
+
+`bb.Extract[T]` now also decodes a `ToolCall`'s arguments (two type parameters,
+source inferred), so `bb.Extract[args](call)` reads as the design intended.
+
+**Tests** (all new, all `-race` clean): builders/linking/stub-resolution/
+structural schema equality; the OpenAI provider assembling interleaved, split
+tool-call deltas; both wire formats decoding a mid-loop transcript and emitting
+calls; `Ask` sending tools but never running handlers, per-ask (not sticky)
+tools, `ForwardTools` stacking and carrying the choice; the `Resolve` loop,
+one-message coalescing, error-as-result, the round cap, cancellation, and the
+all-or-nothing rule; `turn.Call` coalescing; and end-to-end through `serve` —
+a **bare agent is tool-transparent** on both wires, an internally-resolved call
+never reaches the client, and a re-sent transcript closes the loop statelessly.
+
+**Docs.** `docs/authoring-guide.md` updated in the same change per the
+docs-move-with-code rule: the two-handle model with a direction table, a full
+Tools section (both boundaries, manual and `Resolve` paths, the resolution-rule
+table, per-flow stub resolution, the bare-agent proxy), a standalone-chat note,
+and two new entries in THE RULES. `effective.go` updated for `pkg/model`,
+`internal/agent`, `internal/openai`, `internal/anthropic` — each explaining why
+the tool types live where they do.
+
+Next: #4 (native Anthropic consume), or the Tier-3 cleanups.

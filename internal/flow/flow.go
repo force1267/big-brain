@@ -181,18 +181,23 @@ func (f *Basic) run(ctx context.Context, in State) (State, error) {
 // runAgent invokes the agent's handler, or — if it has none — performs the
 // default ask-and-reply so a plain agent flow just answers the incoming chat.
 // A shared (Group) turn asks the live conversation rather than a re-added copy.
-func runAgent(ctx context.Context, ag agent.Agent, turn *agent.Turn, chat []model.Message) error {
+func runAgent(ctx context.Context, ag agent.Agent, turn *agent.Turn, mc *agent.ModelChat, chat []model.Message) error {
 	if h := ag.Handler(); h != nil {
-		return h(ctx, turn)
+		return h(ctx, turn, mc)
 	}
+	// No handler: a full transparent proxy. It forwards the caller's tools and
+	// tool choice untouched and replays everything the model answers — text and
+	// tool calls alike — so pointing any OpenAI/Anthropic client at a bare agent
+	// makes it behave exactly like the model behind it. Writing OnMessage is
+	// where all of this stops and every forward becomes explicit.
 	var (
 		reply agent.Reply
 		err   error
 	)
 	if sharedFrom(ctx) != nil {
-		reply, err = turn.Ask()
+		reply, err = mc.ForwardTools().Ask()
 	} else {
-		reply, err = turn.AskWith(chat...)
+		reply, err = mc.ForwardTools().AskWith(chat...)
 	}
 	if err != nil {
 		return err
@@ -204,13 +209,18 @@ func runAgent(ctx context.Context, ag agent.Agent, turn *agent.Turn, chat []mode
 			out <- tok
 		}
 		close(out)
-		return reply.Err()
+		if e := reply.Err(); e != nil {
+			return e
+		}
+		turn.Call(reply.ToolCalls()...)
+		return nil
 	}
 	text := reply.ReadAll()
 	if e := reply.Err(); e != nil {
 		return e
 	}
 	turn.Reply(text)
+	turn.Call(reply.ToolCalls()...)
 	return nil
 }
 

@@ -41,7 +41,7 @@ func TestServeRunsTriggerChain(t *testing.T) {
 	t.Cleanup(flow.ResetTriggers)
 
 	fired := make(chan struct{})
-	body := flow.New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
+	body := flow.New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 		close(fired)
 		turn.Reply("done")
 		return nil

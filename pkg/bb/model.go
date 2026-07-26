@@ -1,6 +1,11 @@
 package bb
 
-import "github.com/force1267/big-brain/pkg/model"
+import (
+	"context"
+
+	"github.com/force1267/big-brain/internal/agent"
+	"github.com/force1267/big-brain/pkg/model"
+)
 
 // Model is a fluent model configuration: WithName/WithThink/WithTemprature,
 // each returning a Model so calls chain. It is always a builder — even when
@@ -19,6 +24,16 @@ func NewModel(tags ...string) Model {
 	}
 	return model.Resolve(tags...)
 }
+
+// Chat starts a live conversation with the model — the same handle an agent's
+// OnMessage receives, usable on its own:
+//
+//	reply, err := bb.NewModel("smart").Chat(ctx).AskWith(bb.NewMessage("hi"))
+//
+// so talking to a model needs no flow, no agent and no server. (It takes a ctx
+// because a conversation makes network calls; a handler's chat is built from
+// the turn's ctx for you.)
+func Chat(ctx context.Context, m Model) ModelChat { return agent.NewChat(ctx, m) }
 
 // RegisterModel is a registered model: the handle WithModel returns, so tags
 // can be attached fluently (WithModel(m).WithTag("cheap", "fast")).

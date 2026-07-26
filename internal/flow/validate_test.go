@@ -42,7 +42,7 @@ func TestValidateDefaultAgentNoModel(t *testing.T) {
 
 // A handler agent with no model is fine (it may never ask).
 func TestValidateHandlerAgentNoModelOK(t *testing.T) {
-	f := New().WithAgent(agent.New().OnMessage(func(context.Context, *agent.Turn) error { return nil }))
+	f := New().WithAgent(agent.New().OnMessage(func(context.Context, *agent.Turn, *agent.ModelChat) error { return nil }))
 	if err := Validate(f); err != nil {
 		t.Fatalf("handler agent without model should validate: %v", err)
 	}

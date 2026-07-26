@@ -27,10 +27,10 @@ func boundAgent(chunks ...string) Agent {
 func TestAskHappy(t *testing.T) {
 	mock := &model.Mock{Chunks: []string{"hello ", "world"}}
 	a := New().WithModel(model.Bound(mock)).WithRole(model.NewMessage("be nice").As("system"))
-	turn := NewTurn(context.Background(), a, []model.Message{model.NewMessage("hi")})
-	turn.Add(turn.Last())
+	turn, chat := NewTurn(context.Background(), a, []model.Message{model.NewMessage("hi")})
+	chat.Add(turn.Last())
 
-	reply, err := turn.Ask()
+	reply, err := chat.Ask()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,8 +45,8 @@ func TestAskHappy(t *testing.T) {
 
 // Ask with no model configured errors.
 func TestAskNoModel(t *testing.T) {
-	turn := NewTurn(context.Background(), New(), nil)
-	if _, err := turn.Ask(); !errors.Is(err, ErrNoModel) {
+	_, chat := NewTurn(context.Background(), New(), nil)
+	if _, err := chat.Ask(); !errors.Is(err, ErrNoModel) {
 		t.Fatalf("want ErrNoModel, got %v", err)
 	}
 }
@@ -54,8 +54,8 @@ func TestAskNoModel(t *testing.T) {
 // Ask surfaces an upstream/model failure.
 func TestAskUpstream(t *testing.T) {
 	a := New().WithModel(model.Bound(&model.Mock{Reject: errors.New("down")}))
-	turn := NewTurn(context.Background(), a, nil)
-	if _, err := turn.Ask(); !errors.Is(err, ErrUpstream) {
+	_, chat := NewTurn(context.Background(), a, nil)
+	if _, err := chat.Ask(); !errors.Is(err, ErrUpstream) {
 		t.Fatalf("want ErrUpstream, got %v", err)
 	}
 }
@@ -63,30 +63,32 @@ func TestAskUpstream(t *testing.T) {
 // Ask validates against a schema: pass and fail branches.
 func TestAskSchema(t *testing.T) {
 	ok := boundAgent(`{"a":1}`).WithSchema(jsonSchema{valid: true})
-	if _, err := NewTurn(context.Background(), ok, nil).Ask(); err != nil {
+	_, okChat := NewTurn(context.Background(), ok, nil)
+	if _, err := okChat.Ask(); err != nil {
 		t.Fatalf("valid schema should pass: %v", err)
 	}
 
 	bad := boundAgent(`not json`).WithSchema(jsonSchema{valid: false})
-	if _, err := NewTurn(context.Background(), bad, nil).Ask(); !errors.Is(err, ErrSchema) {
+	_, badChat := NewTurn(context.Background(), bad, nil)
+	if _, err := badChat.Ask(); !errors.Is(err, ErrSchema) {
 		t.Fatalf("want ErrSchema, got %v", err)
 	}
 }
 
 // Turn: Last on empty, Add/AskWith, Reply accumulation, Select last-wins.
 func TestTurnMechanics(t *testing.T) {
-	empty := NewTurn(context.Background(), boundAgent("x"), nil)
-	if empty.Last() != (model.Message{}) {
+	empty, _ := NewTurn(context.Background(), boundAgent("x"), nil)
+	if last := empty.Last(); last.Role != "" || last.Content != "" {
 		t.Fatalf("Last on empty = %+v", empty.Last())
 	}
 
 	a := boundAgent("ok")
-	turn := NewTurn(context.Background(), a, []model.Message{model.NewMessage("a"), model.NewMessage("b")})
+	turn, chat := NewTurn(context.Background(), a, []model.Message{model.NewMessage("a"), model.NewMessage("b")})
 	if turn.Last().Content != "b" {
 		t.Fatalf("Last = %+v", turn.Last())
 	}
 
-	if _, err := turn.AskWith(turn.Last()); err != nil {
+	if _, err := chat.AskWith(turn.Last()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -143,7 +145,7 @@ func TestAgentDeclarations(t *testing.T) {
 	called := false
 	a := New().
 		Selects("A", "B").
-		OnMessage(func(context.Context, *Turn) error { called = true; return nil })
+		OnMessage(func(context.Context, *Turn, *ModelChat) error { called = true; return nil })
 
 	if got := a.Exits(); len(got) != 2 || got[0] != "A" {
 		t.Fatalf("Exits = %v", got)
@@ -156,7 +158,7 @@ func TestAgentDeclarations(t *testing.T) {
 	if a.Handler() == nil {
 		t.Fatal("handler not set")
 	}
-	a.Handler()(context.Background(), nil)
+	a.Handler()(context.Background(), nil, nil)
 	if !called {
 		t.Fatal("handler not invoked")
 	}

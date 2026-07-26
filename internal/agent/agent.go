@@ -14,9 +14,12 @@ type Schema interface {
 	Validate(data []byte) error
 }
 
-// Handler is the OnMessage callback: the agent, live as a Turn, acting on an
-// incoming message. Returning ends the turn; the ctx is done afterwards.
-type Handler func(ctx context.Context, turn *Turn) error
+// Handler is the OnMessage callback: the agent acting on one incoming message
+// through two handles — turn faces the CLIENT (Messages/Request/Reply/Stream/
+// Call/Select), chat faces the MODEL (Add/WithTools/Ask/Resolve). The same
+// nouns flow both ways, so which handle you touch is what says which direction
+// you meant. Returning ends the turn; the ctx is done afterwards.
+type Handler func(ctx context.Context, turn *Turn, chat *ModelChat) error
 
 // Agent is the build-time definition: immutable configuration assembled
 // fluently and handed to a flow. It cannot act — acting is a Turn. Value

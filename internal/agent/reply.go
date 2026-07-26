@@ -1,5 +1,7 @@
 package agent
 
+import "github.com/force1267/big-brain/pkg/model"
+
 // Reply is the result of a Turn's Ask: the model's answer. Text is available
 // whole (ReadAll), incrementally (Read/Stream), and — via the free function
 // bb.Extract[T] — decoded into a schema type. Media accessors are present for
@@ -13,8 +15,32 @@ package agent
 // copy of a live Reply observe the same stream.
 type Reply struct {
 	content string
+	calls   []model.ToolCall
 	buf     *streamBuf
 	read    bool
+}
+
+// ToolCalls returns the tool calls the model requested. A reply is the
+// assistant's whole answer, so text and calls coexist: a model may explain
+// itself and ask for two tools in one breath. For a live (streaming) reply this
+// blocks until the answer is complete — argument text is not streamed in v1, so
+// a call is only ever seen whole.
+func (r Reply) ToolCalls() []model.ToolCall {
+	if r.buf != nil {
+		return r.buf.toolCalls()
+	}
+	return r.calls
+}
+
+// Messages returns the reply as chat messages: its text and calls as one
+// assistant message. It is what to Add to another conversation to carry an
+// answer across.
+func (r Reply) Messages() []model.Message {
+	text, calls := r.ReadAll(), r.ToolCalls()
+	if text == "" && len(calls) == 0 {
+		return nil
+	}
+	return []model.Message{model.NewMessage(text).As("assistant").WithCalls(calls...)}
 }
 
 // ReadAll returns the full reply text (blocking until a live reply completes).

@@ -16,6 +16,7 @@ import (
 type streamBuf struct {
 	mu      sync.Mutex
 	chunks  []string
+	calls   []model.ToolCall // tool calls the model asked for, collected whole
 	err     error
 	closed  bool
 	waiters []chan struct{} // woken on every append and on close
@@ -31,6 +32,10 @@ func (b *streamBuf) pump(stream <-chan model.Chunk) {
 			b.close(c.Err)
 			return
 		}
+		if c.Call != nil {
+			b.pushCall(*c.Call)
+			continue
+		}
 		b.push(c.Content)
 	}
 	b.close(nil)
@@ -41,6 +46,28 @@ func (b *streamBuf) push(c string) {
 	b.chunks = append(b.chunks, c)
 	b.wake()
 	b.mu.Unlock()
+}
+
+func (b *streamBuf) pushCall(c model.ToolCall) {
+	b.mu.Lock()
+	b.calls = append(b.calls, c)
+	b.wake()
+	b.mu.Unlock()
+}
+
+// toolCalls blocks until the reply is complete, then returns the calls. Tool
+// arguments are not streamed in v1, so waiting is what makes a call whole.
+func (b *streamBuf) toolCalls() []model.ToolCall {
+	b.mu.Lock()
+	for !b.closed {
+		w := b.wait()
+		b.mu.Unlock()
+		<-w
+		b.mu.Lock()
+	}
+	calls := append([]model.ToolCall(nil), b.calls...)
+	b.mu.Unlock()
+	return calls
 }
 
 func (b *streamBuf) close(err error) {

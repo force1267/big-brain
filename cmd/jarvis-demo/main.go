@@ -165,9 +165,9 @@ func (j *jarvis) route() bb.Flow {
 		}, "\n"))).
 		WithSchema(bb.Schema[intent]()).
 		Selects(idTalk, idRemember, idForget, idRecall, idList, idHouse, idBriefing, idRemind).
-		OnMessage(func(_ context.Context, turn bb.Turn) error {
+		OnMessage(func(_ context.Context, turn bb.Turn, chat bb.ModelChat) error {
 			msg := turn.Last().Content
-			reply, err := turn.AskWith(turn.Last())
+			reply, err := chat.AskWith(turn.Last())
 			if err != nil {
 				turn.Select(guess(msg))
 				return nil
@@ -224,12 +224,12 @@ func (j *jarvis) talk() bb.Flow {
 		WithRole(bb.Role("You are Jarvis, the assistant of this house: warm, brief, never chatty. " +
 			"Prefer one or two sentences. Use what you know about the house and the household; " +
 			"if you do not know something, say so plainly.")).
-		OnMessage(func(ctx context.Context, turn bb.Turn) error {
+		OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
 			if note := j.context(ctx); note != "" {
-				turn.Add(bb.NewMessage(note).As("system"))
+				chat.Add(bb.NewMessage(note).As("system"))
 			}
-			turn.Add(turn.Last())
-			reply, err := turn.Ask()
+			chat.Add(turn.Last())
+			reply, err := chat.Ask()
 			if err != nil {
 				return err
 			}
@@ -278,9 +278,9 @@ func (j *jarvis) remember() bb.Flow {
 		WithModel(bb.NewModel(mFast)).
 		WithRole(bb.Role("Rewrite what the user wants remembered as one short standalone fact. No commentary.")).
 		WithSchema(bb.Schema[factNote]()).
-		OnMessage(func(ctx context.Context, turn bb.Turn) error {
+		OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
 			fact := strip(turn.Last().Content, "remember that", "remember", "note that", "don't forget")
-			if reply, err := turn.AskWith(turn.Last()); err == nil {
+			if reply, err := chat.AskWith(turn.Last()); err == nil {
 				if got := strings.TrimSpace(bb.Extract[factNote](reply).Fact); got != "" {
 					fact = got
 				}
@@ -297,7 +297,7 @@ func (j *jarvis) remember() bb.Flow {
 }
 
 func (j *jarvis) forget() bb.Flow {
-	a := bb.NewAgent().OnMessage(func(ctx context.Context, turn bb.Turn) error {
+	a := bb.NewAgent().OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
 		needle := strip(turn.Last().Content, "forget about", "forget that", "forget")
 		if needle == "" {
 			turn.Reply("Forget what? Name a word from it.")
@@ -319,14 +319,14 @@ func (j *jarvis) recall() bb.Flow {
 		WithModel(bb.NewModel(mSmart)).
 		WithRole(bb.Role("Answer the user's question using only the facts given to you. " +
 			"If they do not contain the answer, say you were never told.")).
-		OnMessage(func(_ context.Context, turn bb.Turn) error {
+		OnMessage(func(_ context.Context, turn bb.Turn, chat bb.ModelChat) error {
 			facts := j.mem.facts()
 			if len(facts) == 0 {
 				turn.Reply("You haven't told me anything to keep yet.")
 				return nil
 			}
-			turn.Add(bb.NewMessage("Facts you were told:\n- " + strings.Join(facts, "\n- ")).As("system"))
-			reply, err := turn.AskWith(turn.Last())
+			chat.Add(bb.NewMessage("Facts you were told:\n- " + strings.Join(facts, "\n- ")).As("system"))
+			reply, err := chat.AskWith(turn.Last())
 			if err != nil {
 				turn.Reply("Here's what I know: " + strings.Join(facts, "; ") + ".")
 				return nil
@@ -348,9 +348,9 @@ func (j *jarvis) lists() bb.Flow {
 		WithModel(bb.NewModel(mFast)).
 		WithRole(bb.Role("Turn the user's message into one list operation.")).
 		WithSchema(bb.Schema[listOp]()).
-		OnMessage(func(ctx context.Context, turn bb.Turn) error {
+		OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
 			op := guessListOp(turn.Last().Content)
-			if reply, err := turn.AskWith(turn.Last()); err == nil {
+			if reply, err := chat.AskWith(turn.Last()); err == nil {
 				got := bb.Extract[listOp](reply)
 				if got.List != "" && got.Op != "" {
 					op = listOp{List: strings.ToLower(got.List), Op: got.Op, Item: strings.TrimSpace(got.Item)}
@@ -396,9 +396,9 @@ func (j *jarvis) control() bb.Flow {
 			"Sensors: temperature, humidity, door, motion, daylight, power. " +
 			"Set exactly one of device+state or sensor.")).
 		WithSchema(bb.Schema[command]()).
-		OnMessage(func(ctx context.Context, turn bb.Turn) error {
+		OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
 			cmd := guessCommand(turn.Last().Content)
-			if reply, err := turn.AskWith(turn.Last()); err == nil {
+			if reply, err := chat.AskWith(turn.Last()); err == nil {
 				if got := bb.Extract[command](reply); got.Device != "" || got.Sensor != "" {
 					cmd = got
 				}
@@ -435,7 +435,7 @@ func (j *jarvis) control() bb.Flow {
 func (j *jarvis) briefing() bb.Flow {
 	read := bb.NewCheckpoint()
 
-	reader := bb.NewAgent().OnMessage(func(ctx context.Context, turn bb.Turn) error {
+	reader := bb.NewAgent().OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
 		defer bb.Reached(read)
 		h, err := j.house.snapshot(ctx)
 		if err != nil {
@@ -450,15 +450,15 @@ func (j *jarvis) briefing() bb.Flow {
 		WithRole(bb.Role("Give a two-sentence spoken briefing of the house. " +
 			"Lead with anything worth acting on — an unlocked door, a light left on, an odd reading. " +
 			"Then the rest in one breath. No lists, no bullet points.")).
-		OnMessage(func(ctx context.Context, turn bb.Turn) error {
+		OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
 			if err := bb.Wait(ctx, read); err != nil {
 				return err
 			}
-			turn.Add(turn.Last())
+			chat.Add(turn.Last())
 			if extra := j.errands(); extra != "" {
-				turn.Add(bb.NewMessage(extra).As("system"))
+				chat.Add(bb.NewMessage(extra).As("system"))
 			}
-			reply, err := turn.Ask()
+			reply, err := chat.Ask()
 			if err != nil {
 				return nil // the reader's raw line is already a serviceable briefing
 			}
@@ -500,9 +500,9 @@ func (j *jarvis) remind() bb.Flow {
 		WithModel(bb.NewModel(mFast)).
 		WithRole(bb.Role("Extract the reminder and when it is due. Use minutes for relative times, at for clock times.")).
 		WithSchema(bb.Schema[reminderSpec]()).
-		OnMessage(func(ctx context.Context, turn bb.Turn) error {
+		OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
 			text, due := guessReminder(turn.Last().Content, time.Now())
-			if reply, err := turn.AskWith(turn.Last()); err == nil {
+			if reply, err := chat.AskWith(turn.Last()); err == nil {
 				got := bb.Extract[reminderSpec](reply)
 				if got.Text != "" {
 					text = got.Text
@@ -540,7 +540,7 @@ type goodnightPlan struct {
 func (j *jarvis) routines() {
 	// At boot: confirm the house answers, and say so.
 	bb.Trigger().Next(bb.NewFlow().WithAgent(bb.NewAgent().
-		OnMessage(func(ctx context.Context, turn bb.Turn) error {
+		OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
 			h, err := j.house.snapshot(ctx)
 			if err != nil {
 				turn.Reply("Jarvis is up, but the house is not answering.")
@@ -554,7 +554,7 @@ func (j *jarvis) routines() {
 	// reminders real — a cheap sweep instead of a timer per reminder.
 	bb.Trigger().Next(bb.Every("* * * * *")).Next(
 		bb.NewFlow().WithAgent(bb.NewAgent().
-			OnMessage(func(ctx context.Context, turn bb.Turn) error {
+			OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
 				for _, r := range j.mem.due(ctx, time.Now()) {
 					if err := j.house.notify(ctx, "Reminder: "+r.Text); err != nil {
 						return err
@@ -568,10 +568,10 @@ func (j *jarvis) routines() {
 		bb.NewFlow().WithAgent(bb.NewAgent().
 			WithModel(bb.NewModel(mSmart)).
 			WithRole(bb.Role("Good morning. In two sentences: the house, then the day's errands. Warm, brief, spoken.")).
-			OnMessage(func(ctx context.Context, turn bb.Turn) error {
-				turn.Add(bb.NewMessage(j.context(ctx) + " " + j.errands()).As("system"))
-				turn.Add(bb.NewMessage("Give me the morning briefing."))
-				reply, err := turn.Ask()
+			OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
+				chat.Add(bb.NewMessage(j.context(ctx) + " " + j.errands()).As("system"))
+				chat.Add(bb.NewMessage("Give me the morning briefing."))
+				reply, err := chat.Ask()
 				if err != nil {
 					turn.Reply("Good morning. " + j.context(ctx))
 					return nil
@@ -586,7 +586,7 @@ func (j *jarvis) routines() {
 		Lock: []string{"front lock"},
 	})).Next(bb.Every("30 22 * * *")).Next(
 		bb.NewFlow().WithAgent(bb.NewAgent().
-			OnMessage(func(ctx context.Context, turn bb.Turn) error {
+			OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
 				plan, ok := bb.Payload[goodnightPlan](turn)
 				if !ok {
 					plan = goodnightPlan{Off: []string{"porch light", "living light"}, Lock: []string{"front lock"}}

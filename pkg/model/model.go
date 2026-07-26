@@ -7,23 +7,41 @@ import "context"
 // code — this is what keeps brains portable across providers.
 type Role string
 
-// Message is one chat message in provider-neutral form.
+// Message is one chat message in provider-neutral form. Tool interactions are
+// messages too: an assistant message may carry Calls (with or without text),
+// and a message answering them carries Results. They are optional payloads
+// rather than a separate message type, so a heterogeneous chat stays one
+// []Message and reading them is a nil/len check, never a type assertion.
 type Message struct {
-	Role    string // "system", "user" or "assistant"
+	Role    string // "system", "user", "assistant" or "tool"
 	Content string
+	Calls   []ToolCall   // tool calls this (assistant) message requests
+	Results []ToolResult // tool results this message answers with
 }
 
-// Params are the sampling parameters the caller sent. They are context for
-// the brain, never an error; nil fields mean "not sent".
+// Params are the per-request knobs sent alongside a completion: the sampling
+// parameters, and the tools the model may call. They are context for the brain,
+// never an error; nil/empty fields mean "not sent".
 type Params struct {
 	Temperature *float64
 	MaxTokens   *int64
+
+	// Tools the model may call this request. Nothing is forwarded implicitly —
+	// an agent decides what each model sees, because a flow has several models
+	// and a small one must not be handed every tool in the process.
+	Tools []Tool
+	// ToolChoice is "" (auto), "any"/"required", "none", or a tool name to force.
+	ToolChoice string
 }
 
-// Chunk is one streamed piece of a completion. A non-nil Err ends the
-// stream and reports why.
+// Chunk is one streamed piece of a completion: a piece of text, or one
+// complete tool call the model requested. A non-nil Err ends the stream and
+// reports why. Tool-call ARGUMENTS are not streamed in v1 — a provider buffers
+// a call's argument deltas and emits it whole — so a Chunk carrying a Call is
+// always complete.
 type Chunk struct {
 	Content string
+	Call    *ToolCall
 	Err     error
 }
 
@@ -37,14 +55,27 @@ type Model interface {
 type Models map[Role]Model
 
 // Collect drains a stream into the full completion text, returning the
-// terminal error if the stream ended badly.
+// terminal error if the stream ended badly. Tool calls are discarded — use
+// CollectAll where they matter.
 func Collect(stream <-chan Chunk) (string, error) {
+	text, _, err := CollectAll(stream)
+	return text, err
+}
+
+// CollectAll drains a stream into the completion text and the tool calls the
+// model requested. A completion can carry both: an assistant may answer in
+// prose and ask for a tool in the same turn.
+func CollectAll(stream <-chan Chunk) (string, []ToolCall, error) {
 	var b []byte
+	var calls []ToolCall
 	for c := range stream {
 		if c.Err != nil {
-			return string(b), c.Err
+			return string(b), calls, c.Err
+		}
+		if c.Call != nil {
+			calls = append(calls, *c.Call)
 		}
 		b = append(b, c.Content...)
 	}
-	return string(b), nil
+	return string(b), calls, nil
 }

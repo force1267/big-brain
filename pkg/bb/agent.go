@@ -11,11 +11,23 @@ import (
 // a Turn, supplied to OnMessage.
 type Agent = agent.Agent
 
-// Turn is the runtime handle inside OnMessage: the agent acting on one incoming
-// message (Add/Last/Messages/Ask/AskWith/Reply/Select/Stream/Request). It has no
-// With… methods — a turn cannot reconfigure its agent. Stream taps the live
-// client output at the terminal flow; Request reads the caller's params.
+// Turn is the CLIENT-facing runtime handle inside OnMessage: what came in
+// (Messages/Last/Request/ToolResults) and what goes back (Reply/Stream/Call),
+// plus routing (Select). It never talks to a model — that is ModelChat, handed
+// to the handler beside it. It has no With… methods either: a turn cannot
+// reconfigure its agent. Stream taps the live client output at the terminal
+// flow; Request reads the caller's params and declared tools.
 type Turn = *agent.Turn
+
+// ModelChat is the MODEL-facing runtime handle inside OnMessage: the agent's
+// live conversation with its upstream model (Add/WithTools/ForwardTools/
+// WithToolChoice/Ask/AskWith/Resolve). Same nouns as Turn flow both ways, so
+// which handle you touch is what says which direction you meant: chat.Ask asks
+// the model, turn.Reply answers the client.
+//
+// A ModelChat also works on its own — bb.NewModel("smart").Chat(ctx) — so
+// talking to a model needs no flow, agent or server.
+type ModelChat = *agent.ModelChat
 
 // Request is the client's request params (model, temperature, max_tokens) as
 // read-only context, retrieved with Turn.Request. It is input for a handler to
@@ -29,13 +41,31 @@ type Reply = agent.Reply
 // NewAgent starts an agent builder.
 func NewAgent() Agent { return agent.New() }
 
-// Extract decodes a reply into the schema type T. It is a free function, not a
-// method, because Go methods cannot take type parameters — the same reason
-// bb.Schema[T]() is a free function. The agent's Ask already validated the
-// reply against its schema, so this is a pure typed getter.
-func Extract[T any](r Reply) T {
+// Extractable is what Extract can decode: a model's reply (against the agent's
+// schema) or a tool call (against the tool's). Both are "JSON the model
+// produced for a shape you declared", so they share one accessor.
+type Extractable interface{ Reply | ToolCall }
+
+// Extract decodes a reply, or a tool call's arguments, into T. It is a free
+// function, not a method, because Go methods cannot take type parameters — the
+// same reason bb.Schema[T]() is a free function. T is written, the source type
+// is inferred:
+//
+//	response := bb.Extract[intent](reply)      // the model's structured answer
+//	args := bb.Extract[sensorArgs](call)       // one tool call's arguments
+//
+// It cannot fail: Ask already validated a reply against the agent's schema, and
+// a tool call's shape was declared to the model — so this is a pure typed
+// getter, and a model that ignored the shape yields the zero value. (bb.OnCall
+// decodes for you; Extract is for the manual path.)
+func Extract[T any, S Extractable](src S) T {
 	var v T
-	_ = json.Unmarshal([]byte(r.ReadAll()), &v)
+	switch s := any(src).(type) {
+	case Reply:
+		_ = json.Unmarshal([]byte(s.ReadAll()), &v)
+	case ToolCall:
+		_ = json.Unmarshal(s.Input, &v)
+	}
 	return v
 }
 

@@ -19,10 +19,11 @@ func Monitored(m Model, name string) Model {
 	calls, err1 := meter.Int64Counter("model.calls")
 	dur, err2 := meter.Float64Histogram("model.call.seconds")
 	chunks, err3 := meter.Int64Counter("model.chunks")
-	if err1 != nil || err2 != nil || err3 != nil {
+	tools, err4 := meter.Int64Counter("model.tool.calls")
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
 		return m // metrics must never break the model path
 	}
-	return monitoredModel{inner: m, name: name, calls: calls, dur: dur, chunks: chunks}
+	return monitoredModel{inner: m, name: name, calls: calls, dur: dur, chunks: chunks, tools: tools}
 }
 
 type monitoredModel struct {
@@ -31,6 +32,7 @@ type monitoredModel struct {
 	calls  metric.Int64Counter
 	dur    metric.Float64Histogram
 	chunks metric.Int64Counter
+	tools  metric.Int64Counter // tool calls the model requested — the rate to watch when an agent loops
 }
 
 var _ Model = monitoredModel{}
@@ -49,9 +51,12 @@ func (m monitoredModel) Stream(ctx context.Context, msgs []Message, p Params) (<
 		defer close(out)
 		outcome := "ok"
 		for c := range stream {
-			if c.Err != nil {
+			switch {
+			case c.Err != nil:
 				outcome = "error"
-			} else {
+			case c.Call != nil:
+				m.tools.Add(ctx, 1, attrs, metric.WithAttributes(attribute.String("tool", c.Call.Name)))
+			default:
 				m.chunks.Add(ctx, 1, attrs)
 			}
 			out <- c

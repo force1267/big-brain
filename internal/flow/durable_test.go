@@ -20,7 +20,7 @@ func (s *memStore) Put(_ context.Context, k string, v []byte) error { s.m[k] = v
 
 // countingAgent records how many times it actually asks the model.
 func countingAgent(counter *atomic.Int64, reply string) agent.Agent {
-	return agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
+	return agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 		counter.Add(1)
 		turn.Reply(reply)
 		return nil
@@ -81,7 +81,7 @@ func TestCheckpointChainPartial(t *testing.T) {
 	// First run completes A but we cut it off before B by making B fail once.
 	failB := &atomic.Bool{}
 	failB.Store(true)
-	fb2 := New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
+	fb2 := New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 		b.Add(1)
 		if failB.CompareAndSwap(true, false) {
 			return context.Canceled

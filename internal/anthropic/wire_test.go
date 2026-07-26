@@ -27,7 +27,7 @@ func TestRequestDecodesStringAndBlockContent(t *testing.T) {
 
 func TestWriteResponseShape(t *testing.T) {
 	rec := httptest.NewRecorder()
-	WriteResponse(rec, "msg_1", "jarvis", "hello")
+	WriteResponse(rec, "msg_1", "jarvis", "hello", nil)
 	var resp struct {
 		Type       string
 		Role       string
@@ -51,7 +51,7 @@ func TestStreamEventSequence(t *testing.T) {
 	if err := WriteDelta(&b, "hel"); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteStop(&b); err != nil {
+	if err := WriteStop(&b, nil); err != nil {
 		t.Fatal(err)
 	}
 	out := b.String()

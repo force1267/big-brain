@@ -427,8 +427,9 @@ func flowHouse(ctx context.Context) (bb.Flow, error) {
 	//       func(ctx context.Context, a deviceArgs) (string, error) { return setHouseDevice(ctx, a.Device, a.On), nil })
 	// note WithSchema stays where it is: EVERY tool is built As → Is → WithSchema, including the ones
 	// parsed off the wire, and OnCall only CHECKS that bb.Schema[T]() of the handler's argument matches
-	// the schema already on the tool. a mismatch is a wiring error reported at bb.Serve, next to unknown
-	// model names and bad Select ids — one Tool shape, and drift still cannot ship.
+	// the schema already on the tool. a mismatch is recorded on the returned tool and surfaces at the
+	// first chat.Ask that would send it — not at bb.Serve, because a tool is a runtime value declared
+	// per ask, so startup has nothing to inspect. either way the broken tool never reaches a provider.
 	// for a tool that wants to inspect its own raw arguments there is the untyped escape hatch:
 	//   .OnCall(func(ctx context.Context, call bb.ToolCall) (string, error) { ... })
 	// a tool that arrived over the wire (turn.Request().Tools()) is always bare: a forwarded tool never
@@ -447,8 +448,9 @@ func flowHouse(ctx context.Context) (bb.Flow, error) {
 		// direction is carried by WHICH HANDLE you touch, never by an overloaded verb. chat.Ask
 		// asks the model; turn.Reply answers the client. chat.Add builds the prompt (this is where
 		// the old turn.Add went); turn.Call asks the client to run something.
-		// chat is a ModelChat — a live conversation, not the Model definition. bb.NewModel(ModelCheap).Chat()
+		// chat is a ModelChat — a live conversation, not the Model definition. bb.Chat(ctx, bb.NewModel(ModelCheap))
 		// gives you the same handle outside any flow, if you just want to talk to a model in plain Go.
+		// (a free function rather than model.Chat(): pkg/model cannot import the agent package it would return.)
 		OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
 			// INNER tools: the model asks, MARVIS runs the tool in Go, the user never sees it.
 			// chat.WithTools declares them for this ask only — nothing is forwarded implicitly, because
@@ -521,6 +523,11 @@ func flowHouse(ctx context.Context) (bb.Flow, error) {
 			// a handler returning an error becomes an is_error result the model can see and retry against
 			// (only a cancelled ctx aborts); and there is a round cap (.WithMaxRounds(n), default 8) so a
 			// model that keeps calling forever errors instead of spinning.
+			// one rule to know: a round is ALL-OR-NOTHING. if a single batch mixes tools marvis can run
+			// with tools only the client can, Resolve runs NONE of them and hands the whole batch back —
+			// both providers reject a turn where some tool_use went unanswered, and running a side effect
+			// whose result must then be thrown away is worse than not running it. relay it and let the
+			// client answer; the flow re-runs with the results in hand.
 			// note Resolve runs your Go on the server, so a Durable flow that resumes runs it AGAIN —
 			// at-least-once, exactly like the manual loop above, just less visible.
 		})

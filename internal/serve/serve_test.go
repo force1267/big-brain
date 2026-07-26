@@ -70,7 +70,7 @@ func TestServeAnthropic(t *testing.T) {
 
 // A flow error becomes a 500 with the error body.
 func TestServeFlowError(t *testing.T) {
-	boom := flow.New().WithAgent(agent.New().OnMessage(func(context.Context, *agent.Turn) error {
+	boom := flow.New().WithAgent(agent.New().OnMessage(func(context.Context, *agent.Turn, *agent.ModelChat) error {
 		return context.Canceled
 	}))
 	s := &server{def: boom, name: "brain", tracer: &ring{max: 10}, ring: &ring{max: 10}}
@@ -121,7 +121,7 @@ func TestModels(t *testing.T) {
 func TestRequestParamsReachHandler(t *testing.T) {
 	var got agent.Request
 	capture := flow.New().WithAgent(
-		agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
+		agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 			got = turn.Request()
 			turn.Reply("ok")
 			return nil

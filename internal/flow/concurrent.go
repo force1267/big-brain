@@ -65,12 +65,13 @@ func runAgents(ctx context.Context, flowID string, agents []agent.Agent, chat []
 // conversation; otherwise it gets an isolated copy.
 func runOneAgent(ctx context.Context, flowID string, ag agent.Agent, i int, chat []model.Message) ([]model.Message, string, bool, error) {
 	var turn *agent.Turn
+	var mc *agent.ModelChat
 	if sh := sharedFrom(ctx); sh != nil {
-		turn = agent.NewSharedTurn(ctx, ag, sh)
+		turn, mc = agent.NewSharedTurn(ctx, ag, sh)
 	} else {
-		turn = agent.NewTurn(ctx, ag, chat)
+		turn, mc = agent.NewTurn(ctx, ag, chat)
 	}
-	err := runAgent(ctx, ag, turn, chat)
+	err := runAgent(ctx, ag, turn, mc, chat)
 	// Wait for any streaming goroutine to finish writing to the client before
 	// returning, so a later write (the buffered emit, or an error frame) never
 	// races it — this must happen on the error path too.

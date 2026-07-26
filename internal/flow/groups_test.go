@@ -30,7 +30,7 @@ func TestAllMerges(t *testing.T) {
 
 // All surfaces a member error and cancels the rest.
 func TestAllError(t *testing.T) {
-	bad := New().WithAgent(agent.New().OnMessage(func(context.Context, *agent.Turn) error {
+	bad := New().WithAgent(agent.New().OnMessage(func(context.Context, *agent.Turn, *agent.ModelChat) error {
 		return errors.New("boom")
 	}))
 	_, err := Run(context.Background(), All(New().WithAgent(mockAgent("ok")), bad), chat("x"), nil)
@@ -41,11 +41,11 @@ func TestAllError(t *testing.T) {
 
 // One takes the first finisher; the slow member is cancelled.
 func TestOneFirstWins(t *testing.T) {
-	fast := New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
+	fast := New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 		turn.Reply("fast")
 		return nil
 	}))
-	slow := New().WithAgent(agent.New().OnMessage(func(ctx context.Context, turn *agent.Turn) error {
+	slow := New().WithAgent(agent.New().OnMessage(func(ctx context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 		select {
 		case <-time.After(time.Second):
 			turn.Reply("slow")
@@ -81,12 +81,12 @@ func TestGroupMerges(t *testing.T) {
 // Group gives members a live shared chat: one member sees another's reply.
 func TestGroupLiveVisibility(t *testing.T) {
 	cp := NewCheckpoint()
-	a := New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
+	a := New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 		turn.Reply("from-A")
 		Reached(cp) // signal B that A has replied
 		return nil
 	}))
-	b := New().WithAgent(agent.New().OnMessage(func(ctx context.Context, turn *agent.Turn) error {
+	b := New().WithAgent(agent.New().OnMessage(func(ctx context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 		if err := Wait(ctx, cp); err != nil { // wait until A has replied
 			return err
 		}
@@ -114,11 +114,11 @@ func TestGroupLiveVisibility(t *testing.T) {
 
 // A divergent select across group members is a conflict.
 func TestGroupSelectConflict(t *testing.T) {
-	a := New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
+	a := New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 		turn.Select("A")
 		return nil
 	}))
-	b := New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
+	b := New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 		turn.Select("B")
 		return nil
 	}))

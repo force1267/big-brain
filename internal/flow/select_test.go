@@ -11,7 +11,7 @@ import (
 
 // router is a flow whose single agent selects the given id.
 func router(selectID string) Flow {
-	a := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn) error {
+	a := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 		turn.Select(selectID)
 		return nil
 	})

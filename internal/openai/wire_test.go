@@ -21,7 +21,7 @@ func TestChatRequestDecodesKnownAndIgnoresUnknown(t *testing.T) {
 
 func TestWriteResponseShape(t *testing.T) {
 	rec := httptest.NewRecorder()
-	WriteResponse(rec, "id1", "jarvis", "hello")
+	WriteResponse(rec, "id1", "jarvis", "hello", nil)
 	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -40,7 +40,7 @@ func TestWriteChunkAndDoneAreSSE(t *testing.T) {
 	if err := WriteChunk(&b, "id1", "jarvis", "hel"); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteDone(&b, "id1", "jarvis"); err != nil {
+	if err := WriteDone(&b, "id1", "jarvis", nil); err != nil {
 		t.Fatal(err)
 	}
 	out := b.String()

@@ -2,11 +2,14 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 // ErrUpstream wraps failures talking to the backing provider.
@@ -32,20 +35,23 @@ var _ Model = openaiModel{}
 func (m openaiModel) Stream(ctx context.Context, msgs []Message, p Params) (<-chan Chunk, error) {
 	body := openai.ChatCompletionNewParams{Model: m.name}
 	for _, msg := range msgs {
-		switch msg.Role {
-		case "system":
-			body.Messages = append(body.Messages, openai.SystemMessage(msg.Content))
-		case "assistant":
-			body.Messages = append(body.Messages, openai.AssistantMessage(msg.Content))
-		default:
-			body.Messages = append(body.Messages, openai.UserMessage(msg.Content))
-		}
+		body.Messages = append(body.Messages, openaiMessages(msg)...)
 	}
 	if p.Temperature != nil {
 		body.Temperature = openai.Float(*p.Temperature)
 	}
 	if p.MaxTokens != nil {
 		body.MaxCompletionTokens = openai.Int(*p.MaxTokens)
+	}
+	for _, t := range p.Tools {
+		body.Tools = append(body.Tools, openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
+			Name:        t.Name,
+			Description: openai.String(t.Description),
+			Parameters:  shared.FunctionParameters(t.Schema),
+		}))
+	}
+	if c := openaiToolChoice(p.ToolChoice); c != nil {
+		body.ToolChoice = *c
 	}
 
 	stream := m.client.Chat.Completions.NewStreaming(ctx, body)
@@ -57,13 +63,25 @@ func (m openaiModel) Stream(ctx context.Context, msgs []Message, p Params) (<-ch
 	go func() {
 		defer close(out)
 		defer stream.Close()
+		// Tool-call deltas arrive interleaved and split by index (id and name in
+		// the first, argument JSON in pieces after). v1 does not stream argument
+		// text, so they are accumulated here and emitted whole at the end —
+		// which also means a Chunk carrying a Call is always complete.
+		calls := newCallBuf()
 		for stream.Next() {
 			c := stream.Current()
-			if len(c.Choices) == 0 || c.Choices[0].Delta.Content == "" {
+			if len(c.Choices) == 0 {
+				continue
+			}
+			d := c.Choices[0].Delta
+			for _, tc := range d.ToolCalls {
+				calls.add(tc.Index, tc.ID, tc.Function.Name, tc.Function.Arguments)
+			}
+			if d.Content == "" {
 				continue
 			}
 			select {
-			case out <- Chunk{Content: c.Choices[0].Delta.Content}:
+			case out <- Chunk{Content: d.Content}:
 			case <-ctx.Done():
 				return
 			}
@@ -73,7 +91,129 @@ func (m openaiModel) Stream(ctx context.Context, msgs []Message, p Params) (<-ch
 			case out <- Chunk{Err: fmt.Errorf("%w: %w", ErrUpstream, err)}:
 			case <-ctx.Done():
 			}
+			return
+		}
+		for _, call := range calls.done() {
+			select {
+			case out <- Chunk{Call: &call}:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 	return out, nil
+}
+
+// openaiMessages renders one neutral Message as OpenAI wire messages. Results
+// are the reason this returns a slice: OpenAI models a tool result as its own
+// role:"tool" message per call, so one neutral message answering three parallel
+// calls becomes three — the coalescing that matters is on the model's side of
+// the wire, and that framing is the provider's business, not the author's.
+func openaiMessages(msg Message) []openai.ChatCompletionMessageParamUnion {
+	var out []openai.ChatCompletionMessageParamUnion
+	for _, r := range msg.Results {
+		content := r.Content
+		if r.IsError && content == "" {
+			content = "error"
+		}
+		out = append(out, openai.ToolMessage(content, r.CallID))
+	}
+	if len(msg.Calls) > 0 {
+		a := openai.ChatCompletionAssistantMessageParam{}
+		if msg.Content != "" {
+			a.Content.OfString = openai.String(msg.Content)
+		}
+		for _, c := range msg.Calls {
+			a.ToolCalls = append(a.ToolCalls, openai.ChatCompletionMessageToolCallUnionParam{
+				OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
+					ID: c.ID,
+					Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
+						Name:      c.Name,
+						Arguments: string(c.Input),
+					},
+				},
+			})
+		}
+		return append(out, openai.ChatCompletionMessageParamUnion{OfAssistant: &a})
+	}
+	if len(out) > 0 && msg.Content == "" {
+		return out // a pure tool-result message has nothing else to say
+	}
+	switch msg.Role {
+	case "system":
+		return append(out, openai.SystemMessage(msg.Content))
+	case "assistant":
+		return append(out, openai.AssistantMessage(msg.Content))
+	case "tool":
+		return out
+	default:
+		return append(out, openai.UserMessage(msg.Content))
+	}
+}
+
+// openaiToolChoice maps the neutral choice onto the provider's union. "" is
+// auto (the provider default), so it sends nothing.
+func openaiToolChoice(choice string) *openai.ChatCompletionToolChoiceOptionUnionParam {
+	switch choice {
+	case "", "auto":
+		return nil
+	case "any", "required", "none":
+		c := choice
+		if c == "any" {
+			c = "required" // "any" is the Anthropic spelling of the same intent
+		}
+		return &openai.ChatCompletionToolChoiceOptionUnionParam{OfAuto: openai.String(c)}
+	default:
+		return &openai.ChatCompletionToolChoiceOptionUnionParam{
+			OfFunctionToolChoice: &openai.ChatCompletionNamedToolChoiceParam{
+				Function: openai.ChatCompletionNamedToolChoiceFunctionParam{Name: choice},
+			},
+		}
+	}
+}
+
+// callBuf accumulates streamed tool-call deltas by their stream index, keeping
+// first-seen order so parallel calls come out as the model asked for them.
+type callBuf struct {
+	order []int64
+	byIdx map[int64]*ToolCall
+	args  map[int64]*strings.Builder
+}
+
+func newCallBuf() *callBuf {
+	return &callBuf{byIdx: map[int64]*ToolCall{}, args: map[int64]*strings.Builder{}}
+}
+
+func (b *callBuf) add(idx int64, id, name, args string) {
+	c, ok := b.byIdx[idx]
+	if !ok {
+		c = &ToolCall{}
+		b.byIdx[idx] = c
+		b.args[idx] = &strings.Builder{}
+		b.order = append(b.order, idx)
+	}
+	if id != "" {
+		c.ID = id
+	}
+	if name != "" {
+		c.Name = name
+	}
+	b.args[idx].WriteString(args)
+}
+
+// done returns the assembled calls. A call the provider left without an id
+// still needs one, since every result must reference something.
+func (b *callBuf) done() []ToolCall {
+	out := make([]ToolCall, 0, len(b.order))
+	for _, idx := range b.order {
+		c := *b.byIdx[idx]
+		if c.ID == "" {
+			c.ID = NewCallID()
+		}
+		if s := b.args[idx].String(); s != "" {
+			c.Input = json.RawMessage(s)
+		}
+		out = append(out, c)
+	}
+	return out
 }
