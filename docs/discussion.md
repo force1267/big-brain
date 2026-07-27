@@ -423,7 +423,7 @@ sink), with memory as author state, concurrent sensor reads, a `Notify` flow
 after `Respond`, and durability. It runs with no API key. Building it surfaced an
 honest limitation to report rather than paper over: the request→flow surface has
 no scheduled/cron trigger and no true fire-after-reply async — those live in
-`pkg/engine`, unexposed (captured in `next.md`).
+`pkg/engine`, unexposed (captured as a follow-up item at the time).
 
 Cleanup was aggressive, as the author encouraged: `pkg/{brain,serve,memory,
 notify,cron,job}`, `internal/{app,config,logging,telemetry}`, and `cmd/cli` were
@@ -927,7 +927,7 @@ Four semantics pinned with it:
    `is_error` is for. Only context cancellation and panics abort.
 2. **A round cap.** `Resolve` loops, so a model can loop it forever: a default cap
    (~8) with `.WithMaxRounds(n)` and an error on exhaustion. This is the
-   runaway-cycle guard already open in `next.md`, arriving early because `Resolve`
+   runaway-cycle guard already flagged as open work, arriving early because `Resolve`
    is the first construct that can spin without the author writing a `for`.
 3. **`Resolve` stays opt-in inside `OnMessage`.** The bare-agent proxy still does
    not resolve — it forwards and relays, and caller tools have no local handler to

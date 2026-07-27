@@ -29,7 +29,7 @@ func TestAllMerges(t *testing.T) {
 }
 
 // Replies must land in declaration order regardless of which member finishes
-// first (next.md #3a): member 0 is made the slow one, so a completion-order
+// first: member 0 is made the slow one, so a completion-order
 // merge would put "one" after "two" instead of before it.
 func TestAllPreservesDeclarationOrder(t *testing.T) {
 	slow := New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
@@ -83,8 +83,7 @@ func TestOneFirstWins(t *testing.T) {
 }
 
 // One's commit-on-acceptance rule: a trigger reached inside a losing member is
-// discarded, not scheduled anyway — only the winner's trigger sticks
-// (next.md #3).
+// discarded, not scheduled anyway — only the winner's trigger sticks.
 func TestOneDiscardsLosingMemberTrigger(t *testing.T) {
 	sch := &mockScheduler{}
 	when := time.Now().Add(time.Hour)
@@ -115,7 +114,7 @@ func TestOneDiscardsLosingMemberTrigger(t *testing.T) {
 
 // One's commit-on-acceptance rule, two levels deep: One(One(a, b), c). The
 // inner race resolves (a beats b) and reaches a trigger, but the outer race
-// picks the sibling c instead — a's trigger must never fire (next.md #8).
+// picks the sibling c instead — a's trigger must never fire.
 func TestNestedOneDiscardsLosingMemberTrigger(t *testing.T) {
 	sch := &mockScheduler{}
 	when := time.Now().Add(time.Hour)

@@ -96,7 +96,7 @@ func TestBasicMultiAgentConcurrent(t *testing.T) {
 }
 
 // Replies must land in declaration order regardless of which agent's model
-// call finishes first (next.md #3a): agent 0 is made the slow one, so a
+// call finishes first: agent 0 is made the slow one, so a
 // completion-order merge would put "a1" after "a0" instead of before it.
 func TestBasicMultiAgentPreservesDeclarationOrder(t *testing.T) {
 	slow := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {

@@ -90,7 +90,7 @@ func Payload[T any](turn Turn) (v T, ok bool) {
 // WithSeedMetadata. ok is false when the run carries no metadata or it does
 // not decode into T. It is Payload's sibling, kept as a separate channel
 // rather than merged into Payload's T so a field name can never collide
-// across the two sources (next.md #7). A free function, like Payload, because
+// across the two sources. A free function, like Payload, because
 // Go methods cannot be generic.
 func Metadata[T any](turn Turn) (v T, ok bool) {
 	raw := turn.Metadata()

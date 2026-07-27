@@ -91,12 +91,12 @@ type Webhooks interface {
 
 // WebhookHandler is what a Webhook trigger hands the registry. HasReply
 // reports whether the body reaches a top-level Respond (same shallow scan
-// terminalStep uses — it does not see through Select/One/All/Group; see
-// next.md #5): Serve waits for the run and replies with its content only
+// terminalStep uses — it does not see through Select/One/All/Group):
+// Serve waits for the run and replies with its content only
 // when true, else it acknowledges immediately and runs the body in the
 // background. Run executes the body with the incoming request's raw payload,
 // readable inside via bb.Payload[T], and its flattened request headers,
-// readable via bb.Metadata[T] (next.md #7), and returns the resulting chat.
+// readable via bb.Metadata[T], and returns the resulting chat.
 type WebhookHandler struct {
 	HasReply bool
 	Run      func(ctx context.Context, payload, meta []byte) (State, error)
@@ -131,7 +131,7 @@ func triggerDepthFrom(ctx context.Context) int {
 // pendingCommit collects Scheduler.Defer calls a One member wants to make,
 // without actually making them yet — fanOut installs one per member on ctx
 // only when running a One (first=true), and commits only the winner's after
-// the group has resolved (next.md #3). All/Group never install one, so
+// the group has resolved. All/Group never install one, so
 // deferBody commits immediately for them, same as outside any group.
 type pendingCommit struct {
 	mu    sync.Mutex
@@ -239,7 +239,7 @@ func registerWebhook(ctx context.Context, tn *triggerNode, rest []Flow, in State
 // reachesRespond reports whether any path through steps can reach a Respond,
 // recursing into Select/One/All/Group members: a Select's runtime pick, a
 // One's eventual winner, and All/Group's parallel branches are all unknown at
-// registration time, so any member reaching Respond counts (next.md #5) — a
+// registration time, so any member reaching Respond counts — a
 // webhook whose only reply is behind a group, or behind a Select member other
 // than the "default" one, is still recognized as "may reply" rather than
 // silently downgraded to background-only.

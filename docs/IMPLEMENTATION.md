@@ -164,7 +164,7 @@ re-runs the terminal flow and re-streams from the top.
 
 Recorded so the built system and the goal post (`cmd/marvis-demo/main.go`) don't
 silently diverge; the reasoning is in `docs/discussion.md` ("Everything is a
-flow…") and the plan in `next.md` (#2). Phase A (`WithId`/`WithModel` on the
+flow…") and the plan tracked at the time (#2). Phase A (`WithId`/`WithModel` on the
 interface), Phase B (loud typed durability), Phase C (triggers + engine wiring),
 and Phase D's turn data model (`bb.Payload[T]`) are now built (above). The
 payload — arbitrary trigger data — rides the context as raw JSON (`agent.WithPayload`),

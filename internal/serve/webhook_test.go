@@ -80,7 +80,7 @@ func TestWebhookNoReplyAcknowledgesAsync(t *testing.T) {
 
 // A webhook's request headers reach the body via bb.Metadata[T]
 // (turn.Metadata, agent.MetadataFrom) — Payload's sibling channel, populated
-// from headers rather than the POST body (next.md #7).
+// from headers rather than the POST body.
 func TestWebhookHeadersReachMetadata(t *testing.T) {
 	flow.ResetTriggers()
 	t.Cleanup(flow.ResetTriggers)
@@ -112,7 +112,7 @@ func TestWebhookHeadersReachMetadata(t *testing.T) {
 // flattenHeaders canonicalizes header keys and keeps only the first value of
 // a repeated header (http.Header.Get's own convention) — the wire shape
 // bb.Metadata[T] decodes, deliberately map[string]string rather than
-// http.Header (next.md #7: Metadata is not HTTP-specific).
+// http.Header (Metadata is not HTTP-specific).
 func TestFlattenHeaders(t *testing.T) {
 	h := http.Header{}
 	h.Add("x-signature", "first")

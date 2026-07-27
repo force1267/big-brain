@@ -110,7 +110,7 @@ func TestEveryCarriesCron(t *testing.T) {
 }
 
 // A deferred body with no id-bearing top-level step is a loud registration-time
-// error, not a silently skipped schedule (next.md #6).
+// error, not a silently skipped schedule.
 func TestTriggerUnnamedBodyErrors(t *testing.T) {
 	sch := &mockScheduler{}
 	var ran []string
@@ -126,7 +126,7 @@ func TestTriggerUnnamedBodyErrors(t *testing.T) {
 }
 
 // A deferred body with more than one id-bearing top-level step is ambiguous —
-// a loud error, not a silent "" (next.md #6).
+// a loud error, not a silent "".
 func TestTriggerBodyAmbiguousIdErrors(t *testing.T) {
 	sch := &mockScheduler{}
 	var ran []string
@@ -148,7 +148,7 @@ func TestTriggerBodyAmbiguousIdErrors(t *testing.T) {
 
 // A deferred body built from several top-level steps, exactly one of which
 // carries WithId, resolves to that one id — the id names only the flow it was
-// called on, same as everywhere else WithId is used (next.md #6).
+// called on, same as everywhere else WithId is used.
 func TestTriggerBodyResolvesSingleIdAmongMany(t *testing.T) {
 	sch := &mockScheduler{}
 	var ran []string
@@ -203,7 +203,7 @@ func TestPayloadSeedAndReplay(t *testing.T) {
 	}
 }
 
-// Metadata is Payload's sibling channel (next.md #7): a seeded metadata value
+// Metadata is Payload's sibling channel: a seeded metadata value
 // reaches an agent via the turn, and survives being captured, JSON-round-
 // tripped through the scheduler, and replayed across a scheduled fire — same
 // promise as Payload, needed because Durable/cron bodies rehydrate from the
@@ -365,7 +365,7 @@ func TestWebhookHasReply(t *testing.T) {
 }
 
 // HasReply sees a Respond nested inside Select/One/All/Group members, not
-// just a top-level one (next.md #5).
+// just a top-level one.
 func TestWebhookHasReplyThroughGroups(t *testing.T) {
 	wh := &mockWebhooks{}
 	t.Cleanup(ResetTriggers)
@@ -422,7 +422,7 @@ func TestWebhookHasReplyThroughGroups(t *testing.T) {
 
 // A webhook's incoming payload is readable via bb.Payload[T] (agent.PayloadFrom),
 // its request headers (flattened by the caller into metadata) are readable via
-// bb.Metadata[T] (agent.MetadataFrom, next.md #7), and Chat/Req seeded on the
+// bb.Metadata[T] (agent.MetadataFrom), and Chat/Req seeded on the
 // Trigger chain up to the Webhook node is replayed on every fire, same as
 // Every/Once replay their captured state.
 func TestWebhookPayloadAndSeedReplay(t *testing.T) {

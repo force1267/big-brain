@@ -58,7 +58,7 @@ func runAgents(ctx context.Context, flowID string, agents []agent.Agent, chat []
 	if conflict {
 		return nil, "", false, fmt.Errorf("%w: flow %q", ErrSelectConflict, flowID)
 	}
-	// Flatten in declaration order, not completion order (next.md #3a).
+	// Flatten in declaration order, not completion order.
 	for _, r := range byIndex {
 		replies = append(replies, r...)
 	}

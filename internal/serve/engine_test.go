@@ -128,7 +128,7 @@ func TestServeRunsTriggerChain(t *testing.T) {
 
 // A Durable flow nested inside a triggered body actually checkpoints: the
 // engine worker's ctx must carry a flow.Store keyed to the firing run, the
-// same way a normal HTTP-served request's ctx does (next.md #2).
+// same way a normal HTTP-served request's ctx does.
 func TestTriggeredDurableFlowCheckpoints(t *testing.T) {
 	store := newRecordingStore()
 	sched, err := newEngineScheduler(store)
@@ -173,8 +173,8 @@ func TestTriggeredDurableFlowCheckpoints(t *testing.T) {
 // the checkpoint is actually honored on resume — a second firing that shares
 // the same engine.RunID skips re-running the completed Durable step, same
 // promise TestCheckpointResumes proves for the plain flow.WithCheckpoint
-// path, now through the real triggered-engine wiring (next.md #2's stated
-// gap in the original test).
+// path, now through the real triggered-engine wiring — a gap the original
+// test left unstated.
 //
 // Defer always mints a fresh uuid per firing, so two Defer calls would each
 // get their own checkpoint scope (correct for two distinct firings, but not
@@ -240,8 +240,8 @@ func TestTriggeredDurableFlowResumeSkipsCompletedStep(t *testing.T) {
 // registered trigger chain on every process boot, so Defer's one-shot branch
 // must dedupe repeated calls for the same body — both while the run is still
 // pending (multiple restarts before `at`) and after it has already fired (a
-// restart long after `at`), the gap next.md #1 identified in the naive
-// Enqueue-with-a-fresh-uuid implementation.
+// restart long after `at`) — a gap the naive Enqueue-with-a-fresh-uuid
+// implementation had.
 func TestOnceTriggerDoesNotRefireAcrossRestarts(t *testing.T) {
 	sched, err := newEngineScheduler(engine.NewMemStore())
 	if err != nil {
@@ -297,7 +297,7 @@ func TestOnceTriggerDoesNotRefireAcrossRestarts(t *testing.T) {
 	}
 }
 
-// bb.Metadata[T] (next.md #7) is claimed to survive scheduling/replay "the
+// bb.Metadata[T] is claimed to survive scheduling/replay "the
 // same promise Payload already had" — proven for Payload by
 // TestTriggeredDurableFlowCheckpoints/ResumeSkip's Store wiring, but the
 // existing metadata tests (TestMetadataSeedAndReplay,

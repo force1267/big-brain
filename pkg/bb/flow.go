@@ -62,7 +62,7 @@ func Once(t time.Time) Flow { return flow.Once(t) }
 // the body's own WithId (a public URL a caller hardcodes vs. an internal
 // Durable/Select identity — different concerns). The request body is read
 // back inside via bb.Payload[T]; the request's headers are read back via
-// bb.Metadata[T] (next.md #7). If the body reaches a top-level Respond,
+// bb.Metadata[T]. If the body reaches a top-level Respond,
 // Serve waits for it and replies with its content; otherwise it acknowledges
 // immediately (202) and runs the body in the background — don't block a
 // webhook sender on a long job. No auth, rate limiting, or body-size cap is
@@ -94,8 +94,8 @@ func WithSeedPayload(v any) TriggerOpt { return flow.WithSeedPayload(v) }
 
 // WithSeedMetadata seeds out-of-band trigger metadata, readable in the chain
 // via bb.Metadata[T] — Payload's sibling channel for non-body data (a
-// webhook's headers are the other way metadata gets populated; see next.md
-// #7 for why the two are kept separate).
+// webhook's headers are the other way metadata gets populated — kept
+// separate so a body field and a header can never collide by accident).
 func WithSeedMetadata(v any) TriggerOpt { return flow.WithSeedMetadata(v) }
 
 // All runs every member flow concurrently, each over its own copy of the chat;

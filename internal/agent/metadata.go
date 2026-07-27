@@ -8,7 +8,7 @@ import "context"
 // is bb.Metadata[T] (a free function, same reason as bb.Payload[T]). Kept as
 // its own ctx key rather than merged into Payload's T: merging by field-name
 // match across two sources (body vs headers) risks a field colliding by
-// accident and silently pulling from the wrong source (next.md #7); a
+// accident and silently pulling from the wrong source; a
 // separate channel makes that impossible by construction.
 type metadataKey struct{}
 

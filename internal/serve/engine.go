@@ -42,7 +42,7 @@ func (s *engineScheduler) Defer(bodyID, cron string, at time.Time, payload []byt
 			// Give a Durable flow nested in the fired body a store to
 			// checkpoint into, keyed to this specific firing (engine.RunID),
 			// the same way flow.WithStore wires a normal HTTP request — else
-			// Durable() silently never checkpoints on this path (next.md #2).
+			// Durable() silently never checkpoints on this path.
 			if id, ok := engine.RunID(ctx); ok {
 				ctx = flow.WithStore(ctx, s.store, id)
 			}
@@ -68,7 +68,7 @@ func (s *engineScheduler) Defer(bodyID, cron string, at time.Time, payload []byt
 	// pending entry to find), a fired Once leaves nothing pending: engine.ack
 	// deletes both its index entry and its run record, permanently. So a
 	// restart *after* it already fired would look identical to a fresh
-	// schedule and re-arm it (next.md #1). The tombstone below survives past
+	// schedule and re-arm it. The tombstone below survives past
 	// that ack, closing the gap; keying it by `at` (not just bodyID) means
 	// changing the Once time in source and redeploying is still treated as a
 	// new schedule rather than being silently swallowed by a stale tombstone.

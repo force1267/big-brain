@@ -167,7 +167,7 @@ func (g groupGroup) run(ctx context.Context, in State) (State, error) {
 // first successful member's contribution and cancels the rest (One). A
 // divergent select across members that contributed is ErrSelectConflict.
 //
-// One's commit-on-acceptance rule (next.md #3): a member that reaches a
+// One's commit-on-acceptance rule: a member that reaches a
 // Once/Every trigger node doesn't get to schedule it for real on the spot —
 // deferBody sees a pendingCommit on its ctx (installed below, only when
 // first=true) and queues the Scheduler.Defer call instead of making it. Once
@@ -241,8 +241,7 @@ func fanOut(ctx context.Context, members []Flow, in State, first bool) (State, e
 		if winnerPC != nil {
 			if outerPC := pendingCommitFrom(ctx); outerPC != nil {
 				// Nested inside an outer One: don't commit yet, queue into the
-				// outer pendingCommit — whichever One resolves last decides
-				// (next.md #8).
+				// outer pendingCommit — whichever One resolves last decides.
 				outerPC.mu.Lock()
 				outerPC.calls = append(outerPC.calls, winnerPC.calls...)
 				outerPC.mu.Unlock()
@@ -262,7 +261,7 @@ func fanOut(ctx context.Context, members []Flow, in State, first bool) (State, e
 	if conflict {
 		return in, fmt.Errorf("%w: group members", ErrSelectConflict)
 	}
-	// Flatten in declaration order, not completion order (next.md #3a).
+	// Flatten in declaration order, not completion order.
 	for _, r := range byIndex {
 		merged = append(merged, r...)
 	}

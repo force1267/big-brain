@@ -2143,3 +2143,19 @@ Both new tests pass after the fix (5 runs, `-race`). `go build ./...`,
 `go vet ./...`, and `go test ./... -race` green across all packages.
 
 next.md #3a promoted from "to investigate" to fixed; #3b and #3c remain open.
+
+## 2026-07-27 — Removed `next.md` citations from tracked source/docs
+
+`next.md` is an unstaged, temporary planning file that changes form session
+to session — code comments and docs citing it by item number (`next.md #7`,
+etc.) go stale once it's edited or deleted. Swept every tracked file
+(excluding `docs/LOG.md`, which is allowed to reference it as history, and
+untracked files) and dropped the `next.md`/`#N` citations, rewording
+surrounding prose in place where the citation was load-bearing (e.g.
+`docs/IMPLEMENTATION.md`, `docs/discussion.md`) so the sentence still stands
+on its own. No behavior change; `go build ./...` green.
+
+Touched: `cmd/jarvis-demo/main.go`, `docs/IMPLEMENTATION.md`,
+`docs/discussion.md`, `internal/agent/metadata.go`,
+`internal/flow/{concurrent,flow_test,groups,groups_test,trigger,trigger_test}.go`,
+`internal/serve/{engine,engine_test,webhook_test}.go`, `pkg/bb/{agent,flow}.go`.

@@ -613,7 +613,7 @@ func (j *jarvis) routines() {
 	// it saw); bb.Metadata[T] reads the request's headers (a shared-secret
 	// signature the camera sends), kept as its own channel rather than merged
 	// into the body's fields so a body field named the same as a header can
-	// never collide (next.md #7). No top-level Respond in this body, so Serve
+	// never collide. No top-level Respond in this body, so Serve
 	// acks 202 immediately and the announcement runs in the background —
 	// don't block the camera on Jarvis talking. Unlike Every/Once, a Webhook
 	// body needs no WithId: the endpoint id ("doorbell") is its identity.
