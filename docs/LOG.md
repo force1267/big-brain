@@ -1929,3 +1929,34 @@ across the module, including the 2 new tests above).
 Next: next.md #8 (nested `One`-in-`One`) is the one open item with a known
 fix shape not yet built. The Retries/TTL-on-triggered-Durable gap (#2) is
 still open too, lower priority (missing feature, not a correctness bug).
+
+## 2026-07-27 — Nested `One`-in-`One` trigger leak fixed (next.md #8)
+
+Built the fix shape next.md #8 already scoped: `fanOut`'s commit-execution
+point (`internal/flow/groups.go`, right before running `winnerPC.calls`) now
+checks `pendingCommitFrom(ctx)` against the ctx it was itself *entered* with
+(not the per-member ctx it derives) — if an outer `pendingCommit` exists
+(meaning this `fanOut` is itself running as a member of an enclosing `One`),
+the winner's queued `Scheduler.Defer` calls are appended into that outer
+`pendingCommit` instead of executed, deferring the decision to whichever
+`One` resolves last. A top-level `One`'s ctx never carries one, so the
+existing single-level behavior (`TestOneDiscardsLosingMemberTrigger`) is
+unchanged; `One(All(...), c)` was already correct and untouched, since `All`
+never installs its own `pendingCommit` and just passes the ambient one
+through to `deferBody` directly.
+
+Contained diff — one function, ~10 lines, no new types, no signature changes,
+reuses `pendingCommit`/`pendingCommitFrom` from trigger.go as-is.
+
+Test: `TestNestedOneDiscardsLosingMemberTrigger`
+(`internal/flow/groups_test.go`) — `One(One(a, b), c)`, inner race resolves
+with `a` reaching a trigger, outer race picks sibling `c` instead; asserts
+`a`'s trigger never committed. Verified it actually catches the bug: reverted
+just `groups.go` and reran — test fails against the old code, passes against
+the fix.
+
+`go build ./... && go vet ./... && go test ./internal/flow/... -race` green.
+
+Next: no open correctness bugs. Remaining open item is the
+Retries/TTL-on-triggered-Durable gap (#2), a missing feature, not blocking
+anything.

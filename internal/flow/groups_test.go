@@ -94,6 +94,39 @@ func TestOneDiscardsLosingMemberTrigger(t *testing.T) {
 	}
 }
 
+// One's commit-on-acceptance rule, two levels deep: One(One(a, b), c). The
+// inner race resolves (a beats b) and reaches a trigger, but the outer race
+// picks the sibling c instead — a's trigger must never fire (next.md #8).
+func TestNestedOneDiscardsLosingMemberTrigger(t *testing.T) {
+	sch := &mockScheduler{}
+	when := time.Now().Add(time.Hour)
+
+	innerFast := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		time.Sleep(20 * time.Millisecond)
+		turn.Reply("inner-fast")
+		return nil
+	})
+	innerSlow := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		time.Sleep(200 * time.Millisecond)
+		turn.Reply("inner-slow")
+		return nil
+	})
+	a := New().WithAgent(innerFast).WithId("start-a").
+		Next(Once(when)).Next(New().WithAgent(mockAgent("body-a")).WithId("body-a"))
+	b := New().WithAgent(innerSlow).WithId("start-b").
+		Next(Once(when)).Next(New().WithAgent(mockAgent("body-b")).WithId("body-b"))
+	c := New().WithAgent(mockAgent("outer-c")) // no sleep: wins the outer race outright
+
+	ctx := WithScheduler(context.Background(), sch)
+	if _, err := Run(ctx, One(One(a, b), c), chat("go"), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(sch.calls) != 0 {
+		t.Fatalf("outer's sibling won; inner winner's trigger must be discarded, got %+v", sch.calls)
+	}
+}
+
 // Group merges replies like All (final-output equivalence).
 func TestGroupMerges(t *testing.T) {
 	g := Group(

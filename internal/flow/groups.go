@@ -238,9 +238,18 @@ func fanOut(ctx context.Context, members []Flow, in State, first bool) (State, e
 			return in, fmt.Errorf("%w: no member of One completed", ErrAgent)
 		}
 		if winnerPC != nil {
-			for _, commit := range winnerPC.calls {
-				if err := commit(); err != nil {
-					return in, err
+			if outerPC := pendingCommitFrom(ctx); outerPC != nil {
+				// Nested inside an outer One: don't commit yet, queue into the
+				// outer pendingCommit — whichever One resolves last decides
+				// (next.md #8).
+				outerPC.mu.Lock()
+				outerPC.calls = append(outerPC.calls, winnerPC.calls...)
+				outerPC.mu.Unlock()
+			} else {
+				for _, commit := range winnerPC.calls {
+					if err := commit(); err != nil {
+						return in, err
+					}
 				}
 			}
 		}
