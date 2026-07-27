@@ -70,6 +70,33 @@ func TestEngineSchedulerFires(t *testing.T) {
 	}
 }
 
+// Run with no explicit Store option must still fire triggers: defaults()
+// seeds an in-memory store so wireScheduler always runs (see the 2026-07-26
+// "Default Store to in-memory" fix) instead of silently no-op'ing the way the
+// old `if c.store != nil` guard did.
+func TestRunFiresTriggerWithoutExplicitStore(t *testing.T) {
+	flow.ResetTriggers()
+	t.Cleanup(flow.ResetTriggers)
+
+	fired := make(chan struct{})
+	body := flow.New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
+		close(fired)
+		turn.Reply("done")
+		return nil
+	})).WithId("no-store-run")
+	flow.Trigger().Next(flow.Once(time.Now())).Next(body)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Run(ctx)
+
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("trigger did not fire under Run with default store")
+	}
+}
+
 // End to end through build(): a registered Trigger→Once schedules a named body,
 // and running the worker fires it.
 func TestServeRunsTriggerChain(t *testing.T) {
@@ -206,6 +233,67 @@ func TestTriggeredDurableFlowResumeSkipsCompletedStep(t *testing.T) {
 
 	if calls.Load() != 1 {
 		t.Fatalf("agent ran %d times across two same-run-id firings, want 1 (second should have resumed from checkpoint, not re-run)", calls.Load())
+	}
+}
+
+// Once triggers must fire exactly once, ever: RunAtStartup re-runs every
+// registered trigger chain on every process boot, so Defer's one-shot branch
+// must dedupe repeated calls for the same body — both while the run is still
+// pending (multiple restarts before `at`) and after it has already fired (a
+// restart long after `at`), the gap next.md #1 identified in the naive
+// Enqueue-with-a-fresh-uuid implementation.
+func TestOnceTriggerDoesNotRefireAcrossRestarts(t *testing.T) {
+	sched, err := newEngineScheduler(engine.NewMemStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var calls atomic.Int64
+	fired := make(chan struct{}, 10)
+	run := func(_ context.Context, _ []byte) error {
+		calls.Add(1)
+		fired <- struct{}{}
+		return nil
+	}
+
+	at := time.Now().Add(50 * time.Millisecond)
+	// Two Defer calls before `at`, simulating two restarts while still pending.
+	if err := sched.Defer("once-body", "", at, []byte(`{}`), run); err != nil {
+		t.Fatal(err)
+	}
+	if err := sched.Defer("once-body", "", at, []byte(`{}`), run); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sched.run(ctx, 1)
+
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("body never fired")
+	}
+	// Give a would-be duplicate fire (from the double Defer above) a chance to land.
+	select {
+	case <-fired:
+		t.Fatal("body fired twice for two restart-before-fire Defer calls")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// A third Defer call now simulates a restart *after* the trigger already
+	// fired and completed — must not re-arm it.
+	if err := sched.Defer("once-body", "", at, []byte(`{}`), run); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fired:
+		t.Fatal("body fired again on a Defer call after it had already completed")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("body ran %d times across repeated Defer calls for the same Once trigger, want 1", n)
 	}
 }
 

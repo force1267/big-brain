@@ -60,8 +60,29 @@ func (s *engineScheduler) Defer(bodyID, cron string, at time.Time, payload []byt
 		_, err := engine.Every(s.eng, cron, bodyID, json.RawMessage(payload))
 		return err
 	}
-	_, err := s.eng.Enqueue(context.Background(), bodyID, json.RawMessage(payload), at)
-	return err
+
+	// A Once trigger must fire exactly once, ever — but RunAtStartup re-runs
+	// every registered trigger chain on every process boot, reaching this
+	// Defer call again each time. Unlike a cron ticker (which re-arms itself
+	// under the same ID, so EnqueueID's in-memory dedup always has a live
+	// pending entry to find), a fired Once leaves nothing pending: engine.ack
+	// deletes both its index entry and its run record, permanently. So a
+	// restart *after* it already fired would look identical to a fresh
+	// schedule and re-arm it (next.md #1). The tombstone below survives past
+	// that ack, closing the gap; keying it by `at` (not just bodyID) means
+	// changing the Once time in source and redeploying is still treated as a
+	// new schedule rather than being silently swallowed by a stale tombstone.
+	onceID := bodyID + "@" + at.UTC().Format(time.RFC3339Nano)
+	tombstone := "once-fired/" + onceID
+	if _, fired, err := s.store.Get(context.Background(), tombstone); err != nil {
+		return err
+	} else if fired {
+		return nil
+	}
+	if _, err := s.eng.EnqueueID(context.Background(), onceID, bodyID, json.RawMessage(payload), at); err != nil {
+		return err
+	}
+	return s.store.Put(context.Background(), tombstone, []byte("1"))
 }
 
 // run drives the engine's worker loop until ctx is cancelled.

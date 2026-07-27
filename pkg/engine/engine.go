@@ -305,6 +305,7 @@ func (e *Engine) exec(ctx context.Context, r Run) {
 		r.Wake = *requeue
 		r.Attempt++
 		if perr := e.persist(ctx, r); perr != nil {
+			e.tr.Trace(ctx, StepRecord{Run: r.ID, Flow: r.Flow, Step: "<persist>", Err: perr.Error()})
 			return
 		}
 		e.mu.Lock()
@@ -340,10 +341,14 @@ func (e *Engine) invoke(ctx context.Context, r Run, f Flow) (requeue *time.Time,
 // --- persistence of the pending set over Store ---
 
 func (e *Engine) persist(ctx context.Context, r Run) error {
-	if err := putJSON(ctx, e.store, "run/"+r.ID, r); err != nil {
+	// Index first: if a crash (or store error) lands between the two writes,
+	// the survivor is a stray index entry pointing at a missing run, which
+	// load() already treats as stale-and-skippable — not an orphaned run
+	// record that load() has no way to ever discover.
+	if err := e.addIndex(ctx, r.ID); err != nil {
 		return err
 	}
-	return e.addIndex(ctx, r.ID)
+	return putJSON(ctx, e.store, "run/"+r.ID, r)
 }
 
 func (e *Engine) ack(ctx context.Context, id string) {

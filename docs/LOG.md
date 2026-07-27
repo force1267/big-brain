@@ -1960,3 +1960,154 @@ the fix.
 Next: no open correctness bugs. Remaining open item is the
 Retries/TTL-on-triggered-Durable gap (#2), a missing feature, not blocking
 anything.
+
+## 2026-07-27 — Full-codebase review: two new bugs found in `pkg/engine`
+
+Independent read-through review (not tied to a specific reported issue),
+covering `internal/flow`, `pkg/engine`, `internal/serve`, `internal/agent`,
+and the OpenAI/Anthropic wire conversion code. Overall verdict: code quality
+is good (consistent error-wrapping, deliberate doc comments, correct
+concurrency bookkeeping in the `One`/`Group`/`All` fan-out logic). Two
+correctness bugs found and verified against source, both in
+`pkg/engine/engine.go`'s persistence path — written up in `next.md` #1 and
+#2 with proposed fixes, not yet built:
+
+- **#1**: `engineScheduler.Defer`'s one-shot (`Once`) branch calls
+  `Engine.Enqueue` (random UUID every call) instead of `EnqueueID` with a
+  deterministic key, unlike the cron (`Every`) branch. Since triggers
+  re-register on every process boot (`wireScheduler` → `RunAtStartup`), a
+  `Once` trigger enqueues a fresh pending run on every restart — the same
+  "fires more than its contract promises" bug class as #8 above, in the
+  one-shot path #8's fix didn't touch.
+- **#2**: `Engine.persist` failures during a Sleep/retry requeue are dropped
+  with no trace (unlike the unknown-flow branch a few lines above it, which
+  traces loudly for a less severe case); and `persist`'s two separate writes
+  (run record, then index entry) aren't atomic, so a crash between them
+  orphans the run — `load()` only finds runs via the index.
+
+Also flagged, not confirmed as live bugs: nondeterministic reply ordering in
+`All`/`Group`/multi-agent fan-out (completion order, not declaration order —
+`internal/flow/concurrent.go`, `groups.go`), the structural-signature hash
+used for checkpoint staleness (`internal/flow/durable_config.go`) having no
+case for trigger nodes, and `checkpoint.save`/`load` not persisting
+`State.Req`. Written up in `next.md` #3 (3a/3b/3c) with reachability
+questions to answer before promoting any of them to a real bug fix.
+
+Next: build next.md #1 and #2's proposed fixes; investigate #3a/3b/3c.
+
+## 2026-07-27 — Fix #1: `Once` triggers re-firing across restarts
+
+Validated against source before fixing: `next.md` #1's own proposed one-liner
+(`EnqueueID(bodyID, bodyID, ...)`, copying the cron branch's pattern) turned
+out to be incomplete. Cron's `EnqueueID` dedup works because a cron ticker
+re-arms itself under the same ID before it acks, so there is always a live
+pending entry for `EnqueueID`'s in-memory check to find. A `Once` trigger
+does not re-arm: `engine.ack` deletes both its index entry and its run
+record permanently once it fires, with no tombstone (`Cancel`'s own comment
+in `pkg/engine/engine.go` says as much — "one-off runs never re-arm, so
+cancelling one needs no tombstone at all", which was true before this fix
+made one-shot IDs deterministic). So the one-liner only dedups the
+"restarted before `Once` fired" case; a restart *after* it already fired and
+completed would still look like a fresh schedule and re-fire.
+
+Fix (`internal/serve/engine.go`, `engineScheduler.Defer`'s one-shot branch):
+added a permanent tombstone key `once-fired/<bodyID>@<at>` written via the
+scheduler's own `flow.Store` (already in hand, no new dependency) right
+after a successful `EnqueueID`; checked before scheduling, so a fired-and-
+acked `Once` is skipped on every later restart's `Defer` call. Keyed by
+`(bodyID, at)`, not `bodyID` alone, so changing the `Once` time in source and
+redeploying is treated as a new schedule instead of being silently
+swallowed by a stale tombstone from the old time.
+
+Contained: one function, no `pkg/engine` changes, no `flow.Scheduler`
+interface change, additive-only store key namespace nothing else reads.
+Residual (documented, not fixed): a crash in the narrow window between
+`EnqueueID` succeeding and the tombstone `Put` could still allow one re-fire
+— same class of non-atomic-write gap as #2 below, judged not worth a
+transactional write for a one-shot trigger.
+
+Test: `TestOnceTriggerDoesNotRefireAcrossRestarts`
+(`internal/serve/engine_test.go`) — two `Defer` calls before `at` fires
+(restart-before-fire), then a third `Defer` call after it already fired
+(restart-after-fire); asserts the body runs exactly once total. Verified it
+actually catches the bug: ran red against the pre-fix `Enqueue`-based code
+("body fired twice for two restart-before-fire Defer calls"), green after
+the fix.
+
+`go build ./... && go test ./...` green across all packages.
+
+## 2026-07-27 — Fix #2: `Engine.persist` swallow + non-atomic write (session)
+
+Confirmed both bugs from next.md #2 by tracing the actual code (not just
+review notes) before touching anything, then wrote failing tests first.
+
+**2a** (`pkg/engine/engine.go`, `exec`'s requeue branch): a `persist` failure
+while requeuing a Sleep/retry yield returned silently — no trace, no log.
+The run is already popped off the in-memory heap by `dispatch` at that
+point, so this was the only place the failure could ever be observed before
+a restart. Fixed by tracing a `StepRecord{Step: "<persist>", Err: ...}`
+before returning, matching the unknown-flow branch's existing loud-failure
+posture a few lines above.
+
+**2b** (`pkg/engine.go`, `persist`): wrote the run record (`run/<id>`) before
+the index entry (`runs/index`). `load()` only discovers runs via the index,
+so a crash/store-error between the two writes left a run record that could
+never be found again — a permanent, silent orphan. Fixed by flipping the
+write order (index first, then run record): the crash-mid-write survivor is
+now a stray index entry pointing at a missing run, which `load()` already
+treats as stale-and-skippable (pre-existing `if err != nil || !ok || r.ID ==
+"" { continue }` guard) instead of a leaked, undiscoverable run record.
+
+Tests added (`pkg/engine/engine_test.go`):
+- `TestExecTracesPersistFailureOnRequeue` — `MockStore` fails only the
+  `run/<id>` Put during a Sleep-yield requeue; asserts a `<persist>` trace
+  record appears. Ran red against pre-fix `exec` (no trace emitted), green
+  after.
+- `TestPersistDoesNotOrphanRunOnPartialWrite` — `MockStore` fails only the
+  `runs/index` Put; asserts no `run/<id>` record survives on disk. Ran red
+  against pre-fix write order (run record was written despite the index
+  write failing), green after reordering.
+
+Contained: both changes are inside `pkg/engine/engine.go` (`exec` +1 line,
+`persist` reordered), no signature or interface changes, no other callers
+affected. No `docs/authoring-guide.md` update needed per rule 5 (no `pkg/`
+interface/signature touched). `go build ./... && go test ./...` green
+across all packages.
+
+## 2026-07-27 — Audit of last ~20 LOG.md entries against actual tests: one gap closed
+
+Went through the last 20+ session entries and, for each described bug fix,
+checked the codebase (not git history) for the test it claims exists. All of
+them checked out — the named test function is present and passes:
+`TestChatRequestMaxOutputTokens`/`TestRequestLegacyMaxTokensStillWorks` (#8's
+`max_tokens`/`max_completion_tokens` bug), `TestTriggerDepthThreadsThroughFire`
+(cycle-guard worker-ctx gap), `TestTriggerUnnamedBodyErrors`/
+`TestTriggerBodyAmbiguousIdErrors`/`TestTriggerBodyResolvesSingleIdAmongMany`/
+`TestWebhookHasReplyThroughGroups`/`TestOneDiscardsLosingMemberTrigger`/
+`TestTriggeredDurableFlowCheckpoints` (next.md #2/#3/#5/#6),
+`TestNestedOneDiscardsLosingMemberTrigger` (#8), and
+`TestOnceTriggerDoesNotRefireAcrossRestarts`/
+`TestExecTracesPersistFailureOnRequeue`/`TestPersistDoesNotOrphanRunOnPartialWrite`
+(the two most recent `pkg/engine` persistence bugs).
+
+**One real gap found:** the 2026-07-26 "Default Store to in-memory instead of
+silently disabling triggers" fix (`defaults()` seeding `c.store`, removing the
+`if c.store != nil` guard in `build()` and `ErrNoStore` from `Run`) had no test
+exercising the actual behavior it fixed — every trigger-related test in
+`internal/serve` passes an explicit `Store(engine.NewMemStore())`, and
+`internal/serve.Run` had no test calling it at all. A regression (re-adding
+the old nil-store guard, or `Run` requiring a store again) would have passed
+the full suite silently.
+
+Added `TestRunFiresTriggerWithoutExplicitStore`
+(`internal/serve/engine_test.go`) — calls `Run(ctx)` with zero options and
+asserts a registered `Trigger().Next(Once(...))` body still fires, proving the
+in-memory default actually wires the scheduler end to end. Verified it catches
+the regression: reverting `defaults()` to the pre-fix `config{addr: ":8080",
+name: "brain", workers: 4}` (no `store: engine.NewMemStore()`) makes it fail
+("trigger did not fire" within the timeout), reverted after confirming.
+
+`go build ./... && go vet ./... && go test ./... -race` green across all
+packages.
+
+Next: investigate next.md #3a/3b/3c (reachability checks, not fixes yet).

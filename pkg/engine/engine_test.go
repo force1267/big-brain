@@ -195,3 +195,64 @@ func TestFileStoreReload(t *testing.T) {
 		t.Fatalf("reloaded %d pending runs, want 1", len(e2.pending))
 	}
 }
+
+// A persist failure while requeuing a Sleep yield must be traced, not
+// swallowed: the run is already off the in-memory heap at that point, so a
+// silent failure here is the only way to observe it before a restart.
+func TestExecTracesPersistFailureOnRequeue(t *testing.T) {
+	store := NewMockStore()
+	tr := &RecordTracer{}
+	e, err := New(store, tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	Register(e, "napper", func(ctx context.Context, _ struct{}) error {
+		return Sleep(ctx, "nap", time.Hour)
+	})
+
+	// Only the run record write fails; Sleep's own savepoint write (a
+	// different key) must still succeed so invoke() actually yields.
+	store.PutFn = func(ctx context.Context, key string, val []byte) error {
+		if key == "run/r" {
+			return errors.New("store down")
+		}
+		return store.MemStore.Put(ctx, key, val)
+	}
+
+	e.exec(context.Background(), Run{ID: "r", Flow: "napper"})
+
+	for _, rec := range tr.Records {
+		if rec.Step == "<persist>" && rec.Err != "" {
+			return
+		}
+	}
+	t.Fatal("persist failure during requeue was not traced")
+}
+
+// persist must not leave a run record on disk with no index entry pointing
+// at it: if the store crashes between the two writes, the survivor should be
+// a stray index entry (which load() already treats as stale-and-skippable),
+// not an orphaned run record (which load() has no way to ever discover).
+func TestPersistDoesNotOrphanRunOnPartialWrite(t *testing.T) {
+	store := NewMockStore()
+	e, err := New(store, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store.PutFn = func(ctx context.Context, key string, val []byte) error {
+		if key == indexKey {
+			return errors.New("store down")
+		}
+		return store.MemStore.Put(ctx, key, val)
+	}
+
+	r := Run{ID: "r1", Flow: "noop"}
+	if err := e.persist(context.Background(), r); err == nil {
+		t.Fatal("expected persist to fail")
+	}
+
+	if _, ok, _ := store.Get(context.Background(), "run/"+r.ID); ok {
+		t.Fatal("run record was written despite the index write failing: orphaned run")
+	}
+}
