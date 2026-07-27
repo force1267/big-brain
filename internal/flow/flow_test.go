@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/force1267/big-brain/internal/agent"
 	"github.com/force1267/big-brain/pkg/model"
@@ -91,6 +92,28 @@ func TestBasicMultiAgentConcurrent(t *testing.T) {
 	}
 	if !out.hasSel || out.selected != "same" {
 		t.Fatalf("agreed select = %q", out.selected)
+	}
+}
+
+// Replies must land in declaration order regardless of which agent's model
+// call finishes first (next.md #3a): agent 0 is made the slow one, so a
+// completion-order merge would put "a1" after "a0" instead of before it.
+func TestBasicMultiAgentPreservesDeclarationOrder(t *testing.T) {
+	slow := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		time.Sleep(50 * time.Millisecond)
+		turn.Reply("a0")
+		return nil
+	})
+	fast := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		turn.Reply("a1")
+		return nil
+	})
+	out, err := Run(context.Background(), New().WithAgent(slow, fast), chat("go"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Chat) != 3 || out.Chat[1].Content != "a0" || out.Chat[2].Content != "a1" {
+		t.Fatalf("want replies in declaration order [a0 a1], got: %+v", out.Chat)
 	}
 }
 

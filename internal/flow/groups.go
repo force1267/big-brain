@@ -196,6 +196,7 @@ func fanOut(ctx context.Context, members []Flow, in State, first bool) (State, e
 		winnerPC *pendingCommit
 	)
 	base := len(in.Chat)
+	byIndex := make([][]model.Message, len(members))
 
 	for i, m := range members {
 		wg.Add(1)
@@ -223,7 +224,7 @@ func fanOut(ctx context.Context, members []Flow, in State, first bool) (State, e
 				return
 			}
 			mu.Lock()
-			merged = append(merged, r.newReplies...)
+			byIndex[i] = r.newReplies
 			mu.Unlock()
 			sel.add(r.selected, r.hasSel)
 		}(i, m)
@@ -260,6 +261,10 @@ func fanOut(ctx context.Context, members []Flow, in State, first bool) (State, e
 	selected, hasSel, conflict := sel.get()
 	if conflict {
 		return in, fmt.Errorf("%w: group members", ErrSelectConflict)
+	}
+	// Flatten in declaration order, not completion order (next.md #3a).
+	for _, r := range byIndex {
+		merged = append(merged, r...)
 	}
 	out := State{Chat: append(cloneMsgs(in.Chat), merged...)}
 	out.selected, out.hasSel = selected, hasSel

@@ -28,6 +28,25 @@ func TestAllMerges(t *testing.T) {
 	}
 }
 
+// Replies must land in declaration order regardless of which member finishes
+// first (next.md #3a): member 0 is made the slow one, so a completion-order
+// merge would put "one" after "two" instead of before it.
+func TestAllPreservesDeclarationOrder(t *testing.T) {
+	slow := New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		time.Sleep(50 * time.Millisecond)
+		turn.Reply("one")
+		return nil
+	}))
+	fast := New().WithAgent(mockAgent("two"))
+	out, err := Run(context.Background(), All(slow, fast), chat("go"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Chat) != 3 || out.Chat[1].Content != "one" || out.Chat[2].Content != "two" {
+		t.Fatalf("want replies in declaration order [one two], got: %+v", out.Chat)
+	}
+}
+
 // All surfaces a member error and cancels the rest.
 func TestAllError(t *testing.T) {
 	bad := New().WithAgent(agent.New().OnMessage(func(context.Context, *agent.Turn, *agent.ModelChat) error {

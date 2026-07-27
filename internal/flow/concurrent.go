@@ -27,6 +27,7 @@ func runAgents(ctx context.Context, flowID string, agents []agent.Agent, chat []
 		wg       sync.WaitGroup
 		conflict bool
 	)
+	byIndex := make([][]model.Message, len(agents))
 	for i, ag := range agents {
 		wg.Add(1)
 		go func(i int, ag agent.Agent) {
@@ -41,7 +42,7 @@ func runAgents(ctx context.Context, flowID string, agents []agent.Agent, chat []
 				}
 				return
 			}
-			replies = append(replies, r...)
+			byIndex[i] = r
 			if hs {
 				if hasSel && selected != s {
 					conflict = true
@@ -56,6 +57,10 @@ func runAgents(ctx context.Context, flowID string, agents []agent.Agent, chat []
 	}
 	if conflict {
 		return nil, "", false, fmt.Errorf("%w: flow %q", ErrSelectConflict, flowID)
+	}
+	// Flatten in declaration order, not completion order (next.md #3a).
+	for _, r := range byIndex {
+		replies = append(replies, r...)
 	}
 	return replies, selected, hasSel, nil
 }

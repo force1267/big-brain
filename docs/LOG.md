@@ -2111,3 +2111,35 @@ name: "brain", workers: 4}` (no `store: engine.NewMemStore()`) makes it fail
 packages.
 
 Next: investigate next.md #3a/3b/3c (reachability checks, not fixes yet).
+
+## 2026-07-27 — Fix #3a: concurrent replies now merge in declaration order
+
+Investigated next.md's unverified #3a suspicion (`runAgents`/`fanOut` merging
+replies in completion order, not declaration order). Traced two real
+positional consumers downstream: `internal/serve/serve.go:220`'s
+`lastContent(out.Chat)` (the OpenAI/Anthropic-compatible API response body is
+literally `chat[len(chat)-1].Content`) and `internal/flow/notify.go:29`'s
+`bb.Notify` (sends `in.Chat[len(in.Chat)-1].Content` to an external sink).
+Both silently depend on array position, so a multi-agent `Basic` or `All`
+flow could return a different agent's text to the client on different runs of
+byte-identical input, purely from which agent's model round-trip happened to
+finish last. Confirmed with `TestBasicMultiAgentPreservesDeclarationOrder`
+and `TestAllPreservesDeclarationOrder` (new, `internal/flow/flow_test.go` and
+`groups_test.go`): each pins agent/member 0 as the artificially slow
+finisher, so a completion-order merge reliably produces `[fast, slow]`
+instead of the declared `[slow, fast]`. Both failed against the pre-fix code
+deterministically (5 runs).
+
+**Fix:** `runAgents` (`internal/flow/concurrent.go`) and `fanOut`'s `All`
+branch (`internal/flow/groups.go`) now write each goroutine's result into a
+`byIndex[i]` slot instead of `append`-under-lock in completion order, then
+flatten in declaration order once `wg.Wait()` returns. `One`'s branch of
+`fanOut` was untouched (only ever keeps one winner, no ordering to fix).
+`Group` (`groupGroup.run`) was also left alone — it uses a live shared chat
+where members read/write each other's replies as they happen, a different,
+intentionally racy design already documented as "live," not this merge bug.
+
+Both new tests pass after the fix (5 runs, `-race`). `go build ./...`,
+`go vet ./...`, and `go test ./... -race` green across all packages.
+
+next.md #3a promoted from "to investigate" to fixed; #3b and #3c remain open.
