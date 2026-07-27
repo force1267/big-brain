@@ -607,6 +607,45 @@ func (j *jarvis) routines() {
 				turn.Reply("Goodnight — " + strings.Join(did, ", ") + ".")
 				return nil
 			})).WithId(idGoodnight).Durable().Next(j.speak()))
+
+	// A doorbell camera POSTs here whenever it sees someone — the reception
+	// half of bb.Payload/bb.Metadata. bb.Payload[T] reads the JSON body (who
+	// it saw); bb.Metadata[T] reads the request's headers (a shared-secret
+	// signature the camera sends), kept as its own channel rather than merged
+	// into the body's fields so a body field named the same as a header can
+	// never collide (next.md #7). No top-level Respond in this body, so Serve
+	// acks 202 immediately and the announcement runs in the background —
+	// don't block the camera on Jarvis talking. Unlike Every/Once, a Webhook
+	// body needs no WithId: the endpoint id ("doorbell") is its identity.
+	bb.Trigger().Next(bb.Webhook("doorbell")).Next(
+		bb.NewFlow().WithAgent(bb.NewAgent().
+			OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
+				headers, _ := bb.Metadata[map[string]string](turn)
+				if headers["X-Doorbell-Signature"] != doorbellSecret {
+					return nil // unrecognized sender — nothing to announce
+				}
+				alert, ok := bb.Payload[doorbellAlert](turn)
+				if !ok {
+					turn.Reply("Someone's at the door.")
+					return nil
+				}
+				turn.Reply(fmt.Sprintf("%s is at the door (%.0f%% sure).", alert.Visitor, alert.Confidence*100))
+				return nil
+			})).Next(j.speak()))
+}
+
+// doorbellSecret is the shared secret the doorbell camera signs its posts
+// with, read back via bb.Metadata[T] — a webhook endpoint has no auth of its
+// own (see bb.Webhook's doc), so an app-level check like this is how a body
+// decides whether to trust what arrived. Hardcoded for the demo; a real
+// deployment reads it from env.
+const doorbellSecret = "porch-cam-1"
+
+// doorbellAlert is the doorbell camera's POST body — what it saw, read back
+// via bb.Payload[T].
+type doorbellAlert struct {
+	Visitor    string  `json:"visitor"`
+	Confidence float64 `json:"confidence"`
 }
 
 // --- keyword fallbacks: what Jarvis understands with no model at all ---

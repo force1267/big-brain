@@ -612,32 +612,44 @@ bb.Trigger().Next(bb.Every("0 21 * * *")).Next(nightly)
 // Keep working past the reply ("I'll text you when it's done"):
 router.Next(capabilities).Next(bb.Respond).Next(bb.Once(when)).Next(followUp)
 
-// React to an inbound HTTP call — the reception half of bb.Payload:
+// React to an inbound HTTP call — the reception half of bb.Payload/bb.Metadata:
 bb.Trigger().Next(bb.Webhook("stripe-payment")).Next(handlePayment)
 ```
 
 - `bb.Trigger(opts…)` heads a startup chain; a bare `Trigger().Next(f)` is a boot
   task. `bb.Every(spec)` schedules on a cron; `bb.Once(t)` fires a single time;
   `bb.Webhook(endpointID)` fires on `POST /v1/hooks/{endpointID}`.
-- The deferred body of `Every`/`Once` **must** be a named flow (`WithId`) so it
-  resolves after a restart; an unnamed body is warned and skipped. `Webhook`'s
-  body has no such requirement — its endpoint id is the explicit parameter,
-  chosen independently of the body's own `WithId` on purpose: a public URL a
-  third party hardcodes is a different concern from an internal
-  Durable/Select identity, and coupling them means renaming one breaks the
-  other.
-- A webhook's response depends on whether its body reaches a top-level
-  `bb.Respond`: with one, Serve waits for the run and replies 200 with its
-  content; without one, Serve replies 202 immediately and runs the body in
-  the background — a webhook is often a long-running job, and the caller
-  shouldn't be blocked on it. Unlike `Every`/`Once`, a webhook needs no
+- The deferred body of `Every`/`Once` **must** resolve to exactly one
+  id-bearing top-level step (usually just one `WithId` at the end of the
+  chain, e.g. `A.Next(B).Next(C.WithId("job"))`) so it can be resolved after a
+  restart; zero or more than one id-bearing step is a loud error
+  (`flow.ErrTriggerBodyID`) at the moment the trigger is reached, not a
+  logged warning that leaves it dead. `WithId` names only the flow it's
+  called on — same rule as everywhere else. `Webhook`'s body has no such
+  requirement — its endpoint id is the explicit parameter, chosen
+  independently of the body's own `WithId` on purpose: a public URL a third
+  party hardcodes is a different concern from an internal Durable/Select
+  identity, and coupling them means renaming one breaks the other.
+- A webhook's response depends on whether its body **reaches** a
+  `bb.Respond` — including nested inside `Select`/`One`/`All`/`Group`, not
+  just a top-level step: with one, Serve waits for the run and replies 200
+  with its content; without one, Serve replies 202 immediately and runs the
+  body in the background — a webhook is often a long-running job, and the
+  caller shouldn't be blocked on it. Unlike `Every`/`Once`, a webhook needs no
   `Store` at all for this base case (`Durable()` nested inside still no-ops
   without one, same as everywhere else). No auth, rate limiting, or
   body-size cap is applied by this package — put a reverse proxy/gateway in
   front before exposing it, and don't rely on the endpoint id as a secret.
-  (The top-level-only `Respond` check does not see through
-  `Select`/`One`/`All`/`Group` — same blind spot as elsewhere in this
-  section — tracked as a known gap.)
+- A trigger reached inside a concurrent group only commits for real once the
+  group has accepted that branch. In `bb.One(a, b, …)`, a losing member's
+  `Every`/`Once` is discarded, not scheduled anyway — only the eventual
+  winner's trigger sticks. `All`/`Group` need no such gating: every member's
+  contribution is kept, so committing a member's trigger the moment it's
+  reached is already correct there.
+- `Durable()` nested inside a triggered body checkpoints normally once it
+  fires: the fired body's ctx carries a `Store` keyed to that specific firing
+  (so a retry of the same firing resumes past whatever it already completed),
+  the same promise a normal HTTP-served request makes.
 - Unlike `Every`/`Once`, firing a webhook needs no background worker — it runs
   inline in the HTTP handler (synchronously or in its own goroutine), so
   `bb.Handler` alone serves `Webhook` fully, no `bb.Serve`/`bb.Run` worker loop
@@ -666,6 +678,18 @@ bb.Trigger().Next(bb.Webhook("stripe-payment")).Next(handlePayment)
   up to the `Webhook` node (e.g. via a `Trigger`'s `WithSeedChat`) is what
   replays unchanged across fires, same role `Every`/`Once`'s captured state
   plays.
+- `bb.Metadata[T](turn)` is `bb.Payload[T]`'s sibling: out-of-band data
+  alongside the payload, kept as its own channel rather than merged into
+  Payload's `T` — a field name matching by accident across a JSON body and,
+  say, an HTTP header would otherwise silently pull from the wrong source.
+  Seed it on `Every`/`Once`/a boot task with `bb.WithSeedMetadata(x)`, same
+  shape as `WithSeedPayload`. A `Webhook` populates it for you: every request
+  header, flattened to `map[string]string` (canonical casing, first value of
+  a repeat wins — `bb.Metadata[T]` is not HTTP-specific, so the multi-value
+  `http.Header` shape stops at the door), e.g. reading a signature header
+  with `bb.Metadata[map[string]string](turn)["X-Signature"]`. Metadata rides
+  through scheduling/replay exactly like Payload — a `Durable()` retry or a
+  cron refire sees the same metadata the original firing captured.
 - Loops and recursion are re-triggers: a body scheduling its own id again — each
   iteration a fresh, durable run. There are no cycles in the static `Next`
   graph — but a *lineage* of re-triggers (a body whose flow itself reaches

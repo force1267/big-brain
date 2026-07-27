@@ -61,7 +61,8 @@ func Once(t time.Time) Flow { return flow.Once(t) }
 // endpointID is the route slug, chosen here explicitly and independent of
 // the body's own WithId (a public URL a caller hardcodes vs. an internal
 // Durable/Select identity — different concerns). The request body is read
-// back inside via bb.Payload[T]. If the body reaches a top-level Respond,
+// back inside via bb.Payload[T]; the request's headers are read back via
+// bb.Metadata[T] (next.md #7). If the body reaches a top-level Respond,
 // Serve waits for it and replies with its content; otherwise it acknowledges
 // immediately (202) and runs the body in the background — don't block a
 // webhook sender on a long job. No auth, rate limiting, or body-size cap is
@@ -90,6 +91,12 @@ func WithSeedChat(msgs ...Message) TriggerOpt { return flow.WithSeedChat(msgs...
 // WithSeedPayload seeds arbitrary trigger data, readable in the chain via
 // bb.Payload[T] — how a custom entry point passes its data in.
 func WithSeedPayload(v any) TriggerOpt { return flow.WithSeedPayload(v) }
+
+// WithSeedMetadata seeds out-of-band trigger metadata, readable in the chain
+// via bb.Metadata[T] — Payload's sibling channel for non-body data (a
+// webhook's headers are the other way metadata gets populated; see next.md
+// #7 for why the two are kept separate).
+func WithSeedMetadata(v any) TriggerOpt { return flow.WithSeedMetadata(v) }
 
 // All runs every member flow concurrently, each over its own copy of the chat;
 // all their replies merge into the output. It ends when all members end.

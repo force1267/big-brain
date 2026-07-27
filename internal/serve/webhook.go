@@ -2,6 +2,7 @@ package serve
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -69,13 +70,14 @@ func (s *server) webhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	meta := flattenHeaders(r.Header)
 	runID := r.Header.Get("X-Run-Id")
 	if runID == "" {
 		runID = uuid.NewString()
 	}
 
 	if h.HasReply {
-		out, err := h.Run(s.triggerCtx(r.Context(), runID), body)
+		out, err := h.Run(s.triggerCtx(r.Context(), runID), body, meta)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -93,8 +95,29 @@ func (s *server) webhook(w http.ResponseWriter, r *http.Request) {
 	ctx := s.triggerCtx(context.WithoutCancel(r.Context()), runID)
 	w.WriteHeader(http.StatusAccepted)
 	go func() {
-		if _, err := h.Run(ctx, body); err != nil {
+		if _, err := h.Run(ctx, body, meta); err != nil {
 			logrus.WithField("endpoint", id).Error(fmt.Errorf("serve: webhook run: %w", err))
 		}
 	}()
+}
+
+// flattenHeaders turns a request's headers into bb.Metadata[T]'s wire shape:
+// map[string]string, not http.Header — Metadata is not HTTP-specific (a
+// non-HTTP trigger seeds the same shape via WithSeedMetadata), so the
+// HTTP-only, multi-value shape stops here. Keys are canonicalized (same
+// casing net/http already normalizes to) and only the first value of a
+// repeated header is kept, matching http.Header.Get's own convention.
+// Marshalled now so it travels through scheduling/replay same as payload.
+func flattenHeaders(h http.Header) []byte {
+	if len(h) == 0 {
+		return nil
+	}
+	flat := make(map[string]string, len(h))
+	for k, v := range h {
+		if len(v) > 0 {
+			flat[http.CanonicalHeaderKey(k)] = v[0]
+		}
+	}
+	raw, _ := json.Marshal(flat)
+	return raw
 }

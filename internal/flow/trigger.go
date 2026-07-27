@@ -95,10 +95,11 @@ type Webhooks interface {
 // next.md #5): Serve waits for the run and replies with its content only
 // when true, else it acknowledges immediately and runs the body in the
 // background. Run executes the body with the incoming request's raw payload,
-// readable inside via bb.Payload[T], and returns the resulting chat.
+// readable inside via bb.Payload[T], and its flattened request headers,
+// readable via bb.Metadata[T] (next.md #7), and returns the resulting chat.
 type WebhookHandler struct {
 	HasReply bool
-	Run      func(ctx context.Context, payload []byte) (State, error)
+	Run      func(ctx context.Context, payload, meta []byte) (State, error)
 }
 
 type webhooksKey struct{}
@@ -127,15 +128,35 @@ func triggerDepthFrom(ctx context.Context) int {
 	return d
 }
 
+// pendingCommit collects Scheduler.Defer calls a One member wants to make,
+// without actually making them yet — fanOut installs one per member on ctx
+// only when running a One (first=true), and commits only the winner's after
+// the group has resolved (next.md #3). All/Group never install one, so
+// deferBody commits immediately for them, same as outside any group.
+type pendingCommit struct {
+	mu    sync.Mutex
+	calls []func() error
+}
+
+type pendingCommitKey struct{}
+
+func withPendingCommit(ctx context.Context, pc *pendingCommit) context.Context {
+	return context.WithValue(ctx, pendingCommitKey{}, pc)
+}
+
+func pendingCommitFrom(ctx context.Context) *pendingCommit {
+	pc, _ := ctx.Value(pendingCommitKey{}).(*pendingCommit)
+	return pc
+}
+
 // deferBody hands the continuation (the flows after the trigger) to the
 // scheduler. The body is captured with the current chat/request as payload, so a
 // request-initiated schedule replays the request context when it fires.
 //
-// This call is unconditional and synchronous — sch.Defer below commits the
-// schedule the moment a member reaches this point, with no awareness of
-// whether an enclosing One is about to discard this very member as the
-// loser. See fanOut's "KNOWN GAP" comment in groups.go for the consequence
-// and the fix this needs (next.md #2's tail).
+// Outside a One member, this commits immediately (sch.Defer runs right here).
+// Inside a One member (ctx carries a pendingCommit), the call is queued
+// instead: fanOut runs it for real only if this member turns out to be the
+// winner, and drops it otherwise — so a losing branch's trigger never fires.
 func deferBody(ctx context.Context, tn *triggerNode, rest []Flow, in State) (State, error) {
 	if tn.webhook != "" {
 		return registerWebhook(ctx, tn, rest, in)
@@ -145,18 +166,18 @@ func deferBody(ctx context.Context, tn *triggerNode, rest []Flow, in State) (Sta
 		return in, nil // no engine, or nothing to defer — just stop
 	}
 	body := seqOf(rest)
-	bodyID := body.id()
-	if bodyID == "" {
-		logrus.Warn("flow: a triggered body has no id (WithId); it cannot be resolved after a restart and is skipped")
-		return in, nil
+	ids := idsOf(rest)
+	if len(ids) != 1 {
+		return in, fmt.Errorf("%w: got %d id-bearing top-level steps %v (call WithId on exactly one)", ErrTriggerBodyID, len(ids), ids)
 	}
+	bodyID := ids[0]
 	depth := triggerDepthFrom(ctx) + 1
 	if depth > maxTriggerDepth {
 		err := fmt.Errorf("%w: body %q nested %d triggers deep (max %d)", ErrTriggerCycle, bodyID, depth, maxTriggerDepth)
 		logrus.WithField("body", bodyID).WithField("depth", depth).Error(err)
 		return in, err
 	}
-	payload, err := json.Marshal(triggerPayload{Chat: in.Chat, Req: in.Req, Data: agent.PayloadFrom(ctx), Depth: depth})
+	payload, err := json.Marshal(triggerPayload{Chat: in.Chat, Req: in.Req, Data: agent.PayloadFrom(ctx), Meta: agent.MetadataFrom(ctx), Depth: depth})
 	if err != nil {
 		return in, err
 	}
@@ -164,11 +185,19 @@ func deferBody(ctx context.Context, tn *triggerNode, rest []Flow, in State) (Sta
 		var tp triggerPayload
 		_ = json.Unmarshal(p, &tp)
 		rctx = agent.WithPayload(rctx, tp.Data)
+		rctx = agent.WithMetadata(rctx, tp.Meta)
 		rctx = withTriggerDepth(rctx, tp.Depth)
 		_, err := Run(rctx, body, State{Chat: tp.Chat, Req: tp.Req}, NoTrace{})
 		return err
 	}
-	if err := sch.Defer(bodyID, tn.cron, tn.at, payload, run); err != nil {
+	commit := func() error { return sch.Defer(bodyID, tn.cron, tn.at, payload, run) }
+	if pc := pendingCommitFrom(ctx); pc != nil {
+		pc.mu.Lock()
+		pc.calls = append(pc.calls, commit)
+		pc.mu.Unlock()
+		return in, nil
+	}
+	if err := commit(); err != nil {
 		return in, err
 	}
 	return in, nil
@@ -194,9 +223,10 @@ func registerWebhook(ctx context.Context, tn *triggerNode, rest []Flow, in State
 	body := seqOf(rest)
 	seedChat := append([]model.Message(nil), in.Chat...)
 	seedReq := in.Req
-	hasReply := containsRespond(rest)
-	run := func(rctx context.Context, payload []byte) (State, error) {
+	hasReply := reachesRespond(rest)
+	run := func(rctx context.Context, payload, meta []byte) (State, error) {
 		rctx = agent.WithPayload(rctx, payload)
+		rctx = agent.WithMetadata(rctx, meta)
 		rctx = withTriggerDepth(rctx, depth)
 		return Run(rctx, body, State{Chat: append([]model.Message(nil), seedChat...), Req: seedReq}, NoTrace{})
 	}
@@ -206,16 +236,41 @@ func registerWebhook(ctx context.Context, tn *triggerNode, rest []Flow, in State
 	return in, nil
 }
 
-// containsRespond reports whether a top-level Respond appears among steps —
-// the same shallow scan terminalStep uses. It does not see through
-// Select/One/All/Group (next.md #5).
-func containsRespond(steps []Flow) bool {
+// reachesRespond reports whether any path through steps can reach a Respond,
+// recursing into Select/One/All/Group members: a Select's runtime pick, a
+// One's eventual winner, and All/Group's parallel branches are all unknown at
+// registration time, so any member reaching Respond counts (next.md #5) — a
+// webhook whose only reply is behind a group, or behind a Select member other
+// than the "default" one, is still recognized as "may reply" rather than
+// silently downgraded to background-only.
+func reachesRespond(steps []Flow) bool {
 	for _, f := range steps {
-		if _, ok := f.(respond); ok {
+		if flowReachesRespond(f) {
 			return true
 		}
 	}
 	return false
+}
+
+func flowReachesRespond(f Flow) bool {
+	switch v := f.(type) {
+	case respond:
+		return true
+	case *decorated:
+		return flowReachesRespond(v.inner)
+	case seq:
+		return reachesRespond(v.steps)
+	case *selectGroup:
+		return reachesRespond(v.members)
+	case allGroup:
+		return reachesRespond(v.members)
+	case oneGroup:
+		return reachesRespond(v.members)
+	case groupGroup:
+		return reachesRespond(v.members)
+	default:
+		return false
+	}
 }
 
 // triggerPayload is the request context captured at schedule time and replayed
@@ -224,6 +279,7 @@ type triggerPayload struct {
 	Chat  []model.Message `json:"chat"`
 	Req   agent.Request   `json:"req"`
 	Data  []byte          `json:"data,omitempty"`  // arbitrary trigger payload (bb.Payload[T])
+	Meta  []byte          `json:"meta,omitempty"`  // out-of-band trigger metadata (bb.Metadata[T])
 	Depth int             `json:"depth,omitempty"` // nested trigger-lineage depth (cycle guard)
 }
 
@@ -240,9 +296,10 @@ func seqOf(rest []Flow) Flow {
 // by Every/Once schedules what comes after. It self-registers so Serve runs it at
 // startup; it can seed a synthetic request/chat for flows that read them.
 type TriggerChain struct {
-	steps       []Flow
-	seed        State
-	seedPayload []byte
+	steps        []Flow
+	seed         State
+	seedPayload  []byte
+	seedMetadata []byte
 }
 
 var triggers struct {
@@ -286,6 +343,14 @@ func WithSeedPayload(v any) TriggerOpt {
 	return func(t *TriggerChain) { t.seedPayload, _ = json.Marshal(v) }
 }
 
+// WithSeedMetadata seeds out-of-band trigger metadata (payload's sibling
+// channel — headers are one instance of it, this is the non-HTTP way in),
+// readable in the chain via bb.Metadata[T]. Marshalled to JSON now so it
+// travels through scheduling, same as WithSeedPayload.
+func WithSeedMetadata(v any) TriggerOpt {
+	return func(t *TriggerChain) { t.seedMetadata, _ = json.Marshal(v) }
+}
+
 // RegisteredTriggers returns the trigger chains registered so far (for Serve).
 func RegisteredTriggers() []*TriggerChain {
 	triggers.mu.Lock()
@@ -307,6 +372,7 @@ func (t *TriggerChain) RunAtStartup(ctx context.Context) error {
 		return nil
 	}
 	ctx = agent.WithPayload(ctx, t.seedPayload)
+	ctx = agent.WithMetadata(ctx, t.seedMetadata)
 	_, err := Run(ctx, seqOf(t.steps), t.seed, NoTrace{})
 	return err
 }

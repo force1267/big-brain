@@ -22,4 +22,10 @@ var (
 	// itself (or a chain of bodies scheduling each other) with no end in
 	// sight. It is loud rather than a silent infinite background loop.
 	ErrTriggerCycle = errors.New("flow: trigger cycle limit exceeded")
+
+	// ErrTriggerBodyID means a triggered body's top-level steps resolved to
+	// zero or more than one id-bearing step, so the body has no single id to
+	// schedule under. Loud at registration time rather than a logged warning
+	// that leaves the trigger dead.
+	ErrTriggerBodyID = errors.New("flow: trigger body must resolve to exactly one id")
 )

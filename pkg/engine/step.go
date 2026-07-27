@@ -28,6 +28,19 @@ func rtFrom(ctx context.Context) *rt {
 	return r
 }
 
+// RunID returns the identity of the run currently executing on ctx — stable
+// across a retry/resume of the same run (same ID, higher Attempt), fresh per
+// new invocation. A caller that layers its own durability on top of a flow
+// (e.g. an adapter checkpointing app-level state per run) keys off this
+// instead of minting an id of its own. False outside a running flow.
+func RunID(ctx context.Context) (string, bool) {
+	r := rtFrom(ctx)
+	if r == nil {
+		return "", false
+	}
+	return r.run.ID, true
+}
+
 // yield unwinds a flow when a durable Sleep is not yet due. The engine
 // recovers it and requeues the run to wake at the deadline, freeing the
 // worker instead of blocking it.

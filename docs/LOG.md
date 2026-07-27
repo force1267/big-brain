@@ -1714,3 +1714,149 @@ commit rule) — plus #2 (in-body durability) and the newly deferred #7
 (header access), in no particular forced order; #6 is the cheapest and
 unblocks correct behavior for anyone chaining multiple named flows after a
 trigger today.
+
+## 2026-07-27 — Fix next.md #2, #3, #5, #6 (tests-first)
+
+For each bug, wrote a failing test capturing the expected behaviour first,
+confirmed it failed against the current code, then fixed it. All four are
+independent bugs in the trigger/durability/grouping surface; fixed together
+since they share files.
+
+**#6 — trigger body resolves to one id, or errors.** Root cause was `seq.id()`
+in `internal/flow/flow.go` unconditionally returning `""`, not just for
+`deferBody`'s bodyID lookup but for every caller of a seq's `id()` (also hit
+`Select`, which silently drops idless members — a `Select` member built as
+`A.WithId("x").Next(Respond)` was being ignored). Fixed at the root: `seq.id()`
+now resolves to the id of the single id-bearing top-level step among
+`s.steps` (new `idsOf` helper), `""` when that's zero or ambiguous. `deferBody`
+now calls `idsOf(rest)` directly (needs to tell "zero" from "ambiguous" apart
+for its error message, which collapsing to `seq.id()`'s `""` would lose) and
+returns the new `flow.ErrTriggerBodyID` sentinel — loud, not `logrus.Warn` —
+when it isn't exactly one.
+- Tests: `TestTriggerUnnamedBodyErrors` (replaces
+  `TestTriggerUnnamedBodySkipped`, which encoded the old silent-skip
+  behaviour), `TestTriggerBodyAmbiguousIdErrors`,
+  `TestTriggerBodyResolvesSingleIdAmongMany`.
+
+**#5 — `Respond` invisible inside `Select`/`One`/`All`/`Group`.** Added
+`reachesRespond`/`flowReachesRespond` (`internal/flow/trigger.go`), a
+recursive walk replacing the shallow `containsRespond` that `registerWebhook`
+used for `HasReply`. Design call: any member of a `Select`/`One`/`All`/`Group`
+reaching `Respond` counts, uniformly — at registration time there's no way to
+know a `Select`'s runtime pick or a `One`'s eventual winner, so treating any
+reachable path as "may reply" is the conservative-correct choice (a false
+"has reply" just costs one synchronous wait; a false "no reply" silently
+drops a response the caller was waiting on). `terminalStep` (the separate,
+narrower "which step streams" scan in `flow.go`, used for the normal request
+path) is untouched — out of scope, different consumer, different question.
+- Test: `TestWebhookHasReplyThroughGroups` (all four group kinds, plus a
+  none-of-them-negative case).
+
+**#3 — scheduler-inside-concurrent-group commit rule.** `fanOut`'s `KNOWN GAP`
+comment (`internal/flow/groups.go`) described the fix as "a two-phase
+`Scheduler.Defer`, gated on won/winner being settled, applied only when
+`first` is true" — built exactly that. New `pendingCommit`
+(`internal/flow/trigger.go`): `fanOut` installs one per member on that
+member's ctx only when `first=true` (`One`); `deferBody` sees it and queues
+the `sch.Defer` call (a closure) instead of committing immediately. After
+`wg.Wait()`, `fanOut` runs only the winner's queued calls; a loser's are just
+dropped (its `*pendingCommit` goes out of scope, GC'd). `All`/`Group` install
+nothing, so their members still commit immediately — correct as-is per the
+original gap analysis, since every member's contribution is kept there.
+Webhook registration is untouched (still commits immediately regardless of
+group) — next.md's own open question ("seeing if Webhook is effected too")
+is left open; `Webhooks.Register` erroring on a duplicate id is a different
+failure shape than `Scheduler.Defer`, and no concrete case has hit it yet.
+- Test: `TestOneDiscardsLosingMemberTrigger` — a fast member and a
+  (deterministically) slow member both reach `Once`; only the fast one's
+  `bodyID` shows up in the mock scheduler's calls.
+
+**#2 — finer durability inside a triggered body.** Root cause: `Serve` wires
+`flow.WithScheduler` onto the engine worker's ctx (for the cycle guard, #4)
+but never `flow.WithStore` — so a `Durable()` flow nested in a fired
+trigger body had no store to checkpoint into, silently. Fixed at
+`engineScheduler.Defer`'s registration wrapper
+(`internal/serve/engine.go`): before calling the trigger's `run` closure, it
+now calls the new `engine.RunID(ctx)` (`pkg/engine/step.go`, exposes the
+already-tracked-internally `rt.run.ID` — stable across a resume of the same
+firing, fresh per new firing) and, if present, wires
+`flow.WithStore(ctx, s.store, id)`. `engineScheduler` gained a `store` field
+to have something to wire (previously it only kept the `*engine.Engine`,
+discarding the `flow.Store` it was constructed with).
+Scoped down from next.md's fuller ask: `Retries`/`TTL` on `Durable()` are
+still inert on this path — `pkg/engine` has no job-level retry concept to map
+them onto (`engine.Retries` is a per-`Step` option, not per-`Run`; a failed
+`Run` today just acks/drops, doesn't retry). Inventing that concept wasn't
+part of the well-specified bug (run-id threading) and would be its own
+design pass — left for when a concrete need shows up, not built speculatively.
+- Test: `TestTriggeredDurableFlowCheckpoints` (`internal/serve/engine_test.go`)
+  — a `recordingStore` wrapping `engine.MemStore` proves a `flow/`-prefixed
+  checkpoint key actually got written through the real store passed to
+  `newEngineScheduler`, firing a `Durable` body through the real
+  `engineScheduler`/`Engine` machinery (not a mock).
+
+`go build ./... && go vet ./... && go test ./... -race` green.
+
+Next: next.md's remaining open items are #7 (header access via
+`bb.Payload[T]`, deferred design question) and the Retries/TTL-on-triggered-
+Durable gap called out above; neither is blocking anything.
+
+## 2026-07-27 — `bb.Metadata[T]` (next.md #7), design + build
+
+Design settled over a discussion (recorded in next.md #7) before building:
+field-name-match merging headers into `bb.Payload[T]`'s `T` was rejected (a
+JSON body field colliding by accident with a header name would silently pull
+from the wrong source) in favor of a wholly separate channel, generalized
+past HTTP — not every trigger is HTTP (`Every`/`Once`/a custom entry point
+have no headers), but every trigger already had a payload channel
+(`bb.WithSeedPayload`), so metadata became that channel's sibling rather than
+an HTTP-specific add-on. Scoped to trigger-fired runs only (webhook +
+seeded `Every`/`Once`/custom) — deliberately **not** wired into plain served
+chat-completions calls (`s.openai`/`s.anthropic`): `Payload`'s own docstring
+already scopes it as "trigger-specific data," and a plain call already has
+`turn.Request()` for its envelope — headers there are a transport/auth
+concern, not something `OnMessage` logic should reach into. Revisit only if a
+concrete need shows up; the plumbing (`r.Header` is already in scope at both
+call sites) would be a small, symmetric add later.
+
+**Built**, mirroring `Payload` exactly:
+- `internal/agent/metadata.go` — new file, `metadataKey`/`WithMetadata`/
+  `MetadataFrom`/`Turn.Metadata()`, same shape as `payload.go`.
+- `pkg/bb/agent.go` — `bb.Metadata[T](turn)`, same shape as `bb.Payload[T]`.
+- `internal/flow/trigger.go` — `triggerPayload` gained a `Meta []byte` field
+  (`json:"meta,omitempty"`) alongside `Data`, captured/replayed the same way
+  in `deferBody`'s `run` closure and `TriggerChain.RunAtStartup`. New
+  `TriggerChain.seedMetadata` field + `WithSeedMetadata(v any) TriggerOpt`,
+  mirroring `WithSeedPayload`. `WebhookHandler.Run`'s signature grew a `meta
+  []byte` parameter (`func(ctx, payload, meta []byte) (State, error)`) —
+  `registerWebhook`'s `run` closure now also calls
+  `agent.WithMetadata(rctx, meta)`.
+- `pkg/bb/flow.go` — exported `bb.WithSeedMetadata`.
+- `internal/serve/webhook.go` — new `flattenHeaders(http.Header) []byte`:
+  canonicalizes keys (`http.CanonicalHeaderKey`) and keeps only the first
+  value of a repeated header (`http.Header.Get`'s own convention), producing
+  `map[string]string` JSON — not `http.Header` verbatim, since `bb.Metadata`
+  is deliberately not HTTP-specific and shouldn't carry HTTP's multi-value
+  shape into a generic channel. Both `s.webhook` call sites (sync-reply and
+  background) now pass the flattened headers through to `h.Run`.
+- Replayability: `Meta` rides inside the same `triggerPayload` blob as `Data`/
+  `Chat`/`Req`, which already crosses the durable-engine boundary as opaque
+  `json.RawMessage` (`internal/serve/engine.go`'s `Defer`) — so metadata
+  needed no new engine-side wiring to survive a `Durable()` checkpoint/resume
+  or a cron refire; it gets the exact same promise `Data` already had.
+- `docs/authoring-guide.md`'s trigger section gained a paragraph on
+  `bb.Metadata[T]`/`WithSeedMetadata` alongside the existing `Payload` one.
+
+Tests: `TestMetadataSeedAndReplay` (`internal/flow/trigger_test.go` — seed via
+`WithSeedMetadata`, round-trips through the captured `triggerPayload` bytes
+the scheduler would persist, replays on fire, mirroring
+`TestPayloadSeedAndReplay`); `TestWebhookPayloadAndSeedReplay` extended to
+also assert metadata across repeated fires; `TestWebhookHeadersReachMetadata`
+and `TestFlattenHeaders` (`internal/serve/webhook_test.go` — a real
+`httptest` request's header reaches `turn.Metadata()` end-to-end; canonical-
+key/first-value-wins flattening in isolation).
+
+`go build ./... && go vet ./... && go test ./...` green.
+
+Next: next.md #7 is now fully shipped. Only the Retries/TTL-on-triggered-
+Durable gap (#2's log entry above) remains open, not blocking anything.

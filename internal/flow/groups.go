@@ -167,18 +167,14 @@ func (g groupGroup) run(ctx context.Context, in State) (State, error) {
 // first successful member's contribution and cancels the rest (One). A
 // divergent select across members that contributed is ErrSelectConflict.
 //
-// KNOWN GAP (next.md #2's tail, "scheduler-inside-concurrent-group commit
-// rule" — unfixed): a member that reaches a Once/Every trigger node finishes
-// (from this function's point of view) the instant deferBody hands the body to
-// the Scheduler — Defer is synchronous and returns immediately, well before
-// this function decides won/winner below. So with first=true (One), a losing
-// member's trigger can already be durably registered with the engine before
-// cancel() ever reaches it: One is supposed to keep exactly one member's
-// contribution, but a discarded member's schedule fires anyway. All/Group are
-// unaffected — they keep every member's contribution, so committing a
-// trigger immediately is already correct there. The fix needs a two-phase
-// Scheduler.Defer, gated on won/winner being settled, applied only when
-// first is true; not implemented.
+// One's commit-on-acceptance rule (next.md #3): a member that reaches a
+// Once/Every trigger node doesn't get to schedule it for real on the spot —
+// deferBody sees a pendingCommit on its ctx (installed below, only when
+// first=true) and queues the Scheduler.Defer call instead of making it. Once
+// the winner is settled, only its queued calls actually run; a losing
+// member's queued calls are just dropped. All/Group never install a
+// pendingCommit, so their members commit immediately — correct as-is, since
+// every member's contribution is kept there.
 func fanOut(ctx context.Context, members []Flow, in State, first bool) (State, error) {
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -190,13 +186,14 @@ func fanOut(ctx context.Context, members []Flow, in State, first bool) (State, e
 	}
 
 	var (
-		mu     sync.Mutex
-		wg     sync.WaitGroup
-		fe     firstErr
-		sel    selMerge
-		merged []model.Message
-		won    bool // One: a winner has been taken
-		winner result
+		mu       sync.Mutex
+		wg       sync.WaitGroup
+		fe       firstErr
+		sel      selMerge
+		merged   []model.Message
+		won      bool // One: a winner has been taken
+		winner   result
+		winnerPC *pendingCommit
 	)
 	base := len(in.Chat)
 
@@ -204,7 +201,13 @@ func fanOut(ctx context.Context, members []Flow, in State, first bool) (State, e
 		wg.Add(1)
 		go func(i int, m Flow) {
 			defer wg.Done()
-			out, err := m.run(indexPath(cctx, i), State{Chat: cloneMsgs(in.Chat)})
+			mctx := indexPath(cctx, i)
+			var pc *pendingCommit
+			if first {
+				pc = &pendingCommit{}
+				mctx = withPendingCommit(mctx, pc)
+			}
+			out, err := m.run(mctx, State{Chat: cloneMsgs(in.Chat)})
 			if err != nil {
 				fe.set(err, cancel)
 				return
@@ -213,7 +216,7 @@ func fanOut(ctx context.Context, members []Flow, in State, first bool) (State, e
 			if first {
 				mu.Lock()
 				if !won {
-					won, winner = true, r
+					won, winner, winnerPC = true, r, pc
 					cancel() // first success cancels the others
 				}
 				mu.Unlock()
@@ -233,6 +236,13 @@ func fanOut(ctx context.Context, members []Flow, in State, first bool) (State, e
 	if first {
 		if !won {
 			return in, fmt.Errorf("%w: no member of One completed", ErrAgent)
+		}
+		if winnerPC != nil {
+			for _, commit := range winnerPC.calls {
+				if err := commit(); err != nil {
+					return in, err
+				}
+			}
 		}
 		out := State{Chat: append(cloneMsgs(in.Chat), winner.newReplies...)}
 		out.selected, out.hasSel = winner.selected, winner.hasSel

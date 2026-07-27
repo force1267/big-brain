@@ -63,6 +63,37 @@ func TestOneFirstWins(t *testing.T) {
 	}
 }
 
+// One's commit-on-acceptance rule: a trigger reached inside a losing member is
+// discarded, not scheduled anyway — only the winner's trigger sticks
+// (next.md #3).
+func TestOneDiscardsLosingMemberTrigger(t *testing.T) {
+	sch := &mockScheduler{}
+	when := time.Now().Add(time.Hour)
+
+	fastStart := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		turn.Reply("fast")
+		return nil
+	})
+	slowStart := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		time.Sleep(50 * time.Millisecond)
+		turn.Reply("slow")
+		return nil
+	})
+	winner := New().WithAgent(fastStart).WithId("start-a").
+		Next(Once(when)).Next(New().WithAgent(mockAgent("body-a")).WithId("body-a"))
+	loser := New().WithAgent(slowStart).WithId("start-b").
+		Next(Once(when)).Next(New().WithAgent(mockAgent("body-b")).WithId("body-b"))
+
+	ctx := WithScheduler(context.Background(), sch)
+	if _, err := Run(ctx, One(winner, loser), chat("go"), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(sch.calls) != 1 || sch.calls[0].bodyID != "body-a" {
+		t.Fatalf("expected only the winning member's trigger committed, got %+v", sch.calls)
+	}
+}
+
 // Group merges replies like All (final-output equivalence).
 func TestGroupMerges(t *testing.T) {
 	g := Group(

@@ -125,8 +125,8 @@ func main() {
 	// bb.Once also works mid-flow, after Respond, to keep working past the reply ("I'll text you when it's done"):
 	//   intentDiscovery.Next(capabilities).Next(bb.Respond).Next(bb.Once(when)).Next(followUp)
 	// bb.Webhook(endpointID) fires on an inbound POST /v1/hooks/{endpointID} instead of a cron/time — the
-	// reception half of bb.Payload. endpointID is the route slug, deliberately separate from the body's
-	// own WithId (a public URL a caller hardcodes vs. an internal Durable/Select identity):
+	// reception half of bb.Payload/bb.Metadata. endpointID is the route slug, deliberately separate from the
+	// body's own WithId (a public URL a caller hardcodes vs. an internal Durable/Select identity):
 	//   bb.Trigger().Next(bb.Webhook("doorbell")).Next(bb.NewFlow().WithAgent(announceVisitor))
 	// with a Respond in that body, Serve waits and replies 200 with it; without one, it replies 202
 	// right away and runs the body in the background — don't block the caller on a long job.
@@ -135,6 +135,14 @@ func main() {
 	// A trigger can seed data a flow reads back: bb.Trigger(bb.WithSeedPayload(x)). Inside an agent,
 	// turn.Request() is the protocol envelope (model/temperature/…) and bb.Payload[T](turn) is arbitrary
 	// trigger-specific data — both captured and replayed when a scheduled body fires.
+	// bb.Metadata[T](turn) is Payload's sibling: out-of-band data alongside it, kept as its own channel
+	// rather than merged into Payload's T (a body field colliding by accident with a header name would
+	// otherwise silently pull from the wrong source). Seed it the same way: bb.Trigger(bb.WithSeedMetadata(x)).
+	// A Webhook populates it for you — every request header, flattened to map[string]string (canonical
+	// casing, first value of a repeat wins), so announceVisitor above could check
+	// bb.Metadata[map[string]string](turn)["X-Doorbell-Signature"] before trusting the payload. Rides through
+	// scheduling/replay exactly like Payload — a Durable() retry or cron refire sees the same metadata the
+	// original firing captured.
 
 	// it serves the combined flow in openapi and anthropic API style.
 	// ctx drives graceful shutdown; opts (bb.Addr/bb.Store/bb.Trace/bb.Workers)

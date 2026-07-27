@@ -109,19 +109,60 @@ func TestEveryCarriesCron(t *testing.T) {
 	}
 }
 
-// An unnamed deferred body is skipped with a warning (it can't be resolved after
-// a restart), not scheduled.
-func TestTriggerUnnamedBodySkipped(t *testing.T) {
+// A deferred body with no id-bearing top-level step is a loud registration-time
+// error, not a silently skipped schedule (next.md #6).
+func TestTriggerUnnamedBodyErrors(t *testing.T) {
 	sch := &mockScheduler{}
 	var ran []string
 	chain := New().WithAgent(recordAgent(&ran, "a")).WithId("a").
 		Next(Once(time.Now())).Next(New().WithAgent(recordAgent(&ran, "b"))) // body has no WithId
 	ctx := WithScheduler(context.Background(), sch)
-	if _, err := Run(ctx, chain, chat("go"), nil); err != nil {
-		t.Fatal(err)
+	if _, err := Run(ctx, chain, chat("go"), nil); !errors.Is(err, ErrTriggerBodyID) {
+		t.Fatalf("expected ErrTriggerBodyID, got %v", err)
 	}
 	if len(sch.calls) != 0 {
-		t.Fatalf("unnamed body should not be scheduled: %+v", sch.calls)
+		t.Fatalf("an unresolvable body should not be scheduled: %+v", sch.calls)
+	}
+}
+
+// A deferred body with more than one id-bearing top-level step is ambiguous —
+// a loud error, not a silent "" (next.md #6).
+func TestTriggerBodyAmbiguousIdErrors(t *testing.T) {
+	sch := &mockScheduler{}
+	var ran []string
+	// A.WithId("x").Next(B).Next(C.WithId("y")) — but here the trigger's body is
+	// [A(id="x"), B, C(id="y")], deliberately more than one top-level step.
+	a := New().WithAgent(recordAgent(&ran, "a")).WithId("x")
+	b := New().WithAgent(recordAgent(&ran, "b"))
+	c := New().WithAgent(recordAgent(&ran, "c")).WithId("y")
+	body := seq{steps: []Flow{a, b, c}}
+
+	ctx := WithScheduler(context.Background(), sch)
+	if _, err := deferBody(ctx, &triggerNode{once: true, at: time.Now()}, body.steps, State{}); !errors.Is(err, ErrTriggerBodyID) {
+		t.Fatalf("expected ErrTriggerBodyID (two id-bearing steps), got %v", err)
+	}
+	if len(sch.calls) != 0 {
+		t.Fatalf("an ambiguous body should not be scheduled: %+v", sch.calls)
+	}
+}
+
+// A deferred body built from several top-level steps, exactly one of which
+// carries WithId, resolves to that one id — the id names only the flow it was
+// called on, same as everywhere else WithId is used (next.md #6).
+func TestTriggerBodyResolvesSingleIdAmongMany(t *testing.T) {
+	sch := &mockScheduler{}
+	var ran []string
+	a := New().WithAgent(recordAgent(&ran, "a"))
+	b := New().WithAgent(recordAgent(&ran, "b")).WithId("named")
+	c := New().WithAgent(recordAgent(&ran, "c"))
+	body := seq{steps: []Flow{a, b, c}}
+
+	ctx := WithScheduler(context.Background(), sch)
+	if _, err := deferBody(ctx, &triggerNode{once: true, at: time.Now()}, body.steps, State{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sch.calls) != 1 || sch.calls[0].bodyID != "named" {
+		t.Fatalf("expected the single named step's id, got %+v", sch.calls)
 	}
 }
 
@@ -159,6 +200,53 @@ func TestPayloadSeedAndReplay(t *testing.T) {
 	}
 	if len(seen) != 2 || seen[1] != `{"k":"v"}` {
 		t.Fatalf("payload not replayed to deferred body: %v", seen)
+	}
+}
+
+// Metadata is Payload's sibling channel (next.md #7): a seeded metadata value
+// reaches an agent via the turn, and survives being captured, JSON-round-
+// tripped through the scheduler, and replayed across a scheduled fire — same
+// promise as Payload, needed because Durable/cron bodies rehydrate from the
+// captured triggerPayload bytes, not from the live ctx.
+func TestMetadataSeedAndReplay(t *testing.T) {
+	var seen []string
+	reader := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
+		seen = append(seen, string(turn.Metadata()))
+		turn.Reply("ok")
+		return nil
+	})
+	body := New().WithAgent(reader).WithId("body")
+
+	sch := &mockScheduler{}
+	t.Cleanup(ResetTriggers)
+	tc := Trigger(WithSeedMetadata(map[string]string{"X-Signature": "sig"})).
+		Next(New().WithAgent(reader).WithId("pre")).
+		Next(Once(time.Now())).Next(body)
+
+	ctx := WithScheduler(context.Background(), sch)
+	if err := tc.RunAtStartup(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 || seen[0] != `{"X-Signature":"sig"}` {
+		t.Fatalf("seeded metadata not seen by pre-flow: %v", seen)
+	}
+	if len(sch.calls) != 1 {
+		t.Fatalf("body not scheduled: %+v", sch.calls)
+	}
+	// Round-trip through the same raw bytes the scheduler would persist and
+	// replay after a restart, not the live ctx.
+	var tp triggerPayload
+	if err := json.Unmarshal(sch.calls[0].payload, &tp); err != nil {
+		t.Fatal(err)
+	}
+	if string(tp.Meta) != `{"X-Signature":"sig"}` {
+		t.Fatalf("expected metadata captured in triggerPayload, got %q", tp.Meta)
+	}
+	if err := sch.calls[0].run(context.Background(), sch.calls[0].payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 2 || seen[1] != `{"X-Signature":"sig"}` {
+		t.Fatalf("metadata not replayed to deferred body: %v", seen)
 	}
 }
 
@@ -246,7 +334,7 @@ func TestWebhookRegistersUnderEndpointID(t *testing.T) {
 	if !ok {
 		t.Fatalf("endpoint not registered: %+v", wh.hooks)
 	}
-	if _, err := h.Run(context.Background(), nil); err != nil {
+	if _, err := h.Run(context.Background(), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(ran) != 2 || ran[1] != "after" {
@@ -276,14 +364,74 @@ func TestWebhookHasReply(t *testing.T) {
 	}
 }
 
+// HasReply sees a Respond nested inside Select/One/All/Group members, not
+// just a top-level one (next.md #5).
+func TestWebhookHasReplyThroughGroups(t *testing.T) {
+	wh := &mockWebhooks{}
+	t.Cleanup(ResetTriggers)
+
+	viaSelect := Trigger().Next(Webhook("via-select")).
+		Next(Select(New().WithAgent(recordAgent(&[]string{}, "a")).WithId("a").Next(Respond)))
+	if err := viaSelect.RunAtStartup(WithWebhooks(context.Background(), wh)); err != nil {
+		t.Fatal(err)
+	}
+	if !wh.hooks["via-select"].HasReply {
+		t.Fatal("expected HasReply true with Respond nested inside a Select member")
+	}
+
+	viaOne := Trigger().Next(Webhook("via-one")).
+		Next(One(New().WithAgent(recordAgent(&[]string{}, "a")).Next(Respond),
+			New().WithAgent(recordAgent(&[]string{}, "b"))))
+	if err := viaOne.RunAtStartup(WithWebhooks(context.Background(), wh)); err != nil {
+		t.Fatal(err)
+	}
+	if !wh.hooks["via-one"].HasReply {
+		t.Fatal("expected HasReply true with Respond nested inside a One member")
+	}
+
+	viaAll := Trigger().Next(Webhook("via-all")).
+		Next(All(New().WithAgent(recordAgent(&[]string{}, "a")),
+			New().WithAgent(recordAgent(&[]string{}, "b")).Next(Respond)))
+	if err := viaAll.RunAtStartup(WithWebhooks(context.Background(), wh)); err != nil {
+		t.Fatal(err)
+	}
+	if !wh.hooks["via-all"].HasReply {
+		t.Fatal("expected HasReply true with Respond nested inside an All member")
+	}
+
+	viaGroup := Trigger().Next(Webhook("via-group")).
+		Next(Group(New().WithAgent(recordAgent(&[]string{}, "a")).Next(Respond),
+			New().WithAgent(recordAgent(&[]string{}, "b"))))
+	if err := viaGroup.RunAtStartup(WithWebhooks(context.Background(), wh)); err != nil {
+		t.Fatal(err)
+	}
+	if !wh.hooks["via-group"].HasReply {
+		t.Fatal("expected HasReply true with Respond nested inside a Group member")
+	}
+
+	noneOfThem := Trigger().Next(Webhook("none")).
+		Next(All(New().WithAgent(recordAgent(&[]string{}, "a")),
+			New().WithAgent(recordAgent(&[]string{}, "b"))))
+	if err := noneOfThem.RunAtStartup(WithWebhooks(context.Background(), wh)); err != nil {
+		t.Fatal(err)
+	}
+	if wh.hooks["none"].HasReply {
+		t.Fatal("expected HasReply false when no member reaches Respond")
+	}
+}
+
 // A webhook's incoming payload is readable via bb.Payload[T] (agent.PayloadFrom),
-// and Chat/Req seeded on the Trigger chain up to the Webhook node is replayed on
-// every fire, same as Every/Once replay their captured state.
+// its request headers (flattened by the caller into metadata) are readable via
+// bb.Metadata[T] (agent.MetadataFrom, next.md #7), and Chat/Req seeded on the
+// Trigger chain up to the Webhook node is replayed on every fire, same as
+// Every/Once replay their captured state.
 func TestWebhookPayloadAndSeedReplay(t *testing.T) {
 	var seenPayload []string
+	var seenMeta []string
 	var seenChat []string
 	reader := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
 		seenPayload = append(seenPayload, string(turn.Payload()))
+		seenMeta = append(seenMeta, string(turn.Metadata()))
 		if len(turn.Messages) > 0 {
 			seenChat = append(seenChat, turn.Messages[0].Content)
 		}
@@ -300,12 +448,16 @@ func TestWebhookPayloadAndSeedReplay(t *testing.T) {
 	}
 	h := wh.hooks["stripe-payment"]
 
+	metas := []string{`{"X-Signature":"sig1"}`, `{"X-Signature":"sig2"}`}
 	for i, payload := range []string{`{"amount":1}`, `{"amount":2}`} {
-		if _, err := h.Run(context.Background(), []byte(payload)); err != nil {
+		if _, err := h.Run(context.Background(), []byte(payload), []byte(metas[i])); err != nil {
 			t.Fatal(err)
 		}
 		if seenPayload[i] != payload {
 			t.Fatalf("fire %d: expected payload %q, got %q", i, payload, seenPayload[i])
+		}
+		if seenMeta[i] != metas[i] {
+			t.Fatalf("fire %d: expected metadata %q, got %q", i, metas[i], seenMeta[i])
 		}
 		if seenChat[i] != "seeded" {
 			t.Fatalf("fire %d: expected seeded chat to replay, got %q", i, seenChat[i])

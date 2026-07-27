@@ -2,6 +2,8 @@ package serve
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -73,6 +75,63 @@ func TestWebhookNoReplyAcknowledgesAsync(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("background webhook body did not run")
+	}
+}
+
+// A webhook's request headers reach the body via bb.Metadata[T]
+// (turn.Metadata, agent.MetadataFrom) — Payload's sibling channel, populated
+// from headers rather than the POST body (next.md #7).
+func TestWebhookHeadersReachMetadata(t *testing.T) {
+	flow.ResetTriggers()
+	t.Cleanup(flow.ResetTriggers)
+
+	body := flow.New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		turn.Reply("meta: " + string(turn.Metadata()))
+		return nil
+	}))
+	flow.Trigger().Next(flow.Webhook("with-meta")).Next(body).Next(flow.Respond)
+
+	_, mux, err := build(talkFlow("x"), Store(engine.NewMemStore()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/hooks/with-meta", strings.NewReader(`{}`))
+	req.Header.Set("X-Signature", "sig-123")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if got := rec.Body.String(); got != `meta: {"X-Signature":"sig-123"}` {
+		t.Fatalf("expected header surfaced as metadata, got %q", got)
+	}
+}
+
+// flattenHeaders canonicalizes header keys and keeps only the first value of
+// a repeated header (http.Header.Get's own convention) — the wire shape
+// bb.Metadata[T] decodes, deliberately map[string]string rather than
+// http.Header (next.md #7: Metadata is not HTTP-specific).
+func TestFlattenHeaders(t *testing.T) {
+	h := http.Header{}
+	h.Add("x-signature", "first")
+	h.Add("X-Signature", "second")
+	h.Set("Content-Type", "application/json")
+
+	raw := flattenHeaders(h)
+	var got map[string]string
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["X-Signature"] != "first" {
+		t.Fatalf("expected canonical key with first value, got %+v", got)
+	}
+	if got["Content-Type"] != "application/json" {
+		t.Fatalf("expected Content-Type preserved, got %+v", got)
+	}
+	if len(flattenHeaders(http.Header{})) != 0 {
+		t.Fatal("expected empty headers to flatten to nothing")
 	}
 }
 

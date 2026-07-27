@@ -228,7 +228,28 @@ func runAgent(ctx context.Context, ag agent.Agent, turn *agent.Turn, mc *agent.M
 // step to the next.
 type seq struct{ steps []Flow }
 
-func (s seq) id() string                  { return "" }
+// id resolves to the one id-bearing top-level step, if there's exactly one —
+// e.g. A.WithId("x").Next(B) names "x" (WithId names only the flow it was
+// called on, same rule as everywhere else). Zero or more than one id-bearing
+// step is ambiguous and resolves to "" here; callers that need to tell those
+// two cases apart (deferBody) inspect idsOf(s.steps) directly instead.
+func (s seq) id() string {
+	if ids := idsOf(s.steps); len(ids) == 1 {
+		return ids[0]
+	}
+	return ""
+}
+
+// idsOf collects the non-empty ids among steps' own top-level id()s.
+func idsOf(steps []Flow) []string {
+	var ids []string
+	for _, f := range steps {
+		if id := f.id(); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
 func (s seq) Next(f Flow) Flow            { return then(s, f) }
 func (s seq) WithId(id string) NamedFlow  { return named(s, id) }
 func (s seq) WithModel(m model.Spec) Flow { return scoped(s, m) }

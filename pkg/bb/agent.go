@@ -84,3 +84,21 @@ func Payload[T any](turn Turn) (v T, ok bool) {
 	}
 	return v, true
 }
+
+// Metadata decodes this turn's out-of-band trigger metadata into T — a
+// webhook's request headers, or whatever a non-HTTP trigger seeded via
+// WithSeedMetadata. ok is false when the run carries no metadata or it does
+// not decode into T. It is Payload's sibling, kept as a separate channel
+// rather than merged into Payload's T so a field name can never collide
+// across the two sources (next.md #7). A free function, like Payload, because
+// Go methods cannot be generic.
+func Metadata[T any](turn Turn) (v T, ok bool) {
+	raw := turn.Metadata()
+	if len(raw) == 0 {
+		return v, false
+	}
+	if json.Unmarshal(raw, &v) != nil {
+		return v, false
+	}
+	return v, true
+}

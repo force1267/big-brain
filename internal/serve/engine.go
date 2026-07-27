@@ -17,6 +17,7 @@ import (
 // durable job engine.
 type engineScheduler struct {
 	eng        *engine.Engine
+	store      flow.Store
 	mu         sync.Mutex
 	registered map[string]bool
 }
@@ -30,14 +31,23 @@ func newEngineScheduler(store flow.Store) (*engineScheduler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &engineScheduler{eng: eng, registered: map[string]bool{}}, nil
+	return &engineScheduler{eng: eng, store: store, registered: map[string]bool{}}, nil
 }
 
 // Defer implements flow.Scheduler.
 func (s *engineScheduler) Defer(bodyID, cron string, at time.Time, payload []byte, run func(context.Context, []byte) error) error {
 	s.mu.Lock()
 	if !s.registered[bodyID] {
-		err := s.eng.Register(bodyID, func(ctx context.Context, raw json.RawMessage) error { return run(ctx, raw) })
+		err := s.eng.Register(bodyID, func(ctx context.Context, raw json.RawMessage) error {
+			// Give a Durable flow nested in the fired body a store to
+			// checkpoint into, keyed to this specific firing (engine.RunID),
+			// the same way flow.WithStore wires a normal HTTP request — else
+			// Durable() silently never checkpoints on this path (next.md #2).
+			if id, ok := engine.RunID(ctx); ok {
+				ctx = flow.WithStore(ctx, s.store, id)
+			}
+			return run(ctx, raw)
+		})
 		if err != nil && !errors.Is(err, engine.ErrDupFlow) {
 			s.mu.Unlock()
 			return err
