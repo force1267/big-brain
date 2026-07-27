@@ -1860,3 +1860,72 @@ key/first-value-wins flattening in isolation).
 
 Next: next.md #7 is now fully shipped. Only the Retries/TTL-on-triggered-
 Durable gap (#2's log entry above) remains open, not blocking anything.
+
+## 2026-07-27 — Audit pass over next.md's SHIPPED claims (#1-#7): closed two
+test gaps, found one open bug (#8)
+
+next.md claimed #1-#7 all shipped and "nothing left to decide." Ran an
+independent verification pass to check the claims against the actual code
+and tests rather than take the doc's word — two parallel review passes (one
+over #1/#2/#3, one over #4/#5/#6/#7), each reading the implementation and the
+named tests directly, not just confirming `go test` passes.
+
+**Confirmed correct, no changes:** #1 (webhook sync/async split,
+`context.WithoutCancel` background detachment, `Durable()` no-op without
+`Store`), #4 (cycle guard depth math, `WithScheduler` worker-ctx wiring), #5
+(`reachesRespond` recursion through `seq`/`*decorated`/`Select`/`One`/`All`/
+`Group`), #6 (`seq.id()`/`idsOf` ambiguous-id detection).
+
+**Test-coverage gaps closed** (implementation was already correct; the
+*proof* wasn't there):
+
+- #2: `TestTriggeredDurableFlowCheckpoints` only asserted a checkpoint write
+  happened, never that a second firing of the same run actually skips the
+  completed step. Added `TestTriggeredDurableFlowResumeSkipsCompletedStep`
+  (`internal/serve/engine_test.go`) — fires the same `engine.RunID` twice via
+  `eng.EnqueueID` (since `Defer` always mints a fresh uuid, which wouldn't
+  share a checkpoint scope) and asserts the agent runs once, not twice.
+  Verified the test actually catches a regression: commenting out the
+  `flow.WithStore` wiring it exercises makes it fail.
+- #7: the metadata tests only round-tripped the raw `triggerPayload` JSON
+  directly, never through a real `Durable()` checkpoint/resume over the
+  actual `engineScheduler`. Added
+  `TestTriggeredDurableFlowMetadataSurvivesResume` (same file) — same
+  same-`RunID`-twice trick, agent reads `turn.Metadata()`, asserts it's seen
+  once with the right value across both firings. Verified it actually
+  catches a regression: commenting out the `agent.WithMetadata` wiring it
+  exercises makes it fail with an empty metadata read.
+
+**Bug found, not previously documented — next.md #8, left OPEN:** nested
+`One`-in-`One` breaks #3's commit-gating. `fanOut`'s commit-execution point
+(`internal/flow/groups.go:240-246`) fires the winner's queued
+`Scheduler.Defer` calls unconditionally once its own group resolves — it
+never checks whether the ctx it was itself entered with already carries an
+*outer* `pendingCommit` (from an enclosing `One`) that it should queue into
+instead. Concretely: in `One(One(a.Next(Once(t)).Next(bodyA), b), c)`, if the
+inner `One` picks `a`, `a`'s trigger fires for real the instant the inner
+group resolves — regardless of whether the outer `One` later picks `c`
+instead, at which point `a`'s branch was actually the overall loser. A
+single level of `One` (the case `TestOneDiscardsLosingMemberTrigger` covers)
+is unaffected; only nesting breaks it. Documented in detail, including the
+fix shape (`fanOut` should check for and queue into an outer
+`pendingCommitFrom(ctx)` before executing), in next.md #8. Not fixed this
+session — no concrete brain has hit it, it requires deliberately nesting
+`One` inside `One` — but flagged as a correctness bug (a loser's trigger can
+fire) rather than a missing-feature gap, worth fixing before anyone actually
+does that nesting.
+
+Note for future sessions: while verifying the metadata resume test, an
+in-session `git checkout -- internal/serve/engine_test.go` (meant to revert a
+throwaway sanity-check mutation) discarded the new tests entirely rather than
+just the mutation, since they hadn't been committed yet — `git checkout --`
+reverts to the last commit, not to "a moment ago." Re-applied from the
+already-verified content; no data lost, but a reminder to stash/diff instead
+of blind-reverting uncommitted work mid-task.
+
+`go build ./... && go vet ./... && go test ./... -race` green (12 test files
+across the module, including the 2 new tests above).
+
+Next: next.md #8 (nested `One`-in-`One`) is the one open item with a known
+fix shape not yet built. The Retries/TTL-on-triggered-Durable gap (#2) is
+still open too, lower priority (missing feature, not a correctness bug).
