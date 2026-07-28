@@ -20,6 +20,12 @@ type Sink struct {
 // emitting).
 func (s *Sink) Claimed() bool { return s.claimed.Load() }
 
+// Stage lets the next response stage claim the sink again — Respond calls it
+// once it has flushed its own stage, so claim-once resets per stage instead
+// of once for the whole request; the first agent of the NEXT stage is once
+// again the one that wins Turn.Stream().
+func (s *Sink) Stage() { s.claimed.Store(false) }
+
 type sinkKey struct{}
 
 // WithSink puts the client sink on ctx (Serve, per streaming request).
@@ -40,3 +46,8 @@ func sinkFrom(ctx context.Context) *Sink {
 	s, _ := ctx.Value(sinkKey{}).(*Sink)
 	return s
 }
+
+// SinkFrom returns the client sink on ctx, or nil — flow's Respond reads it
+// to flush a stage's undelivered content; everywhere else in this package
+// uses the unexported sinkFrom directly.
+func SinkFrom(ctx context.Context) *Sink { return sinkFrom(ctx) }

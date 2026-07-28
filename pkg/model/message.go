@@ -1,5 +1,22 @@
 package model
 
+import "strings"
+
+// JoinAssistantText joins the non-empty content of every assistant message in
+// msgs with a blank line between them. It is the one join rule shared by a
+// Respond stage's live flush and a run's final buffered answer, so a
+// streaming and a non-streaming client see identically joined text for the
+// same chain.
+func JoinAssistantText(msgs []Message) string {
+	var parts []string
+	for _, m := range msgs {
+		if m.Role == "assistant" && m.Content != "" {
+			parts = append(parts, m.Content)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
 // NewMessage builds a chat Message with the given content, defaulting to the
 // "user" role. Use As to change the role. This is the constructor the bb
 // facade exposes as bb.NewMessage.

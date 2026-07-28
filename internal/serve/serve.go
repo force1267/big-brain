@@ -183,6 +183,11 @@ func Serve(ctx context.Context, f flow.Flow, opts ...Option) error {
 type reply struct {
 	text  string
 	calls []model.ToolCall
+	// delivered is true once at least one Respond has run — its stage(s)
+	// already reached the sink (if any) during the run itself, so the
+	// streaming handlers' own "nobody streamed" fallback must not fire again
+	// and re-send the same text.
+	delivered bool
 }
 
 // triggerCtx wires Store/Scheduler/Webhooks onto ctx — everything a flow needs
@@ -217,7 +222,7 @@ func (s *server) run(ctx context.Context, f flow.Flow, runID string, msgs []mode
 	// The keystone rule over the whole transcript: a call with no matching result
 	// anywhere in the chat is owed to the client; one the client already answered,
 	// or a brain resolved internally, is settled history and stays in.
-	return reply{text: lastContent(out.Chat), calls: model.Unresolved(out.Chat)}, nil
+	return reply{text: out.Answer(), calls: model.Unresolved(out.Chat), delivered: out.Sent() >= 0}, nil
 }
 
 func (s *server) openai(w http.ResponseWriter, r *http.Request) {
@@ -250,7 +255,7 @@ func (s *server) openai(w http.ResponseWriter, r *http.Request) {
 			fl.Flush()
 			return
 		}
-		if !sink.Claimed() { // nobody streamed: emit the buffered reply as one delta
+		if !out.delivered && !sink.Claimed() { // nobody streamed or flushed: emit the buffered reply as one delta
 			openai.WriteChunk(w, id, name, out.text)
 		}
 		calls := openai.Calls(out.calls)
@@ -300,11 +305,14 @@ func (s *server) anthropic(w http.ResponseWriter, r *http.Request) {
 		}}
 		out, err := s.run(agent.WithSink(r.Context(), sink), f, runID, msgs, rp)
 		if err != nil {
+			// WriteStart already opened block 0 above; close it before the
+			// error frame so the stream isn't left with a dangling block.
+			anthropic.WriteStop(w, nil)
 			anthropic.WriteStreamError(w, err.Error())
 			fl.Flush()
 			return
 		}
-		if !sink.Claimed() {
+		if !out.delivered && !sink.Claimed() {
 			anthropic.WriteDelta(w, out.text)
 		}
 		anthropic.WriteStop(w, anthropic.Calls(out.calls))

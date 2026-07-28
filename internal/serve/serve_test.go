@@ -43,6 +43,64 @@ func TestServeOpenAI(t *testing.T) {
 	}
 }
 
+// A Respond reached with nothing replied since the start must not hand the
+// client back their own message: Answer() only joins Chat[seed:sent], which
+// excludes the client's own input by construction, so an empty stage answers
+// with an empty string instead of echoing the request.
+func TestEmptyStageAnswersEmptyNotTheClientsOwnMessage(t *testing.T) {
+	silent := flow.New().WithAgent(agent.New().OnMessage(func(_ context.Context, _ *agent.Turn, _ *agent.ModelChat) error {
+		return nil // no Reply, no Stream — genuinely nothing produced
+	})).WithId("silent").Next(flow.Respond)
+
+	s := serverFor(silent)
+	const userInput = "please reply"
+	body := `{"messages":[{"role":"user","content":"` + userInput + `"}]}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	s.openai(rec, req)
+
+	var resp struct {
+		Choices []struct {
+			Message struct{ Content string } `json:"message"`
+		} `json:"choices"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if got := resp.Choices[0].Message.Content; got != "" {
+		t.Fatalf("an empty stage should answer with an empty string, got %q", got)
+	}
+}
+
+// A non-streaming client with two Respond stages gets BOTH stages' text,
+// joined — serve.run's reply is built from State.Answer(), not just whatever
+// the last flow in the whole chain produced.
+func TestBufferedReplyConcatenatesBothRespondStages(t *testing.T) {
+	stage1 := flow.New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		turn.Reply("stage one text")
+		return nil
+	})).WithId("stage1")
+	stage2 := flow.New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		turn.Reply("stage two text")
+		return nil
+	})).WithId("stage2")
+
+	chain := stage1.Next(flow.Respond).Next(stage2).Next(flow.Respond)
+	s := serverFor(chain)
+	body := `{"messages":[{"role":"user","content":"hi"}]}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	s.openai(rec, req)
+
+	var resp struct {
+		Choices []struct {
+			Message struct{ Content string } `json:"message"`
+		} `json:"choices"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if want, got := "stage one text\n\nstage two text", resp.Choices[0].Message.Content; got != want {
+		t.Fatalf("buffered reply = %q, want %q", got, want)
+	}
+}
+
 // OpenAI streaming emits a delta and DONE.
 func TestServeOpenAIStream(t *testing.T) {
 	s := serverFor(talkFlow("streamed"))
@@ -290,6 +348,72 @@ func TestServeOpenAIStreaming(t *testing.T) {
 	}
 	if !strings.Contains(out, "[DONE]") {
 		t.Fatalf("missing DONE:\n%s", out)
+	}
+}
+
+// Two Respond stages each stream their own deltas to an OpenAI SSE client,
+// and the stream still ends with exactly one finish_reason/DONE — a second
+// stage is more deltas in the same stream, never a second terminator.
+func TestServeOpenAIStreamingMultiStage(t *testing.T) {
+	stage1 := flow.New().WithAgent(
+		agent.New().WithModel(model.Bound(&model.Mock{Chunks: []string{"stage one"}}))).WithId("s1")
+	stage2 := flow.New().WithAgent(
+		agent.New().WithModel(model.Bound(&model.Mock{Chunks: []string{"stage two"}}))).WithId("s2")
+	f := stage1.Next(flow.Respond).Next(stage2).Next(flow.Respond)
+	s := serverFor(f)
+	body := `{"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	rec := httptest.NewRecorder()
+	s.openai(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+
+	out := rec.Body.String()
+	if !strings.Contains(out, `"content":"stage one"`) || !strings.Contains(out, `"content":"stage two"`) {
+		t.Fatalf("expected both stages' deltas, got:\n%s", out)
+	}
+	if n := strings.Count(out, `"finish_reason":"stop"`); n != 1 {
+		t.Fatalf("expected exactly one finish_reason, got %d:\n%s", n, out)
+	}
+	if strings.Count(out, "[DONE]") != 1 {
+		t.Fatalf("expected exactly one [DONE]:\n%s", out)
+	}
+}
+
+// The same two stages, over Anthropic's stream: both stages' deltas reach the
+// client and the stream still closes with exactly one message_stop.
+func TestServeAnthropicStreamingMultiStage(t *testing.T) {
+	stage1 := flow.New().WithAgent(
+		agent.New().WithModel(model.Bound(&model.Mock{Chunks: []string{"stage one"}}))).WithId("s1")
+	stage2 := flow.New().WithAgent(
+		agent.New().WithModel(model.Bound(&model.Mock{Chunks: []string{"stage two"}}))).WithId("s2")
+	f := stage1.Next(flow.Respond).Next(stage2).Next(flow.Respond)
+	s := serverFor(f)
+	body := `{"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	rec := httptest.NewRecorder()
+	s.anthropic(rec, httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body)))
+
+	out := rec.Body.String()
+	if !strings.Contains(out, "stage one") || !strings.Contains(out, "stage two") {
+		t.Fatalf("expected both stages' text, got:\n%s", out)
+	}
+	if strings.Count(out, "event: message_stop") != 1 {
+		t.Fatalf("expected exactly one message_stop event:\n%s", out)
+	}
+}
+
+// A mid-stream error on Anthropic closes the open content block before the
+// error frame, so the stream is never left with a dangling block.
+func TestServeAnthropicStreamErrorClosesBlockFirst(t *testing.T) {
+	f := flow.New().WithAgent(
+		agent.New().WithModel(model.Bound(&model.Mock{Chunks: []string{"ok"}, Fail: context.DeadlineExceeded}))).WithId("talk").Next(flow.Respond)
+	s := serverFor(f)
+	body := `{"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	rec := httptest.NewRecorder()
+	s.anthropic(rec, httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body)))
+
+	out := rec.Body.String()
+	stopIdx := strings.Index(out, "content_block_stop")
+	errIdx := strings.Index(out, `"error"`)
+	if stopIdx == -1 || errIdx == -1 || stopIdx > errIdx {
+		t.Fatalf("expected content_block_stop before the error frame, got:\n%s", out)
 	}
 }
 

@@ -15,6 +15,27 @@ type State struct {
 	Req      agent.Request // the client's request params, carried as context
 	selected string
 	hasSel   bool
+	seed     int // Chat length when this run started — Respond's first flush starts here
+	sent     int // Chat length delivered as of the last Respond; -1 if none has run yet
+}
+
+// Sent reports the Chat index up to which a Respond has already delivered
+// content in this run, or -1 if no Respond has run yet.
+func (s State) Sent() int { return s.sent }
+
+// Answer is the run's client-facing answer text: everything delivered across
+// every Respond stage, joined by JoinAssistantText. A chain with no Respond at
+// all falls back to the whole chain's last message — the pre-multistage
+// convention, preserved so a brain that never opts into Respond sees no
+// behaviour change.
+func (s State) Answer() string {
+	if s.sent < 0 {
+		if len(s.Chat) == 0 {
+			return ""
+		}
+		return s.Chat[len(s.Chat)-1].Content
+	}
+	return model.JoinAssistantText(s.Chat[s.seed:s.sent])
 }
 
 // Flow is a runnable unit of brain behaviour. The interface is sealed (run/id
@@ -64,6 +85,10 @@ func Run(ctx context.Context, f Flow, in State, tr Tracer) (State, error) {
 	// The request params are constant for the whole chain; set them on ctx once
 	// so every turn under this run can read them via Turn.Request.
 	ctx = agent.WithRequest(ctx, in.Req)
+	// Every top-level pass starts its own delivery bookkeeping fresh: seed is
+	// where this run's own content begins (so Respond never redelivers the
+	// client's own input), sent is -1 until the first Respond runs.
+	in.seed, in.sent = len(in.Chat), -1
 	return f.run(withTracer(ctx, tr), in)
 }
 
@@ -161,7 +186,7 @@ func (f *Basic) run(ctx context.Context, in State) (State, error) {
 	if err != nil {
 		return in, err
 	}
-	out := State{Chat: append(cloneMsgs(in.Chat), replies...)}
+	out := State{Chat: append(cloneMsgs(in.Chat), replies...), seed: in.seed, sent: in.sent}
 	if sh := sharedFrom(ctx); sh != nil {
 		// In a Group, replies were written through to the shared chat; use its
 		// snapshot as the output so nothing is double-counted.
@@ -255,7 +280,7 @@ func (s seq) WithId(id string) NamedFlow  { return named(s, id) }
 func (s seq) WithModel(m model.Spec) Flow { return scoped(s, m) }
 
 func (s seq) run(ctx context.Context, in State) (State, error) {
-	term := terminalStep(s.steps)
+	term := terminalSteps(s.steps)
 	var err error
 	for i, f := range s.steps {
 		// A trigger splits the chain: defer everything after it and stop this pass.
@@ -263,9 +288,13 @@ func (s seq) run(ctx context.Context, in State) (State, error) {
 			return deferBody(ctx, tn, s.steps[i+1:], in)
 		}
 		c := indexPath(ctx, i)
-		if i != term {
-			// Only the terminal step may stream to the client; strip the sink
-			// everywhere else so upstream flows still hand off complete messages.
+		if !term[i] && !isRespond(f) {
+			// Only a terminal step (the one right before a Respond, or the
+			// last step if the chain has none) may stream to the client;
+			// strip the sink everywhere else so upstream flows still hand
+			// off complete messages. Respond itself is exempt: it is the
+			// thing that flushes each stage and resets the sink's claim for
+			// the next one, so it must always keep whatever sink is on ctx.
 			c = agent.WithoutSink(c)
 		}
 		if in, err = f.run(c, in); err != nil {
@@ -275,16 +304,39 @@ func (s seq) run(ctx context.Context, in State) (State, error) {
 	return in, nil
 }
 
-// terminalStep is the index of the step whose reply is the client's answer: the
-// step just before the first Respond, else the last step. -1 if none (a leading
-// Respond). Streaming is armed only there.
-func terminalStep(steps []Flow) int {
+// terminalSteps marks every index whose step is immediately followed by a
+// Respond — one per response stage, so streaming can be armed at each — or,
+// when the chain has no Respond at all, just the last step (today's
+// single-answer default).
+func terminalSteps(steps []Flow) []bool {
+	out := make([]bool, len(steps))
+	found := false
 	for i, f := range steps {
-		if _, ok := f.(respond); ok {
-			return i - 1
+		if isRespond(f) {
+			found = true
+			if i > 0 {
+				out[i-1] = true
+			}
 		}
 	}
-	return len(steps) - 1
+	if !found && len(steps) > 0 {
+		out[len(steps)-1] = true
+	}
+	return out
+}
+
+// isRespond reports whether f is Respond, seeing through the *decorated
+// wrapper WithId/WithModel produce — so bb.Respond.WithId("x") is still found
+// as a stage boundary, not silently missed.
+func isRespond(f Flow) bool {
+	switch v := f.(type) {
+	case respond:
+		return true
+	case *decorated:
+		return isRespond(v.inner)
+	default:
+		return false
+	}
 }
 
 // then appends b after a, flattening when a is already a sequence, so chaining

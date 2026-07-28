@@ -6,6 +6,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/force1267/big-brain/internal/agent"
 	"github.com/force1267/big-brain/pkg/model"
 )
 
@@ -63,12 +64,16 @@ func (g *selectGroup) ids() []string {
 	return out
 }
 
-// respond is a terminal flow that marks the current chat's last message as the
-// user-facing reply. Actual delivery to the client is Serve's job; here it is a
-// no-op that records the intent for the trace.
+// respond is a stage boundary: everything the chain has produced since the
+// previous Respond (or since the run started) is the client's answer for that
+// stage. A chain may contain several — each is delivered as it's reached,
+// rather than the client waiting for the whole chain to finish.
 type respond struct{}
 
-// Respond is the prebuilt flow that replays the last message to the user.
+// Respond is the prebuilt flow that delivers the current stage to the client.
+// It may appear more than once in a chain: each occurrence is a stage
+// boundary. Flows after the LAST Respond do not contribute to the answer —
+// that is where post-response initiative lives.
 var Respond Flow = respond{}
 
 func (respond) id() string                  { return "" }
@@ -76,7 +81,27 @@ func (respond) Next(f Flow) Flow            { return then(respond{}, f) }
 func (respond) WithId(id string) NamedFlow  { return named(respond{}, id) }
 func (respond) WithModel(m model.Spec) Flow { return scoped(respond{}, m) }
 
+// run flushes this stage's undelivered content to the client sink (skipped
+// when the terminal turn already teed it live via Turn.Stream — Sink.Claimed
+// is the signal for that, since claim-once means only one turn per stage can
+// ever have streamed) and lets the next stage claim the sink again. With no
+// sink at all (a non-streaming request, or a triggered/webhook body that
+// never gets one), it only advances the delivery marker; State.Answer()
+// reconstructs the buffered text from it afterward.
 func (respond) run(ctx context.Context, in State) (State, error) {
 	tracerFrom(ctx).Event(ctx, Event{Kind: "respond"})
+	if s := agent.SinkFrom(ctx); s != nil {
+		if !s.Claimed() {
+			from := in.sent
+			if from < 0 {
+				from = in.seed
+			}
+			if text := model.JoinAssistantText(in.Chat[from:]); text != "" {
+				_ = s.Write(ctx, text)
+			}
+		}
+		s.Stage()
+	}
+	in.sent = len(in.Chat)
 	return in, nil
 }

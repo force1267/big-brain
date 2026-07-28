@@ -2159,3 +2159,121 @@ Touched: `cmd/jarvis-demo/main.go`, `docs/IMPLEMENTATION.md`,
 `docs/discussion.md`, `internal/agent/metadata.go`,
 `internal/flow/{concurrent,flow_test,groups,groups_test,trigger,trigger_test}.go`,
 `internal/serve/{engine,engine_test,webhook_test}.go`, `pkg/bb/{agent,flow}.go`.
+
+## 2026-07-28 — Verified `docs/design-multistage-respond.md` against current tree; 8 behaviour concerns checked and pinned with tests
+
+Re-traced every file the multi-stage `Respond` design cites (`flow.go`,
+`select.go`, `sink.go`, `turn.go`, `serve.go`, both provider `wire.go`s) —
+all still match the design's description line-for-line; nothing built toward
+the feature yet (`grep` for `State.sent`/`EndStage`/`terminalSteps` — zero
+hits). Found that `internal/flow/trigger.go`'s `reachesRespond`/`flowReachesRespond`
+(added for `Webhook`, after the design's baseline commit) already does the
+`*decorated`-unwrap the design's Step 1 needs — worth reusing instead of
+reimplementing.
+
+Then checked eight specific behaviour claims about triggers, groups, webhooks,
+empty stages, and multi-`Respond` semantics against the actual running code,
+one by one, and wrote a real test per claim, each placed next to the code it
+exercises rather than collected in one throwaway file (`internal/flow/trigger_test.go`,
+`internal/flow/groups_test.go`, `internal/flow/stream_test.go`,
+`internal/serve/serve_test.go`, `internal/serve/webhook_test.go`). Five
+already match the desired behaviour and pass (`Trigger()` boot task, `Once`
+and `Every` mid-flow, Webhook's `Payload`/`Chat` separation via an existing
+test, and — after a correction — a webhook body running through every
+`Respond` stage rather than stopping at the first one). Four fail, confirming
+gaps:
+
+- A losing `One(...)` member can claim the client's stream before the winner
+  is decided — `fanOut` never strips the sink from non-winning members and
+  `Turn.Stream()`'s claim-once has no notion of "still alive." Pre-existing
+  bug, independent of multi-stage.
+- An empty stage (nothing replied before `Respond`) doesn't produce silence or
+  an empty block — it echoes the client's own message back as the answer,
+  today, with a single `Respond`.
+- Multiple `Respond`s don't each deliver — confirmed on both the streaming
+  path (`terminalStep` only finds the first) and the buffered path
+  (`lastContent` only returns the last message of the whole chain) — this is
+  exactly the design doc's Step 0/1-4 scope, now pinned by failing tests.
+- A webhook body with multiple `Respond`s should gather stages and flush them
+  on the LAST one (same "last wins" rule as the main chain, not "first wins,
+  rest no-op" as an earlier pass of this session wrongly framed it) — also
+  unimplemented, also confirmed, via `lastContent`'s same one-message-only
+  limitation.
+
+Full trace-by-trace writeup in `docs/respond.md`. No production code changed;
+`go build ./...`, `go vet ./...` green; the whole suite is green except the
+four documenting tests that are meant to fail until the feature lands.
+
+Touched (new): `docs/respond.md`; tests added to
+`internal/flow/{trigger_test,groups_test,stream_test}.go` and
+`internal/serve/{serve_test,webhook_test}.go`.
+
+## 2026-07-28 — Implemented multi-stage `bb.Respond`, fixed all eight `docs/respond.md` concerns
+
+Built the feature `docs/design-multistage-respond.md` proposed and
+`docs/respond.md` pinned with (then-failing) tests. `bb.Respond` is now
+repeatable: each occurrence is a stage boundary, delivered to the client as
+soon as it's reached, streaming or buffered, on every provider and on
+webhook bodies too.
+
+**Core mechanism** (`internal/flow/flow.go`, `select.go`): `State` gained two
+unexported fields — `seed` (chat length when the run started) and `sent`
+(-1 until the first Respond runs, else the delivered chat index) — plus two
+exported reads, `Sent()` and `Answer()`. `terminalStep` (single index) became
+`terminalSteps` (a set, one per stage) with an `isRespond` helper that sees
+through the `*decorated` wrapper `WithId`/`WithModel` produce. `respond.run`
+now does the actual work: flush `Chat[from:]` to the sink as one write
+(skipped when the stage's terminal agent already teed it live — `Sink.Claimed()`
+is the signal), reset the claim for the next stage (`Sink.Stage()`, new
+method), advance `sent`. `seq.run` had to be taught not to strip the sink
+from a `Respond` step itself — the first version did, which silently broke
+every multi-stage case (caught immediately by two new tests going from
+"should pass" to "empty output").
+
+**Fixed alongside** (concern 4, unrelated to multi-stage but found chasing
+it): `fanOut` (`One`/`All`, `internal/flow/groups.go`) and `groupGroup.run`
+(`Group`) now strip the sink from every member's ctx unconditionally, so no
+concurrent member can ever claim the client stream directly — the race where
+a losing `One` member could steal it is gone. Members' content still reaches
+the client, just via the next `Respond`'s buffered flush instead of a live
+tee, same trade-off `Group` already had.
+
+**Bug found by writing the resume test, not by inspection**:
+`internal/flow/durable.go`'s checkpoint `snapshot` struct had no fields for
+`seed`/`sent` — `json.Marshal`/`Unmarshal` silently dropped them on every
+save/load round-trip, so a resumed run's delivery marker reset to `0` instead
+of resuming correctly. Fixed by adding `Seed`/`Sent` to `snapshot`. Caught by
+`TestRespondRedeliversCompletedStageOnDurableResume` failing with duplicated,
+wrongly-joined output on the second (resumed) run.
+
+**Scoped out, documented in `docs/respond.md`'s Implementation section**: real
+per-block Anthropic wire splitting (`Sink.EndStage` from the design) — a
+second stage is just more deltas in the same block, which the design's own
+§2.2 already concluded buys no latency on Anthropic anyway; and
+`ErrToolMidResponse` validation (design §4.4) — needs "is this the final
+Respond" computed statically over the chain, not exercised by any of the
+eight concerns, left as a follow-up before this sees tool-using stages in
+production.
+
+**Also fixed in passing**: the Anthropic streaming error path now closes the
+open content block (`WriteStop`) before writing the error frame, instead of
+leaving it dangling (flagged but not fixed by the design's §4.5).
+
+Docs updated in the same change (CLAUDE.md rule 5): `docs/authoring-guide.md`
+(repeatable-Respond example, per-stage streaming claim semantics, the
+Select/One/All/Group streaming rule, webhook gather-then-last-Respond note,
+a 7th line in THE RULES), `docs/PRODUCT.md` (per-stage streaming promise, the
+resume-redelivery addition to the at-least-once caveat), `pkg/bb/flow.go`
+(`Respond`'s doc comment), `docs/design-multistage-respond.md` (status →
+implemented, pointer to what changed), `docs/respond.md` (status table and a
+new Implementation section).
+
+Full test suite, including new coverage: `internal/flow/respond_test.go`
+(new — stage mechanics: no-sink, buffered-flush, three stages, empty middle
+stage, no-Respond fallback, empty-chat edge, Select/Group interaction, durable
+resume), `pkg/model/message_test.go` (new — `JoinAssistantText`), plus
+end-to-end streaming tests for both providers and the Anthropic error-close
+fix in `internal/serve/serve_test.go`. All eight `docs/respond.md` concern
+tests renamed to describe the now-correct behaviour instead of the bug.
+`go build ./...`, `go vet ./...`, `gofmt -l .` clean; `go test ./... -race`
+green across every package.

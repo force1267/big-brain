@@ -43,6 +43,80 @@ func TestWebhookWithReplyRespondsSync(t *testing.T) {
 	}
 }
 
+// A webhook body with several Respond nodes runs all the way through to the
+// end — Respond never halts execution, it only marks a stage boundary.
+// Later stages still run and their side effects still happen, before the
+// last Respond settles the HTTP response.
+func TestWebhookBodyRunsThroughAllStagesPastEachRespond(t *testing.T) {
+	flow.ResetTriggers()
+	t.Cleanup(flow.ResetTriggers)
+
+	var ran []string
+	mark := func(label string) flow.Flow {
+		return flow.New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+			ran = append(ran, label)
+			turn.Reply(label)
+			return nil
+		}))
+	}
+	flow.Trigger().Next(flow.Webhook("multi-stage")).
+		Next(mark("stage A")).Next(flow.Respond).
+		Next(mark("stage B")).Next(flow.Respond)
+
+	_, mux, err := build(talkFlow("x"), Store(engine.NewMemStore()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/hooks/multi-stage", strings.NewReader(`hello`))
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if len(ran) != 2 || ran[0] != "stage A" || ran[1] != "stage B" {
+		t.Fatalf("both stages should run, in order: %v", ran)
+	}
+}
+
+// A webhook body's multiple Respond stages gather their results, and the
+// webhook's 200 response is built from State.Answer() — both stages joined —
+// same "last one settles the call" rule the main served chain follows for a
+// buffered reply, not "first one wins."
+func TestWebhookGathersAllRespondStagesWith200(t *testing.T) {
+	flow.ResetTriggers()
+	t.Cleanup(flow.ResetTriggers)
+
+	stageA := flow.New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		turn.Reply("stage A")
+		return nil
+	}))
+	stageB := flow.New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		turn.Reply("stage B")
+		return nil
+	}))
+	flow.Trigger().Next(flow.Webhook("gather")).
+		Next(stageA).Next(flow.Respond).
+		Next(stageB).Next(flow.Respond)
+
+	_, mux, err := build(talkFlow("x"), Store(engine.NewMemStore()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/hooks/gather", strings.NewReader(`hello`))
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if want, got := "stage A\n\nstage B", rec.Body.String(); got != want {
+		t.Fatalf("webhook reply = %q, want %q", got, want)
+	}
+}
+
 // A webhook whose body has no top-level Respond is acknowledged immediately
 // (202) and runs in the background — the caller is not blocked on it.
 func TestWebhookNoReplyAcknowledgesAsync(t *testing.T) {

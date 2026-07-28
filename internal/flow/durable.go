@@ -126,12 +126,12 @@ func (c *checkpoint) load(ctx context.Context) (State, bool) {
 	if json.Unmarshal(b, &sn) != nil {
 		return State{}, false
 	}
-	return State{Chat: sn.Chat, selected: sn.Selected, hasSel: sn.HasSel}, true
+	return State{Chat: sn.Chat, selected: sn.Selected, hasSel: sn.HasSel, seed: sn.Seed, sent: sn.Sent}, true
 }
 
 // save memoizes a State for the current path.
 func (c *checkpoint) save(ctx context.Context, s State) {
-	b, err := json.Marshal(snapshot{Chat: s.Chat, Selected: s.selected, HasSel: s.hasSel})
+	b, err := json.Marshal(snapshot{Chat: s.Chat, Selected: s.selected, HasSel: s.hasSel, Seed: s.seed, Sent: s.sent})
 	if err == nil {
 		_ = c.store.Put(ctx, c.key(ctx), b)
 	}
@@ -146,4 +146,6 @@ type snapshot struct {
 	Chat     []model.Message `json:"chat"`
 	Selected string          `json:"selected,omitempty"`
 	HasSel   bool            `json:"has_sel,omitempty"`
+	Seed     int             `json:"seed"`
+	Sent     int             `json:"sent"`
 }

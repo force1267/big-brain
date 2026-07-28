@@ -93,6 +93,75 @@ func TestTriggerSplitsChain(t *testing.T) {
 	}
 }
 
+// A bare Trigger().Next(f) boot task runs immediately at startup — it is not
+// deferred to a scheduler, RunAtStartup calls Run directly. In production
+// (internal/serve's wireScheduler) that ctx never carries a client sink, so a
+// Respond inside a boot task has nothing to deliver to in practice — but that
+// is a property of what the caller wires onto ctx, not of Run/Respond
+// themselves (which now do deliver, given a sink — see
+// TestDefaultAgentStreamsAtTerminal). This test only pins the other half:
+// the boot task body runs synchronously, not deferred.
+func TestTriggerBootTaskRunsImmediately(t *testing.T) {
+	var ran bool
+	tc := Trigger().
+		Next(New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+			ran = true
+			turn.Reply("boot reply")
+			return nil
+		}))).
+		Next(Respond)
+	t.Cleanup(ResetTriggers)
+
+	if err := tc.RunAtStartup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !ran {
+		t.Fatal("boot task body should run synchronously at startup")
+	}
+}
+
+// Once reached mid-flow carries the chat accumulated so far into the deferred
+// body (on top of what TestTriggerSplitsChain already proves about the split
+// itself), and a Respond inside that body is a no-op — the fired body's own
+// ctx never carries a sink (see deferBody's run closure).
+func TestOnceMidFlowCarriesChatAndRespondIsNoop(t *testing.T) {
+	sch := &mockScheduler{}
+	var bodyRan bool
+	before := New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		turn.Reply("before-reply")
+		return nil
+	})).WithId("before")
+	after := New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		bodyRan = true
+		if len(turn.Messages) == 0 || turn.Messages[len(turn.Messages)-1].Content != "before-reply" {
+			t.Fatalf("deferred body should see the chat accumulated before Once, got %+v", turn.Messages)
+		}
+		turn.Reply("after-reply")
+		return nil
+	})).WithId("after")
+	when := time.Now().Add(time.Hour)
+
+	chain := before.Next(Once(when)).Next(after).Next(Respond)
+	ctx := WithScheduler(context.Background(), sch)
+	out, err := Run(ctx, chain, chat("go"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bodyRan {
+		t.Fatal("Once's body must not run inline in the request that reached it")
+	}
+	if last := out.Chat[len(out.Chat)-1].Content; last != "before-reply" {
+		t.Fatalf("this request's own visible chat should stop at the pre-trigger reply, got %q", last)
+	}
+
+	if err := sch.calls[0].run(context.Background(), sch.calls[0].payload); err != nil {
+		t.Fatal(err)
+	}
+	if !bodyRan {
+		t.Fatal("firing the deferred body should run the after-flow")
+	}
+}
+
 // Every carries the cron spec through to the scheduler.
 func TestEveryCarriesCron(t *testing.T) {
 	var ran []string
@@ -106,6 +175,26 @@ func TestEveryCarriesCron(t *testing.T) {
 	}
 	if len(sch.calls) != 1 || sch.calls[0].cron != "0 21 * * *" || sch.calls[0].bodyID != "nightly" {
 		t.Fatalf("cron not scheduled: %+v", sch.calls)
+	}
+}
+
+// Every reached inline, mid-flow (not via a Trigger()-headed startup chain),
+// is the same deferBody mechanism as Once — a cron spec instead of a one-shot
+// time — and a Respond inside its body is equally a no-op.
+func TestEveryMidFlowCarriesCronAndRespondIsNoop(t *testing.T) {
+	sch := &mockScheduler{}
+	after := New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		turn.Reply("tick")
+		return nil
+	})).WithId("nightly-inline")
+
+	chain := New().WithId("before").Next(Every("0 21 * * *")).Next(after).Next(Respond)
+	ctx := WithScheduler(context.Background(), sch)
+	if _, err := Run(ctx, chain, chat("go"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(sch.calls) != 1 || sch.calls[0].cron != "0 21 * * *" || sch.calls[0].bodyID != "nightly-inline" {
+		t.Fatalf("Every should schedule the cron, not a one-shot time: %+v", sch.calls)
 	}
 }
 

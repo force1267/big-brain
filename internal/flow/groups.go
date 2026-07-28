@@ -128,7 +128,10 @@ func (g groupGroup) run(ctx context.Context, in State) (State, error) {
 	tracerFrom(ctx).Event(ctx, Event{Kind: "group.start"})
 
 	shared := agent.NewSharedChat(in.Chat)
-	gctx, cancel := context.WithCancel(withShared(ctx, shared))
+	// A Group member already can't claim the client sink (Turn.Stream refuses
+	// a shared turn), but strip it here too so that stays true regardless of
+	// how a member is constructed, same reasoning as fanOut's members.
+	gctx, cancel := context.WithCancel(agent.WithoutSink(withShared(ctx, shared)))
 	defer cancel()
 
 	var (
@@ -140,7 +143,7 @@ func (g groupGroup) run(ctx context.Context, in State) (State, error) {
 		wg.Add(1)
 		go func(i int, m Flow) {
 			defer wg.Done()
-			out, err := m.run(indexPath(gctx, i), State{Chat: shared.Snapshot()})
+			out, err := m.run(indexPath(gctx, i), State{Chat: shared.Snapshot(), seed: in.seed, sent: in.sent})
 			if err != nil {
 				fe.set(err, cancel)
 				return
@@ -157,7 +160,7 @@ func (g groupGroup) run(ctx context.Context, in State) (State, error) {
 	if conflict {
 		return in, fmt.Errorf("%w: group members", ErrSelectConflict)
 	}
-	out := State{Chat: shared.Snapshot()}
+	out := State{Chat: shared.Snapshot(), seed: in.seed, sent: in.sent}
 	out.selected, out.hasSel = selected, hasSel
 	return out, nil
 }
@@ -202,13 +205,19 @@ func fanOut(ctx context.Context, members []Flow, in State, first bool) (State, e
 		wg.Add(1)
 		go func(i int, m Flow) {
 			defer wg.Done()
-			mctx := indexPath(cctx, i)
+			// No member may claim the client sink directly: whichever one
+			// called Stream() first would win it regardless of which member
+			// One eventually accepts, or — for All — several members would
+			// race for one client stream. Every member's contribution still
+			// reaches the client: buffered into Chat here, then flushed by
+			// the next Respond like any other buffered reply.
+			mctx := agent.WithoutSink(indexPath(cctx, i))
 			var pc *pendingCommit
 			if first {
 				pc = &pendingCommit{}
 				mctx = withPendingCommit(mctx, pc)
 			}
-			out, err := m.run(mctx, State{Chat: cloneMsgs(in.Chat)})
+			out, err := m.run(mctx, State{Chat: cloneMsgs(in.Chat), seed: in.seed, sent: in.sent})
 			if err != nil {
 				fe.set(err, cancel)
 				return
@@ -253,7 +262,7 @@ func fanOut(ctx context.Context, members []Flow, in State, first bool) (State, e
 				}
 			}
 		}
-		out := State{Chat: append(cloneMsgs(in.Chat), winner.newReplies...)}
+		out := State{Chat: append(cloneMsgs(in.Chat), winner.newReplies...), seed: in.seed, sent: in.sent}
 		out.selected, out.hasSel = winner.selected, winner.hasSel
 		return out, nil
 	}
@@ -265,7 +274,7 @@ func fanOut(ctx context.Context, members []Flow, in State, first bool) (State, e
 	for _, r := range byIndex {
 		merged = append(merged, r...)
 	}
-	out := State{Chat: append(cloneMsgs(in.Chat), merged...)}
+	out := State{Chat: append(cloneMsgs(in.Chat), merged...), seed: in.seed, sent: in.sent}
 	out.selected, out.hasSel = selected, hasSel
 	return out, nil
 }

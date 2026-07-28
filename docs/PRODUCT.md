@@ -68,23 +68,30 @@ for it now.
 
 ## What the engine does NOT promise
 
-- **Streaming is terminal-only, and buffered everywhere else.** The client can
-  get true token-by-token output, but only at the **terminal** boundary — the
-  flow whose reply is the user's answer (the one before `bb.Respond`, or the
-  last in the chain). Everywhere upstream, flows still hand each other *complete*
-  messages, because that is what durability checkpoints: a live stream cannot
-  cross a flow boundary and still have a consistent save point. So there are two
-  output paths — the durable one (`State`, always whole messages) and an
-  ephemeral live tee to the client that exists only at the terminus. An author
-  opts a terminal agent in with `turn.Stream()`; if the client did not request
+- **Streaming is terminal-only per stage, and buffered everywhere else.** The
+  client can get true token-by-token output, but only at each stage's
+  **terminal** boundary — the flow whose reply is that stage's answer (the one
+  before a `bb.Respond`, or the last in the chain if there's none). Everywhere
+  upstream, flows still hand each other *complete* messages, because that is
+  what durability checkpoints: a live stream cannot cross a flow boundary and
+  still have a consistent save point. So there are two output paths — the
+  durable one (`State`, always whole messages) and an ephemeral live tee to
+  the client that exists only at each stage's terminus. An author opts a
+  terminal agent in with `turn.Stream()`; if the client did not request
   streaming, or the agent is not terminal, it silently falls back to buffered.
+  `bb.Respond` is repeatable — each is a stage boundary, delivered as soon as
+  it's reached — and a non-streaming client gets every stage's text, joined.
   Genuine keep-working-*after*-the-connection-closes is still a future pass (it
   is engine/initiative work, not streaming).
 - **At-least-once, not exactly-once.** A durable run that a client retries with
   the same run id resumes from the last completed flow; a crash in the narrow
   window before a result is checkpointed re-runs that flow. Side effects that
   must not double are the author's responsibility (an idempotency key derived
-  from the run), aided but not guaranteed.
+  from the run), aided but not guaranteed. This extends to response delivery:
+  a resumed run **re-delivers** every already-delivered `Respond` stage to the
+  new connection — the crashed connection saw nothing, so the client gets the
+  complete answer again, in order. Re-sent *text* is harmless; it is exactly
+  the side effects that durability was already promising not to double.
 
 ## The faculties (what the product promises the end user)
 

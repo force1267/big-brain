@@ -217,12 +217,30 @@ brain := router.Next(bb.Select(talk, remember, house)).Next(bb.Respond)
 ## Chaining and continuing past the reply
 
 `a.Next(b).Next(c)` runs a→b→c, threading the chat. `bb.Respond` is the prebuilt
-flow that marks the last message as the user's reply; you can chain flows after
-it to keep acting:
+flow that delivers everything produced since the previous Respond (or since the
+start) as one stage of the answer; you can chain flows after it to keep acting:
 
 ```go
 brain := router.Next(bb.Select(caps...)).Next(bb.Respond).Next(notify)
 ```
+
+`bb.Respond` is **repeatable** — a chain may contain several, and each is a
+stage boundary the client sees as soon as it's ready:
+
+```go
+// A -> B -> respond -> C -> D -> respond -> E
+brain := flowA.Next(flowB).Next(bb.Respond).           // stage 1: B's reply
+    Next(flowC).Next(flowD).Next(bb.Respond).           // stage 2: C's + D's replies
+    Next(flowE)                                         // initiative; not part of the answer
+```
+
+Only flows after the **last** `Respond` are pure initiative. A streaming
+client sees each stage's tokens as they're produced (a second stage is more
+deltas in the same OpenAI stream, or a new `content_block` on Anthropic); a
+non-streaming client gets every stage's text, joined with a blank line
+between stages. A stage with nothing new since the previous boundary answers
+with nothing for that stage — it never falls back to echoing the client's own
+message.
 
 `bb.Notify(send)` is a prebuilt outgoing flow — it sends the chat's last message
 to `send` and passes the chat through:
@@ -454,12 +472,12 @@ See `cmd/jarvis-demo` for a complete memory + tools + briefing brain.
 
 ## Streaming to the client
 
-The user can see tokens as the model types them — but only at the **terminal**
-boundary: the flow whose reply is the answer (the one before `bb.Respond`, or
-the last in the chain). Everywhere upstream, flows hand each other _complete_
-messages, because that is what durable checkpointing needs. So `State` always
-carries whole messages; streaming is a parallel live tee that exists only at the
-end.
+The user can see tokens as the model types them — but only at each stage's
+**terminal** boundary: the flow whose reply is that stage's answer (the one
+before a `bb.Respond`, or the last in the chain if there's none). Everywhere
+upstream, flows hand each other _complete_ messages, because that is what
+durable checkpointing needs. So `State` always carries whole messages;
+streaming is a parallel live tee that exists only at each stage's end.
 
 A **default agent (no `OnMessage`) streams automatically** when it is terminal
 and the client asked for it — nothing to write. To stream from a handler, tee
@@ -486,10 +504,20 @@ OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
 
 Key facts:
 
-- `turn.Stream()` returns `(chan<- string, ok)`. `ok` is **claim-once**: the
-  first agent to call it in the terminal flow wins; everyone else (a sibling in a
-  concurrent group, a non-terminal agent, a non-streaming request) gets
-  `ok=false` and should `turn.Reply` normally.
+- `turn.Stream()` returns `(chan<- string, ok)`. `ok` is **claim-once per
+  stage**: the first agent to call it in a stage's terminal flow wins;
+  everyone else (a sibling in a concurrent group, a non-terminal agent, a
+  non-streaming request) gets `ok=false` and should `turn.Reply` normally.
+  `Respond` resets the claim once it flushes its stage, so the next stage's
+  terminal flow gets its own fresh shot at it.
+- No member of `Select`/`One`/`All`/`Group` may claim the stream directly —
+  concurrent members racing for one client stream would let whichever called
+  `Stream()` first win, regardless of which member's content actually ends up
+  in the answer (`One`'s winner, say). Their replies still reach the client:
+  buffered into `State`, then delivered by the next `Respond` like any other
+  buffered reply. (`Select` is the exception in name only — it routes to
+  exactly one member synchronously, so there's no race to guard against; that
+  member's own terminal flow can stream normally.)
 - `reply.Stream()` and `reply.ReadAll()`/`bb.Extract` **coexist** — read the
   live tokens _and_ still get the whole text (e.g. to save to memory after). You
   are never forced to choose.
@@ -500,6 +528,11 @@ Key facts:
   there is no HTTP status left to fail with; the server emits an SSE error frame).
 - A schema agent never streams live (structured output is validated whole); its
   `reply.Stream()` yields the finished JSON once.
+- A non-streaming client gets every stage's text, joined with a blank line
+  between stages — a `Respond` with nothing new since the previous boundary
+  contributes nothing (not an echo of the client's own message, not an error).
+  A chain with no `Respond` at all keeps today's convention: the whole
+  chain's last message is the answer.
 
 ## Serving
 
@@ -640,6 +673,10 @@ bb.Trigger().Next(bb.Webhook("stripe-payment")).Next(handlePayment)
   without one, same as everywhere else). No auth, rate limiting, or
   body-size cap is applied by this package — put a reverse proxy/gateway in
   front before exposing it, and don't rely on the endpoint id as a secret.
+  `bb.Respond` is repeatable inside a webhook body too, same as anywhere
+  else: every stage runs (Respond never halts execution), and the 200 answer
+  is every stage's text since the body started, joined — the last `Respond`
+  is what settles the call, not the first.
 - A trigger reached inside a concurrent group only commits for real once the
   group has accepted that branch. In `bb.One(a, b, …)`, a losing member's
   `Every`/`Once` is discarded, not scheduled anyway — only the eventual
@@ -715,6 +752,8 @@ bb.Trigger().Next(bb.Webhook("stripe-payment")).Next(handlePayment)
    `Ask` (schema, transport, and a tool whose handler disagrees with its
    schema — runtime). Builders never error mid-chain.
 6. **Pass `ctx` to your I/O** so a cancelled turn cancels your calls.
+7. **`bb.Respond` is a stage boundary, repeatable.** Every `Respond` delivers;
+   only the flows after the *last* one are initiative, not part of the answer.
 
 ## Testing a flow
 

@@ -2,6 +2,7 @@ package flow
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -21,21 +22,26 @@ func collectingSink() (*agent.Sink, *[]string, *sync.Mutex) {
 	return s, got, &mu
 }
 
-// terminalStep: the step before the first Respond, else the last step.
-func TestTerminalStep(t *testing.T) {
+// terminalSteps: the step before EACH Respond is a terminal (streamable)
+// step, one per stage; a chain with no Respond at all falls back to just the
+// last step, same as today's single-answer default. isRespond must also see
+// through the *decorated wrapper WithId/WithModel produce.
+func TestTerminalSteps(t *testing.T) {
 	a, b := New().WithId("a"), New().WithId("b")
 	cases := []struct {
 		steps []Flow
-		want  int
+		want  []bool
 	}{
-		{[]Flow{a, b}, 1},            // no respond -> last
-		{[]Flow{a, respond{}, b}, 0}, // before respond
-		{[]Flow{a, b, respond{}}, 1}, // before respond (later)
-		{[]Flow{respond{}}, -1},      // leading respond -> none
+		{[]Flow{a, b}, []bool{false, true}},                                    // no respond -> last
+		{[]Flow{a, respond{}, b}, []bool{true, false, false}},                  // before respond
+		{[]Flow{a, b, respond{}}, []bool{false, true, false}},                  // before respond (later)
+		{[]Flow{respond{}}, []bool{false}},                                     // leading respond -> none
+		{[]Flow{a, respond{}, b, respond{}}, []bool{true, false, true, false}}, // two stages
+		{[]Flow{a, Respond.WithId("x"), b}, []bool{true, false, false}},        // Respond wrapped in *decorated
 	}
 	for i, c := range cases {
-		if got := terminalStep(c.steps); got != c.want {
-			t.Fatalf("case %d: terminalStep = %d, want %d", i, got, c.want)
+		if got := terminalSteps(c.steps); !reflect.DeepEqual(got, c.want) {
+			t.Fatalf("case %d: terminalSteps = %v, want %v", i, got, c.want)
 		}
 	}
 }
@@ -58,8 +64,14 @@ func TestDefaultAgentStreamsAtTerminal(t *testing.T) {
 	if last := out.Chat[len(out.Chat)-1].Content; last != "hello" {
 		t.Fatalf("State reply = %q (should carry the whole message)", last)
 	}
-	if !sink.Claimed() {
-		t.Fatal("sink should be claimed")
+	// Respond resets the claim once it flushes this stage, so the next stage
+	// (or a resumed run) can claim the sink again — claimed is false again by
+	// the time Run returns, even though "hello" already reached the client.
+	if sink.Claimed() {
+		t.Fatal("Respond should have reset the claim after flushing this stage")
+	}
+	if out.Sent() != len(out.Chat) {
+		t.Fatalf("Respond should advance the delivery marker to the end of Chat: sent=%d chat=%d", out.Sent(), len(out.Chat))
 	}
 }
 
@@ -80,5 +92,28 @@ func TestUpstreamAgentDoesNotStream(t *testing.T) {
 	// Only the terminal (cap) streamed; "routed" never reached the sink.
 	if strings.Join(*got, "") != "answer" {
 		t.Fatalf("sink got %v, want only the terminal reply", *got)
+	}
+}
+
+// With two Respond stages, the client sees BOTH stages' live tokens — each
+// Respond is a stage boundary: terminalSteps marks the step before EVERY
+// Respond as streamable, and Respond itself resets the sink's claim so the
+// next stage's terminal agent can claim it again.
+func TestMultipleRespondStagesEachStreamToClient(t *testing.T) {
+	sink, got, mu := collectingSink()
+	stage1 := New().WithAgent(mockAgent("stage1")).WithId("stage1")
+	stage2 := New().WithAgent(mockAgent("stage2")).WithId("stage2")
+
+	chain := stage1.Next(Respond).Next(stage2).Next(Respond)
+	ctx := agent.WithSink(context.Background(), sink)
+	if _, err := Run(ctx, chain, chat("hi"), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	streamed := strings.Join(*got, "")
+	mu.Unlock()
+	if streamed != "stage1stage2" {
+		t.Fatalf("both stages should reach the client stream, in order: got %q", streamed)
 	}
 }

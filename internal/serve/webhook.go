@@ -83,7 +83,7 @@ func (s *server) webhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Write([]byte(lastContent(out.Chat)))
+		w.Write([]byte(out.Answer()))
 		return
 	}
 

@@ -110,7 +110,12 @@ func One(members ...Flow) Flow { return flow.One(members...) }
 // replies. It ends when all members end.
 func Group(members ...Flow) Flow { return flow.Group(members...) }
 
-// Respond is the prebuilt flow that replays the last message to the user.
+// Respond delivers everything the chain has produced since the previous
+// Respond (or since the start) as one stage of the client's answer. A chain
+// may contain several: each is a stage boundary, delivered to the client as
+// soon as it's reached rather than waiting for the whole chain to finish.
+// Flows after the LAST Respond do not contribute to the answer — that is
+// where post-response initiative lives.
 var Respond Flow = flow.Respond
 
 // Checkpoint is a one-shot barrier for agents in the same flow to coordinate:

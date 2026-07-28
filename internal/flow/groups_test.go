@@ -3,6 +3,7 @@ package flow
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,6 +80,51 @@ func TestOneFirstWins(t *testing.T) {
 	}
 	if len(out.Chat) != 2 || out.Chat[1].Content != "fast" {
 		t.Fatalf("One should take fast only: %+v", out.Chat)
+	}
+}
+
+// No One member — winner or not — may claim the client's live stream
+// directly: whichever member called Stream() first would win the client's
+// screen regardless of which member One eventually accepts, so fanOut strips
+// the sink from every member's ctx. The eventual winner's content still
+// reaches the client, but only via the ordinary buffered flush at the next
+// Respond, never a direct tee from inside the race.
+func TestOneMembersCannotClaimClientStreamButWinnerStillDelivers(t *testing.T) {
+	sink, got, mu := collectingSink()
+	winnerDone := make(chan struct{})
+
+	other := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		if _, ok := turn.Stream(); ok {
+			t.Error("a One member must not be able to claim the client sink")
+		}
+		<-winnerDone // finish strictly after the other member, so this one loses the One race
+		return errors.New("not chosen")
+	})
+	winner := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		if _, ok := turn.Stream(); ok {
+			t.Error("a One member must not be able to claim the client sink")
+		}
+		turn.Reply("from-winner")
+		close(winnerDone)
+		return nil
+	})
+
+	f := One(New().WithAgent(other), New().WithAgent(winner)).Next(Respond)
+	ctx := agent.WithSink(context.Background(), sink)
+	out, err := Run(ctx, f, chat("hi"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	answer := out.Chat[len(out.Chat)-1].Content
+	if answer != "from-winner" {
+		t.Fatalf("One should have picked the winner, got %q", answer)
+	}
+	mu.Lock()
+	streamed := strings.Join(*got, "")
+	mu.Unlock()
+	if streamed != "from-winner" {
+		t.Fatalf("the winner's content should still reach the client via Respond's buffered flush: got %q", streamed)
 	}
 }
 
