@@ -2,10 +2,12 @@ package flow
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/force1267/big-brain/internal/agent"
 )
@@ -115,5 +117,75 @@ func TestMultipleRespondStagesEachStreamToClient(t *testing.T) {
 	mu.Unlock()
 	if streamed != "stage1stage2" {
 		t.Fatalf("both stages should reach the client stream, in order: got %q", streamed)
+	}
+}
+
+// Two agents in the SAME flow (even a terminal one) must never race for the
+// client sink: same rule as a Group/fanOut member (concurrent.go), since
+// Respond's claim-once flush only knows how to account for a single streamed
+// contribution per stage. Both agents here try Stream() and must lose, so
+// both fall back to Reply — and Respond, seeing the sink unclaimed, flushes
+// both of their buffered replies together.
+func TestSameFlowMultipleAgentsNeverClaimTheSink(t *testing.T) {
+	sink, got, mu := collectingSink()
+
+	first := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		if _, ok := turn.Stream(); ok {
+			t.Error("no agent in a multi-agent flow may claim the client sink")
+		}
+		turn.Reply("slow")
+		return nil
+	})
+	second := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		if _, ok := turn.Stream(); ok {
+			t.Error("no agent in a multi-agent flow may claim the client sink")
+		}
+		turn.Reply("fast")
+		return nil
+	})
+
+	f := New().WithAgent(first, second).WithId("cap").Next(Respond)
+	ctx := agent.WithSink(context.Background(), sink)
+	if _, err := Run(ctx, f, chat("hi"), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	streamed := strings.Join(*got, "")
+	mu.Unlock()
+	if !strings.Contains(streamed, "slow") || !strings.Contains(streamed, "fast") {
+		t.Fatalf("both agents' replies should reach the client via the buffered flush: got %q", streamed)
+	}
+}
+
+// A streaming handler that errors mid-stream without closing its channel must
+// not hang the request: the flow cancels the turn's context on error, and the
+// Stream tee goroutine watches ctx.Done() as well as the channel, so
+// AwaitStream still returns.
+func TestStreamClaimErrorWithoutCloseDoesNotHangRequest(t *testing.T) {
+	sink, _, _ := collectingSink()
+	stuck := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		out, ok := turn.Stream()
+		if !ok {
+			t.Fatal("should have won the sink claim")
+		}
+		out <- "partial"
+		// Error out mid-stream without closing `out` — a plausible mistake
+		// for a handler that hits an error after starting to stream.
+		return errors.New("boom")
+	})
+	f := New().WithAgent(stuck).WithId("cap").Next(Respond)
+	ctx := agent.WithSink(context.Background(), sink)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := Run(ctx, f, chat("hi"), nil)
+		done <- err
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Run hung: AwaitStream never returns once a streaming handler errors without closing its channel")
 	}
 }

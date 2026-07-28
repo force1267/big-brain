@@ -517,7 +517,18 @@ Key facts:
   buffered into `State`, then delivered by the next `Respond` like any other
   buffered reply. (`Select` is the exception in name only — it routes to
   exactly one member synchronously, so there's no race to guard against; that
-  member's own terminal flow can stream normally.)
+  member's own terminal flow can stream normally.) The same rule applies to
+  **multiple agents inside one flow** (`WithAgent(a, b)`): they run
+  concurrently too, so none of them may claim the stream either, even when
+  that flow is the terminal one — `Respond`'s claim-once flush only accounts
+  for a single streamed contribution per stage, so letting two agents race
+  for it would silently drop whichever one lost.
+- If a handler claims `turn.Stream()` and then returns an error without
+  closing the channel, the framework still recovers: the flow cancels the
+  turn's context on error, and the stream's tee goroutine watches that
+  cancellation as well as the channel, so the request can't hang forever on
+  an abandoned stream. Still close `out` yourself on every path you can —
+  this is a backstop, not a substitute for closing it.
 - `reply.Stream()` and `reply.ReadAll()`/`bb.Extract` **coexist** — read the
   live tokens _and_ still get the whole text (e.g. to save to memory after). You
   are never forced to choose.

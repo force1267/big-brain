@@ -109,6 +109,11 @@ func (t *Turn) Call(calls ...model.ToolCall) {
 // whole text as one reply into the flow's chat — so Respond/Notify downstream
 // and the durable checkpoint all see the complete message. Do not also Reply the
 // same text. Close the channel when done.
+//
+// If the handler abandons the channel (e.g. returns an error mid-stream
+// without closing it), the tee goroutine still ends: it also watches t.ctx,
+// which the flow cancels once the handler returns an error, so AwaitStream
+// never blocks the request forever on a leaked channel.
 func (t *Turn) Stream() (chan<- string, bool) {
 	s := sinkFrom(t.ctx)
 	if s == nil || t.shared != nil || !s.claimed.CompareAndSwap(false, true) {
@@ -119,13 +124,24 @@ func (t *Turn) Stream() (chan<- string, bool) {
 	go func() {
 		defer close(t.streamDone)
 		var b strings.Builder
-		for c := range out {
-			b.WriteString(c)
-			_ = s.Write(t.ctx, c) // best-effort client delivery
+		for {
+			select {
+			case c, ok := <-out:
+				if !ok {
+					t.mu.Lock()
+					t.replies = append(t.replies, model.Message{Role: "assistant", Content: b.String()})
+					t.mu.Unlock()
+					return
+				}
+				b.WriteString(c)
+				_ = s.Write(t.ctx, c) // best-effort client delivery
+			case <-t.ctx.Done():
+				t.mu.Lock()
+				t.replies = append(t.replies, model.Message{Role: "assistant", Content: b.String()})
+				t.mu.Unlock()
+				return
+			}
 		}
-		t.mu.Lock()
-		t.replies = append(t.replies, model.Message{Role: "assistant", Content: b.String()})
-		t.mu.Unlock()
 	}()
 	return out, true
 }

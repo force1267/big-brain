@@ -20,7 +20,14 @@ func runAgents(ctx context.Context, flowID string, agents []agent.Agent, chat []
 		return runOneAgent(ctx, flowID, agents[0], 0, chat)
 	}
 
-	cctx, cancel := context.WithCancel(ctx)
+	// Same rule as a Group/fanOut member: with more than one agent racing
+	// concurrently, none may claim the client sink directly — whichever
+	// happened to call Stream() first would win regardless of the others'
+	// output, and Respond's claim-once flush would then silently drop
+	// whatever the rest buffered. Every agent's reply still reaches the
+	// client: buffered into Chat here, then flushed by Respond like any
+	// other buffered reply.
+	cctx, cancel := context.WithCancel(agent.WithoutSink(ctx))
 	defer cancel()
 	var (
 		mu       sync.Mutex
@@ -69,6 +76,13 @@ func runAgents(ctx context.Context, flowID string, agents []agent.Agent, chat []
 // Group (shared chat on the context) the turn reads and writes the live
 // conversation; otherwise it gets an isolated copy.
 func runOneAgent(ctx context.Context, flowID string, ag agent.Agent, i int, chat []model.Message) ([]model.Message, string, bool, error) {
+	// Own cancellation, independent of any cancel an enclosing multi-agent
+	// group already wires up: if the handler errors after claiming Stream()
+	// but without closing its channel, cancelling here unblocks the tee
+	// goroutine so AwaitStream below can't hang the request forever on an
+	// abandoned channel.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	var turn *agent.Turn
 	var mc *agent.ModelChat
 	if sh := sharedFrom(ctx); sh != nil {
@@ -77,6 +91,9 @@ func runOneAgent(ctx context.Context, flowID string, ag agent.Agent, i int, chat
 		turn, mc = agent.NewTurn(ctx, ag, chat)
 	}
 	err := runAgent(ctx, ag, turn, mc, chat)
+	if err != nil {
+		cancel()
+	}
 	// Wait for any streaming goroutine to finish writing to the client before
 	// returning, so a later write (the buffered emit, or an error frame) never
 	// races it — this must happen on the error path too.

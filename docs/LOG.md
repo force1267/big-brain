@@ -2277,3 +2277,45 @@ fix in `internal/serve/serve_test.go`. All eight `docs/respond.md` concern
 tests renamed to describe the now-correct behaviour instead of the bug.
 `go build ./...`, `go vet ./...`, `gofmt -l .` clean; `go test ./... -race`
 green across every package.
+
+## 2026-07-28 — Two streaming/concurrency bugs found and fixed (session)
+
+Investigated `bb.Respond`'s repeatable/predictable/indexed claims (failure
+behaviour of `All`/`Group`, declaration-order vs completion-order merge in
+`fanOut`/`runAgents`) — all held up as documented. Then investigated the
+streaming path specifically and found two real gaps, each proven with a
+failing test before being fixed:
+
+1. **Buffered replies silently dropped.** A `Basic` flow with more than one
+   agent (`WithAgent(a, b)`) at the terminal position let its agents race for
+   `turn.Stream()` via the sink's claim-once `CompareAndSwap`. Whichever
+   agent won streamed live; the rest buffered via `Reply`. But `Respond`
+   ((`internal/flow/select.go`)) treats `Sink.Claimed()==true` as "this whole
+   stage already reached the client" and skips its flush entirely — so every
+   buffered sibling's reply vanished from what the client actually saw, even
+   though it was still present in `State.Chat`. Root cause: unlike
+   `fanOut`/`Group`, which already strip the sink from every concurrent
+   member (`agent.WithoutSink`), a multi-agent `Basic` flow never did.
+   Fixed in `internal/flow/concurrent.go`'s `runAgents`: when more than one
+   agent shares a flow, the sink is stripped for all of them, same as any
+   other concurrent group — only a lone terminal agent may ever claim
+   the stream.
+2. **A hung request.** `Turn.Stream()`'s tee goroutine (`internal/agent/turn.go`)
+   only exited by ranging until its channel closed. A handler that claimed
+   `Stream()`, wrote some tokens, then returned an error without closing the
+   channel left that goroutine blocked forever — so `Turn.AwaitStream()`
+   (called before every agent's result is collected) never returned, hanging
+   the whole request. Fixed by giving `runOneAgent` its own cancellable
+   context that it cancels on handler error, and making `Stream()`'s tee
+   goroutine select on `ctx.Done()` alongside the channel.
+
+Both proven with tests in `internal/flow/stream_test.go`
+(`TestSameFlowMultipleAgentsNeverClaimTheSink`,
+`TestStreamClaimErrorWithoutCloseDoesNotHangRequest`) — written first to
+fail, now passing after the fix. `docs/authoring-guide.md`'s streaming
+section (CLAUDE.md rule 5) updated: the no-member-may-claim-the-stream rule
+now explicitly covers multiple agents in one flow, plus a new note on the
+error-cancellation backstop.
+
+`go build ./...`, `go vet ./...` clean; `go test ./... -race` green across
+every package.
