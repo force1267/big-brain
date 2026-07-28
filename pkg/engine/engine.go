@@ -31,7 +31,10 @@ func (h *runHeap) Pop() any {
 
 // Run is one durable invocation of a flow: the unit the engine leases,
 // executes, and acknowledges. It is persisted until it completes, so a crash
-// mid-run leaves the record behind to be resumed (at-least-once).
+// mid-run leaves the record behind to be resumed (at-least-once) — and a
+// graceful shutdown (the worker pool's ctx cancelled) leaves it behind the
+// same way, rather than acking a run that only failed because it was
+// interrupted, not because it was actually done (see exec).
 type Run struct {
 	ID      string          `json:"id"`
 	Flow    string          `json:"flow"`
@@ -312,6 +315,15 @@ func (e *Engine) exec(ctx context.Context, r Run) {
 		e.insert(r)
 		e.mu.Unlock()
 		e.nudge()
+		return
+	}
+	if err != nil && ctx.Err() != nil {
+		// The engine's own ctx died out from under this run (e.g. Serve
+		// shutting down), not a real flow failure — leave the record
+		// persisted and indexed so the next boot resumes it, same as a hard
+		// crash would. Acking here would make graceful shutdown less durable
+		// than a crash, which defeats the point of persisting at all.
+		e.tr.Trace(ctx, StepRecord{Run: r.ID, Flow: r.Flow, Step: "<shutdown>", Err: err.Error()})
 		return
 	}
 	// Completed (success or terminal failure): ack by deleting the record.

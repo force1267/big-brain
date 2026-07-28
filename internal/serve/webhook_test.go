@@ -183,6 +183,53 @@ func TestWebhookHeadersReachMetadata(t *testing.T) {
 	}
 }
 
+// A background (no-reply) webhook body must survive the request's own
+// context being cancelled right after the 202 goes out — net/http cancels
+// r.Context() the instant the handler returns, and the handler detaches the
+// background run via context.WithoutCancel specifically so that doesn't kill
+// the run almost immediately.
+func TestWebhookBackgroundRunSurvivesRequestCancellation(t *testing.T) {
+	flow.ResetTriggers()
+	t.Cleanup(flow.ResetTriggers)
+
+	ran := make(chan string, 1)
+	body := flow.New().WithAgent(agent.New().OnMessage(func(ctx context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		// Give the test a moment to cancel the request ctx before this
+		// observes whether it was detached.
+		time.Sleep(50 * time.Millisecond)
+		if ctx.Err() != nil {
+			ran <- "cancelled: " + ctx.Err().Error()
+			return nil
+		}
+		ran <- string(turn.Payload())
+		return nil
+	}))
+	flow.Trigger().Next(flow.Webhook("detach")).Next(body)
+
+	_, mux, err := build(talkFlow("x"), Store(engine.NewMemStore()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/hooks/detach", strings.NewReader(`world`)).WithContext(reqCtx)
+	mux.ServeHTTP(rec, req)
+	cancel() // simulate the client disconnecting right after the 202
+
+	if rec.Code != 202 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	select {
+	case got := <-ran:
+		if got != "world" {
+			t.Fatalf("background webhook body = %q, want it to run to completion with payload %q despite request cancellation", got, "world")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("background webhook body did not run after request cancellation")
+	}
+}
+
 // flattenHeaders canonicalizes header keys and keeps only the first value of
 // a repeated header (http.Header.Get's own convention) — the wire shape
 // bb.Metadata[T] decodes, deliberately map[string]string rather than

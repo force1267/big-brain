@@ -2319,3 +2319,52 @@ error-cancellation backstop.
 
 `go build ./...`, `go vet ./...` clean; `go test ./... -race` green across
 every package.
+
+## 2026-07-28 — Context-cancellation audit across the whole tree; found and fixed a durable-job shutdown bug
+
+Traced every `context.WithCancel`/`WithValue` boundary and goroutine that
+touches a ctx, from `Serve`'s shutdown ctx and each HTTP request's
+`r.Context()` down through `flow.Run`'s concurrent fan-outs
+(`runAgents`/`fanOut`/`groupGroup.run`), `Turn.Stream`'s tee goroutine,
+`pkg/model`'s provider streaming goroutines, and `pkg/engine`'s durable job
+worker. Confirmed correct by design almost everywhere: every concurrent
+fan-out point strips the sink (`agent.WithoutSink`) before spawning siblings
+and wires its own `WithCancel` so the first error cancels the rest without
+deadlocking a claimed-but-abandoned stream; `flow.Wait` and `engine.Step`'s
+retry backoff both correctly `select` on `ctx.Done()`; webhook's background
+run and `engineScheduler.Defer`'s tombstone/enqueue writes both deliberately
+detach from the request ctx (`context.WithoutCancel` / `context.Background()`)
+so a client disconnect can't kill work that's supposed to outlive the
+request.
+
+One real bug: `pkg/engine/engine.go`'s `exec` treated *any* non-nil,
+non-yield error from a run — including one caused by the worker pool's own
+ctx being cancelled (e.g. `Serve` shutting down gracefully) — as a terminal
+flow failure, and unconditionally acked (deleted/de-indexed) the run record.
+A hard crash leaves a persisted run resumable on the next boot; a graceful
+shutdown was silently *less* durable than a crash, permanently losing
+whatever run was mid-`Step` at that instant. Fixed by checking `ctx.Err()`
+in `exec` before acking: if the run's own ctx is what died, the record is
+left persisted/indexed (traced as `<shutdown>`) instead of acked, so it
+resumes normally on restart — same treatment as a `yield`, just without
+requeuing. `Run`'s doc comment updated to state the same guarantee for both
+crash and graceful shutdown.
+
+Added tests for the scenarios walked during the audit (all passing except
+where noted), written before the fix in the shutdown case:
+- `internal/flow/checkpoint_test.go` — `Wait` respects ctx cancellation.
+- `internal/flow/concurrent_test.go` — one concurrent agent's error cancels
+  its sibling (which observes it) without hanging `Run`.
+- `pkg/engine/step_cancel_test.go` — a retrying `Step` unblocks on ctx
+  cancellation instead of sitting out its backoff.
+- `internal/serve/webhook_test.go` — a backgrounded webhook body survives
+  the request's own context being cancelled.
+- `internal/serve/engine_test.go` — a mid-request `Once` still schedules and
+  fires even if the request context was already cancelled by the time the
+  trigger node ran.
+- `pkg/engine/shutdown_test.go` — reproduces the durable-job shutdown bug;
+  written first to fail (`TestShutdownDuringStepLeavesRunResumableInsteadOfDeletingIt`),
+  now passes after the `exec` fix above.
+
+`go build ./...`, `go vet ./...` clean; `go test ./...` green across every
+package, including the new shutdown regression test.

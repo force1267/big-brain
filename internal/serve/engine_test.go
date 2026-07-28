@@ -297,6 +297,51 @@ func TestOnceTriggerDoesNotRefireAcrossRestarts(t *testing.T) {
 	}
 }
 
+// A mid-request Once (deferBody's commit path) must not depend on the
+// request's own context staying alive: engineScheduler.Defer persists the
+// tombstone/enqueue via context.Background() internally, and deferBody itself
+// never checks ctx.Err() before committing. A client that has already
+// disconnected by the time the handler reaches the trigger node must still
+// get its Once scheduled and fired.
+func TestOnceMidRequestStillSchedulesDespiteCancelledRequestContext(t *testing.T) {
+	flow.ResetTriggers()
+	t.Cleanup(flow.ResetTriggers)
+
+	fired := make(chan struct{})
+	body := flow.New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		close(fired)
+		return nil
+	})).WithId("mid-request-once")
+
+	f := flow.New().WithAgent(agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
+		turn.Reply("scheduled")
+		return nil
+	})).Next(flow.Once(time.Now())).Next(body)
+
+	s, _, err := build(f, Store(engine.NewMemStore()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the client has already disconnected by the time this runs
+	if _, err := s.run(ctx, f, "", nil, agent.Request{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Serve wires the worker loop on its own ctx, independent of any one
+	// request's ctx — mirrored here with a fresh, live context.
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	defer workerCancel()
+	go s.sched.run(workerCtx, 1)
+
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Once scheduled mid-request did not fire after the request's own context was cancelled")
+	}
+}
+
 // bb.Metadata[T] is claimed to survive scheduling/replay "the
 // same promise Payload already had" — proven for Payload by
 // TestTriggeredDurableFlowCheckpoints/ResumeSkip's Store wiring, but the
