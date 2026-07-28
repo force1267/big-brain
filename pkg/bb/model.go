@@ -76,3 +76,14 @@ func WithDefaultModel(m Model) { model.SetDefault(m) }
 // provider, no network. It is for demos and tests: a brain runs end to end
 // without an API key. Use a real model (NewModel().WithName(...)) in production.
 func FixedModel(reply string) Model { return model.Bound(&model.Mock{Chunks: []string{reply}}) }
+
+// Usage reports provider-billed token counts, normalized across providers —
+// see reply.Usage() and Spent.
+type Usage = model.Usage
+
+// Spent reports what this request has cost so far, summed across every flow,
+// agent, and model call the run has made (tokens sum — see
+// docs/design-metrics.md's aggregation table). It is a snapshot: calls still
+// in flight are not counted. Outside a served request it returns the zero
+// Usage.
+func Spent(ctx context.Context) Usage { return agent.TallyFrom(ctx).Total() }

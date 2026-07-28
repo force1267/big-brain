@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"strings"
 	"sync"
 
@@ -17,6 +18,7 @@ type streamBuf struct {
 	mu      sync.Mutex
 	chunks  []string
 	calls   []model.ToolCall // tool calls the model asked for, collected whole
+	usage   model.Usage      // provider-reported usage, set once at stream end
 	err     error
 	closed  bool
 	waiters []chan struct{} // woken on every append and on close
@@ -25,12 +27,20 @@ type streamBuf struct {
 func newStreamBuf() *streamBuf { return &streamBuf{} }
 
 // pump drains a model stream into the buffer until it ends, recording a terminal
-// error if the stream failed. Run it in its own goroutine.
-func (b *streamBuf) pump(stream <-chan model.Chunk) {
+// error if the stream failed. Run it in its own goroutine. ctx is used only to
+// find the request's token tally (agent.WithTally) — a live reply's usage
+// arrives asynchronously here, after Ask has already returned, so this is the
+// one place that can add it to the running total.
+func (b *streamBuf) pump(ctx context.Context, stream <-chan model.Chunk) {
 	for c := range stream {
 		if c.Err != nil {
 			b.close(c.Err)
 			return
+		}
+		if c.Usage != nil {
+			b.setUsage(*c.Usage)
+			tallyFrom(ctx).Add(*c.Usage)
+			continue
 		}
 		if c.Call != nil {
 			b.pushCall(*c.Call)
@@ -55,6 +65,12 @@ func (b *streamBuf) pushCall(c model.ToolCall) {
 	b.mu.Unlock()
 }
 
+func (b *streamBuf) setUsage(u model.Usage) {
+	b.mu.Lock()
+	b.usage = u
+	b.mu.Unlock()
+}
+
 // toolCalls blocks until the reply is complete, then returns the calls. Tool
 // arguments are not streamed in v1, so waiting is what makes a call whole.
 func (b *streamBuf) toolCalls() []model.ToolCall {
@@ -68,6 +84,21 @@ func (b *streamBuf) toolCalls() []model.ToolCall {
 	calls := append([]model.ToolCall(nil), b.calls...)
 	b.mu.Unlock()
 	return calls
+}
+
+// usage blocks until the reply is complete, then returns the provider usage
+// (the zero Usage if none was ever reported — bb never estimates).
+func (b *streamBuf) usageOf() model.Usage {
+	b.mu.Lock()
+	for !b.closed {
+		w := b.wait()
+		b.mu.Unlock()
+		<-w
+		b.mu.Lock()
+	}
+	u := b.usage
+	b.mu.Unlock()
+	return u
 }
 
 func (b *streamBuf) close(err error) {

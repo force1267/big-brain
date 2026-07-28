@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	"github.com/force1267/big-brain/pkg/model"
 )
 
 // Content is a message body that accepts both Anthropic forms: a plain
@@ -183,10 +185,24 @@ type textBlock struct {
 	Text string `json:"text"`
 }
 
+// anthropicUsage renders bb's normalized Usage in this wire's own shape — a
+// straight field-for-field mapping, since Anthropic's convention (input_tokens
+// disjoint from the cache fields) is exactly the convention pkg/model.Usage
+// already normalizes to (contrast internal/openai/wire.go's usageFrom, which
+// must subtract).
+func anthropicUsage(u model.Usage) map[string]any {
+	return map[string]any{
+		"input_tokens":                u.Input,
+		"output_tokens":               u.Output,
+		"cache_creation_input_tokens": u.CacheWrite,
+		"cache_read_input_tokens":     u.CacheRead,
+	}
+}
+
 // WriteResponse writes a complete (non-streaming) messages response. Unanswered
 // tool calls become tool_use blocks and flip the stop reason, so the client
 // runs them and resends the transcript, exactly as it would to a real model.
-func WriteResponse(w http.ResponseWriter, id, model, content string, calls []Call) {
+func WriteResponse(w http.ResponseWriter, id, modelName, content string, calls []Call, u model.Usage) {
 	stop := StopReason(calls)
 	blocks := make([]any, 0, len(calls)+1)
 	if content != "" || len(calls) == 0 {
@@ -197,9 +213,10 @@ func WriteResponse(w http.ResponseWriter, id, model, content string, calls []Cal
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"id": id, "type": "message", "role": "assistant", "model": model,
+		"id": id, "type": "message", "role": "assistant", "model": modelName,
 		"content":     blocks,
 		"stop_reason": &stop,
+		"usage":       anthropicUsage(u),
 	})
 }
 
@@ -262,11 +279,14 @@ func event(w io.Writer, name string, data any) error {
 	return err
 }
 
-// WriteStart opens a streaming messages response.
-func WriteStart(w io.Writer, id, model string) error {
+// WriteStart opens a streaming messages response. Its usage is always zero:
+// bb doesn't know what a run will cost until the model calls inside it
+// complete (see WriteStop), unlike a native Anthropic server which knows
+// input tokens upfront — reporting zero here is honest, not a shortcut.
+func WriteStart(w io.Writer, id, modelName string) error {
 	if err := event(w, "message_start", map[string]any{"type": "message_start",
 		"message": map[string]any{"id": id, "type": "message", "role": "assistant",
-			"model": model, "content": []any{}}}); err != nil {
+			"model": modelName, "content": []any{}, "usage": anthropicUsage(model.Usage{})}}); err != nil {
 		return err
 	}
 	return event(w, "content_block_start", map[string]any{"type": "content_block_start",
@@ -280,8 +300,10 @@ func WriteDelta(w io.Writer, delta string) error {
 }
 
 // WriteStop terminates a streaming messages response, reporting how it ended
-// (pass the calls that went out, if any, so the client knows to run them).
-func WriteStop(w io.Writer, calls []Call) error {
+// (pass the calls that went out, if any, so the client knows to run them) and
+// the run's total usage — this is where a real Anthropic stream reports it,
+// in the message_delta event, and by now bb knows the true total.
+func WriteStop(w io.Writer, calls []Call, u model.Usage) error {
 	if err := event(w, "content_block_stop", map[string]any{"type": "content_block_stop", "index": 0}); err != nil {
 		return err
 	}
@@ -289,7 +311,8 @@ func WriteStop(w io.Writer, calls []Call) error {
 		return err
 	}
 	if err := event(w, "message_delta", map[string]any{"type": "message_delta",
-		"delta": map[string]any{"stop_reason": StopReason(calls)}}); err != nil {
+		"delta": map[string]any{"stop_reason": StopReason(calls)},
+		"usage": anthropicUsage(u)}); err != nil {
 		return err
 	}
 	return event(w, "message_stop", map[string]any{"type": "message_stop"})

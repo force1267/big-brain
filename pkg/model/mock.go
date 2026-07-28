@@ -15,6 +15,11 @@ type Mock struct {
 	// what the i'th Stream call requests, so a script can ask for tools once and
 	// then answer in prose — the shape every agentic loop test needs.
 	ToolCalls [][]ToolCall
+	// Usage, when set, is sent once as the terminal Chunk (after ToolCalls, as
+	// a real provider reports it last). Every call reports the same Usage —
+	// a test scripting per-round usage can swap Usage between Stream calls if
+	// it needs to.
+	Usage *Usage
 	// Got records the last call for assertions.
 	Got struct {
 		Msgs   []Message
@@ -29,6 +34,14 @@ type Mock struct {
 }
 
 var _ Model = (*Mock)(nil)
+
+// MockSchema is a Schema for test injection: JSONSchema returns it verbatim.
+type MockSchema map[string]any
+
+var _ Schema = MockSchema(nil)
+
+// JSONSchema implements Schema.
+func (s MockSchema) JSONSchema() map[string]any { return s }
 
 // Stream implements Model.
 func (m *Mock) Stream(_ context.Context, msgs []Message, p Params) (<-chan Chunk, error) {
@@ -50,7 +63,7 @@ func (m *Mock) Stream(_ context.Context, msgs []Message, p Params) (<-chan Chunk
 		tools = m.ToolCalls[m.Calls]
 	}
 	m.Calls++
-	out := make(chan Chunk, len(chunks)+len(tools)+1)
+	out := make(chan Chunk, len(chunks)+len(tools)+2)
 	for _, c := range chunks {
 		out <- Chunk{Content: c}
 	}
@@ -62,6 +75,9 @@ func (m *Mock) Stream(_ context.Context, msgs []Message, p Params) (<-chan Chunk
 			c.ID = NewCallID()
 		}
 		out <- Chunk{Call: &c}
+	}
+	if m.Usage != nil {
+		out <- Chunk{Usage: m.Usage}
 	}
 	close(out)
 	return out, nil

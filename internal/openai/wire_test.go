@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/force1267/big-brain/pkg/model"
 )
 
 func TestChatRequestDecodesKnownAndIgnoresUnknown(t *testing.T) {
@@ -80,7 +82,7 @@ func TestChatRequestStop(t *testing.T) {
 
 func TestWriteResponseShape(t *testing.T) {
 	rec := httptest.NewRecorder()
-	WriteResponse(rec, "id1", "jarvis", "hello", nil)
+	WriteResponse(rec, "id1", "jarvis", "hello", nil, model.Usage{Input: 5, Output: 3})
 	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -92,6 +94,10 @@ func TestWriteResponseShape(t *testing.T) {
 	if choice["message"].(map[string]any)["content"] != "hello" || choice["finish_reason"] != "stop" {
 		t.Fatalf("choice = %v", choice)
 	}
+	usage := resp["usage"].(map[string]any)
+	if usage["prompt_tokens"] != float64(5) || usage["completion_tokens"] != float64(3) || usage["total_tokens"] != float64(8) {
+		t.Fatalf("usage = %v", usage)
+	}
 }
 
 func TestWriteChunkAndDoneAreSSE(t *testing.T) {
@@ -99,7 +105,7 @@ func TestWriteChunkAndDoneAreSSE(t *testing.T) {
 	if err := WriteChunk(&b, "id1", "jarvis", "hel"); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteDone(&b, "id1", "jarvis", nil); err != nil {
+	if err := WriteDone(&b, "id1", "jarvis", nil, model.Usage{}, false); err != nil {
 		t.Fatal(err)
 	}
 	out := b.String()

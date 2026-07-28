@@ -85,6 +85,70 @@ So no agent is ever truly model-less; leaving `WithModel` off just means "use
 whatever the flow, then the default, provides". A default (no-`OnMessage`) agent
 that resolves to no model at any rung is a startup error from `bb.Serve`.
 
+## Telemetry
+
+Every model call bb makes is billed by its provider, and bb tells you exactly
+what that cost — never an estimate. `reply.Usage()` reports what one ask cost:
+
+```go
+reply, _ := chat.Ask()
+u := reply.Usage() // Usage{Input, Output, CacheRead, CacheWrite, Reasoning}
+```
+
+For a live (streaming) reply this blocks until the stream completes —
+providers report usage last, exactly as `reply.ToolCalls()` already does. A
+provider that reports nothing (some self-hosted OpenAI-compatible endpoints
+never do) yields the zero `Usage`; bb never fills the gap with a guess.
+
+`bb.Spent(ctx)` reports the running total for the WHOLE request so far —
+every flow, every agent, every tool round, summed:
+
+```go
+func(ctx context.Context, turn *bb.Turn, chat *bb.ModelChat) error {
+    if bb.Spent(ctx).Total() > budget {
+        return turn.Reply("that's enough for now")
+    }
+    ...
+}
+```
+
+It's a snapshot (calls still in flight aren't counted yet) and reads zero
+outside a served request.
+
+**The `usage` block bb sends its own clients is the SUM of every upstream
+call the run made** — a router's cheap pass, a capability agent's real one,
+every tool round — not a mirror of the client's own prompt size. A brain that
+made five model calls really did spend all five calls' worth of tokens, and
+reporting anything less would make bb the one "model" in the world whose
+own bill is bigger than what it told you. `prompt_tokens` (OpenAI) /
+`input_tokens` (Anthropic) will therefore usually exceed the size of the
+prompt the client actually sent — that's honest, not a bug.
+
+Two edge cases worth knowing:
+
+- **A resumed durable run reports only what THAT run spent.** A flow whose
+  result was replayed from a checkpoint (`flow.cached`) made no model call, so
+  it contributes zero tokens — the truthful answer to "what did this attempt
+  cost", not "what has this conversation cost across every crash and retry".
+- **`bb.FixedModel` and a bound `Bound(mock)` report zero usage.** No
+  provider was called, so nothing was billed.
+
+What this is not: a price table (a model's price changes per provider, per
+region, per cache-hit class, faster than a library can track it — turn
+`model.tokens` into cost with a Prometheus/Grafana rule against your own
+deployment, not code shipped here) and not a benchmark harness (every number
+above is dominated by a third party's network latency, so `go test -bench`
+would only measure the provider's mood — point a real load generator, like
+`k6` or `vegeta`, at a running brain instead).
+
+Everything above is the in-process API. Automatically, with no author action,
+the same numbers also land as OTel instruments (`model.tokens`,
+`model.ttft.seconds`, `model.call.seconds`, `request.seconds`, …) — inert
+until `BIG_BRAIN_TELEMETRY=stdout` or `=otlp` (with `BIG_BRAIN_OTLP_ENDPOINT`)
+is set, and as a `Usage` on each flow's `flow.end` trace event at
+`/v1/diagnostics/trace`, always on, for "which flow spent the tokens" without
+any config at all.
+
 ## Agents and turns
 
 ```go
@@ -773,3 +837,27 @@ assert on the reply — or unit-test a handler by constructing an agent with
 `bb.FixedModel(...)`. For structured output, `bb.Extract[T]` gives you the typed
 value to assert against. See the package tests under `internal/flow` and
 `internal/serve` for patterns.
+
+## Mocks for every public interface
+
+Every package that exports an interface ships a `mock.go` alongside it, with a
+`Mock<Name>` implementation you can inject in place of the real thing — no
+need to hand-roll a fake per test file. Notably:
+
+- `model.Mock` — a `model.Model` that streams scripted `Chunks`/`ToolCalls`
+  or returns a canned `Fail`/`Reject` error, with `Got`/`Seen` for asserting
+  what was asked.
+- `model.MockSchema` — a `model.Schema` (tool argument schema) that returns
+  itself from `JSONSchema`.
+- `agent.MockSchema` — an `agent.Schema` (structured-reply schema) with a
+  settable `Err` so both the valid and invalid `Validate` paths are one field
+  away.
+- `flow.MockStore` — an in-memory `flow.Store` for durability tests.
+- `flow.MockScheduler` / `flow.MockWebhooks` — record `Defer`/`Register` calls
+  (in `Calls`/`Hooks`) instead of actually scheduling anything, so a test can
+  fire the captured `Run` itself.
+- `engine.MockStore` / `engine.RecordTracer` — the same idea at the `pkg/engine`
+  layer.
+
+Reach for these before writing a local stub: a test-only reimplementation of
+an interface that already has a mock is duplication, not isolation.

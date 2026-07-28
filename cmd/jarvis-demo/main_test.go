@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -136,44 +135,7 @@ func TestMemoryPersistsAndFiresOnce(t *testing.T) {
 	}
 }
 
-// TestBrainEndToEnd drives a real request through the assembled brain against a
-// real dummy house: the reply must be the house's actual state, and the house
-// must have been changed.
-func TestBrainEndToEnd(t *testing.T) {
-	bb.WithModel(bb.FixedModel("At your service.")).WithTag(mSmart, mFast)
-
-	w := startWorld("127.0.0.1:18091")
-	defer w.shutdown()
-
-	j := &jarvis{
-		house: &client{base: "http://127.0.0.1:18091", http: &http.Client{Timeout: 2 * time.Second}},
-		mem:   openMemory(context.Background(), bb.MemStore()),
-	}
-	brain := j.route().
-		Next(bb.Select(j.talk(), j.remember(), j.forget(), j.recall(), j.lists(), j.control(), j.briefing(), j.remind())).
-		Next(bb.Respond)
-
-	h, err := bb.Handler(brain)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(h)
-	defer srv.Close()
-
-	if got := ask(t, srv.URL, "turn on the heater"); !strings.Contains(got, "heater is on") {
-		t.Errorf("control reply = %q", got)
-	}
-	if state := w.snapshot().Devices["heater"]; state != "on" {
-		t.Errorf("the house was not actually changed: heater = %q", state)
-	}
-	if got := ask(t, srv.URL, "remember the spare key is under the pot"); !strings.Contains(got, "spare key") {
-		t.Errorf("remember reply = %q", got)
-	}
-	if facts := j.mem.facts(); len(facts) != 1 {
-		t.Errorf("fact not kept: %v", facts)
-	}
-}
-
+// ask is shared with e2e_test.go's scenario table.
 func ask(t *testing.T, base, msg string) string {
 	t.Helper()
 	body, _ := json.Marshal(map[string]any{

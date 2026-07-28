@@ -181,6 +181,13 @@ func (f *Basic) run(ctx context.Context, in State) (State, error) {
 		}
 	}
 	start := time.Now()
+	// Snapshot the request's token tally before this flow's agents run, so
+	// flow.end can report the DELTA (this flow's own spend) rather than the
+	// request's running grand total. Legal only because tokens sum over a
+	// sequential span like this one — a Group's members overlap in time, so
+	// their individual shares are deliberately not attempted (see
+	// docs/design-metrics.md's aggregation table).
+	before := agent.TallyFrom(ctx).Total()
 	tr.Event(ctx, Event{Kind: "flow.start", Flow: f.fid, At: start})
 	replies, sel, hasSel, err := runAgents(ctx, f.fid, f.resolved(ctx), in.Chat)
 	if err != nil {
@@ -199,7 +206,15 @@ func (f *Basic) run(ctx context.Context, in State) (State, error) {
 	if cp := cpFrom(ctx); cp != nil {
 		cp.save(ctx, out)
 	}
-	tr.Event(ctx, Event{Kind: "flow.end", Flow: f.fid, At: time.Now(), Dur: time.Since(start)})
+	after := agent.TallyFrom(ctx).Total()
+	spent := model.Usage{
+		Input:      after.Input - before.Input,
+		Output:     after.Output - before.Output,
+		CacheRead:  after.CacheRead - before.CacheRead,
+		CacheWrite: after.CacheWrite - before.CacheWrite,
+		Reasoning:  after.Reasoning - before.Reasoning,
+	}
+	tr.Event(ctx, Event{Kind: "flow.end", Flow: f.fid, At: time.Now(), Dur: time.Since(start), Usage: &spent})
 	return out, nil
 }
 

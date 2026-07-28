@@ -77,6 +77,7 @@ func (m anthropicModel) Stream(ctx context.Context, msgs []Message, p Params) (<
 		// index, same shape as OpenAI's — accumulated and emitted whole, so a
 		// Chunk carrying a Call is always complete (v1 does not stream them).
 		calls := newAnthropicCallBuf()
+		var usage *Usage
 		for stream.Next() {
 			ev := stream.Current()
 			switch ev.Type {
@@ -98,6 +99,12 @@ func (m anthropicModel) Stream(ctx context.Context, msgs []Message, p Params) (<
 				case "input_json_delta":
 					calls.append(ev.Index, ev.Delta.PartialJSON)
 				}
+			case "message_delta":
+				// Cumulative as of this delta; the last one seen before the
+				// stream ends is the final total, so no need to also read
+				// message_start's partial (input-only) usage.
+				u := anthropicUsage(ev.Usage)
+				usage = &u
 			}
 		}
 		if err := stream.Err(); err != nil {
@@ -114,8 +121,28 @@ func (m anthropicModel) Stream(ctx context.Context, msgs []Message, p Params) (<
 				return
 			}
 		}
+		if usage != nil {
+			select {
+			case out <- Chunk{Usage: usage}:
+			case <-ctx.Done():
+			}
+		}
 	}()
 	return out, nil
+}
+
+// anthropicUsage maps this wire's usage straight across: Anthropic already
+// reports CacheReadInputTokens/CacheCreationInputTokens as disjoint from
+// InputTokens, matching bb's convention with no adapter-side normalization
+// (contrast pkg/model/openai.go's openaiUsage, which must subtract).
+func anthropicUsage(u anthropic.MessageDeltaUsage) Usage {
+	return Usage{
+		Input:      u.InputTokens,
+		Output:     u.OutputTokens,
+		CacheRead:  u.CacheReadInputTokens,
+		CacheWrite: u.CacheCreationInputTokens,
+		Reasoning:  u.OutputTokensDetails.ThinkingTokens,
+	}
 }
 
 // anthropicMessage renders one neutral Message as an Anthropic wire message.

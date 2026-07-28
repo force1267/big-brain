@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/force1267/big-brain/pkg/model"
 )
@@ -171,10 +172,11 @@ func (a Asker) Ask() (Reply, error) {
 	// reply.Err(), not here. A schema agent always buffers to validate whole.
 	if a.chat.schema == nil && sinkFrom(a.chat.ctx) != nil {
 		buf := newStreamBuf()
-		go buf.pump(stream)
+		go buf.pump(a.chat.ctx, stream)
 		return Reply{buf: buf}, nil
 	}
-	text, calls, err := model.CollectAll(stream)
+	text, calls, usage, err := model.CollectAll(stream)
+	tallyFrom(a.chat.ctx).Add(usage)
 	if err != nil {
 		return Reply{}, fmt.Errorf("%w: %w", ErrUpstream, err)
 	}
@@ -183,7 +185,7 @@ func (a Asker) Ask() (Reply, error) {
 			return Reply{}, fmt.Errorf("%w: %w", ErrSchema, err)
 		}
 	}
-	return Reply{content: text, calls: calls}, nil
+	return Reply{content: text, calls: calls, usage: usage}, nil
 }
 
 // AskWith adds msgs and then Asks.
@@ -247,7 +249,9 @@ func (a Asker) Resolve(msgs ...model.Message) (Reply, error) {
 			if err := a.chat.ctx.Err(); err != nil {
 				return reply, err
 			}
+			start := time.Now()
 			out, err := handlers[call.Name](a.chat.ctx, call)
+			recordToolExec(a.chat.ctx, call.Name, start)
 			res := model.NewToolResult().WithId(call.ID).WithContent(out)
 			if err != nil {
 				// The model sees the failure and can retry or explain. Only a

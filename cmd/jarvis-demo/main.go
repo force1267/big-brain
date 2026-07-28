@@ -61,8 +61,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	house := startWorld(worldAddr)
-	defer house.shutdown()
+	w := newWorld()
+	houseSrv := &http.Server{Addr: worldAddr, Handler: w.handler(), ReadHeaderTimeout: 5 * time.Second}
+	go houseSrv.ListenAndServe()
+	defer houseSrv.Shutdown(context.Background())
 
 	registerModels()
 
@@ -537,9 +539,9 @@ type goodnightPlan struct {
 	Lock []string `json:"lock"`
 }
 
-func (j *jarvis) routines() {
-	// At boot: confirm the house answers, and say so.
-	bb.Trigger().Next(bb.NewFlow().WithAgent(bb.NewAgent().
+// boot confirms the house answers, and says so.
+func (j *jarvis) boot() bb.Flow {
+	return bb.NewFlow().WithAgent(bb.NewAgent().
 		OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
 			h, err := j.house.snapshot(ctx)
 			if err != nil {
@@ -548,65 +550,86 @@ func (j *jarvis) routines() {
 			}
 			turn.Reply("Jarvis online. " + describe(h.Sensors) + ".")
 			return nil
-		})).WithId(idBoot).Next(j.speak()))
+		})).WithId(idBoot)
+}
 
-	// Every minute: fire whatever became due. This is the loop that makes
-	// reminders real — a cheap sweep instead of a timer per reminder.
-	bb.Trigger().Next(bb.Every("* * * * *")).Next(
-		bb.NewFlow().WithAgent(bb.NewAgent().
-			OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
-				for _, r := range j.mem.due(ctx, time.Now()) {
-					if err := j.house.notify(ctx, "Reminder: "+r.Text); err != nil {
-						return err
-					}
+// sweep fires whatever became due. This is the loop that makes reminders
+// real — a cheap sweep instead of a timer per reminder.
+func (j *jarvis) sweep() bb.Flow {
+	return bb.NewFlow().WithAgent(bb.NewAgent().
+		OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
+			for _, r := range j.mem.due(ctx, time.Now()) {
+				if err := j.house.notify(ctx, "Reminder: "+r.Text); err != nil {
+					return err
 				}
+			}
+			return nil
+		})).WithId(idSweep).Durable()
+}
+
+// morning is the house introducing the day, in its own words.
+func (j *jarvis) morning() bb.Flow {
+	return bb.NewFlow().WithAgent(bb.NewAgent().
+		WithModel(bb.NewModel(mSmart)).
+		WithRole(bb.Role("Good morning. In two sentences: the house, then the day's errands. Warm, brief, spoken.")).
+		OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
+			chat.Add(bb.NewMessage(j.context(ctx) + " " + j.errands()).As("system"))
+			chat.Add(bb.NewMessage("Give me the morning briefing."))
+			reply, err := chat.Ask()
+			if err != nil {
+				turn.Reply("Good morning. " + j.context(ctx))
 				return nil
-			})).WithId(idSweep).Durable())
+			}
+			turn.Reply(reply.ReadAll())
+			return nil
+		})).WithId(idMorning).Durable()
+}
+
+// goodnight acts first (locks up, kills the lights), then reports.
+func (j *jarvis) goodnight() bb.Flow {
+	return bb.NewFlow().WithAgent(bb.NewAgent().
+		OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
+			plan, ok := bb.Payload[goodnightPlan](turn)
+			if !ok {
+				plan = goodnightPlan{Off: []string{"porch light", "living light"}, Lock: []string{"front lock"}}
+			}
+			var did []string
+			for _, d := range plan.Off {
+				if err := j.house.set(ctx, d, "off"); err != nil {
+					return err
+				}
+				did = append(did, d+" off")
+			}
+			for _, d := range plan.Lock {
+				if err := j.house.set(ctx, d, "locked"); err != nil {
+					return err
+				}
+				did = append(did, d+" locked")
+			}
+			turn.Reply("Goodnight — " + strings.Join(did, ", ") + ".")
+			return nil
+		})).WithId(idGoodnight).Durable()
+}
+
+// routineIDs is every deferred body id routines() schedules — the vocabulary
+// TestEveryRoutineHasAScenario checks the e2e table against.
+var routineIDs = []string{idBoot, idSweep, idMorning, idGoodnight}
+
+func (j *jarvis) routines() {
+	// At boot: confirm the house answers, and say so.
+	bb.Trigger().Next(j.boot().Next(j.speak()))
+
+	// Every minute: fire whatever became due.
+	bb.Trigger().Next(bb.Every("* * * * *")).Next(j.sweep())
 
 	// 07:00 — the house introduces the day, in its own words.
-	bb.Trigger().Next(bb.Every("0 7 * * *")).Next(
-		bb.NewFlow().WithAgent(bb.NewAgent().
-			WithModel(bb.NewModel(mSmart)).
-			WithRole(bb.Role("Good morning. In two sentences: the house, then the day's errands. Warm, brief, spoken.")).
-			OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
-				chat.Add(bb.NewMessage(j.context(ctx) + " " + j.errands()).As("system"))
-				chat.Add(bb.NewMessage("Give me the morning briefing."))
-				reply, err := chat.Ask()
-				if err != nil {
-					turn.Reply("Good morning. " + j.context(ctx))
-					return nil
-				}
-				turn.Reply(reply.ReadAll())
-				return nil
-			})).WithId(idMorning).Durable().Next(j.speak()))
+	bb.Trigger().Next(bb.Every("0 7 * * *")).Next(j.morning().Next(j.speak()))
 
 	// 22:30 — the goodnight routine acts first, then reports.
 	bb.Trigger(bb.WithSeedPayload(goodnightPlan{
 		Off:  []string{"porch light", "living light", "fan"},
 		Lock: []string{"front lock"},
-	})).Next(bb.Every("30 22 * * *")).Next(
-		bb.NewFlow().WithAgent(bb.NewAgent().
-			OnMessage(func(ctx context.Context, turn bb.Turn, chat bb.ModelChat) error {
-				plan, ok := bb.Payload[goodnightPlan](turn)
-				if !ok {
-					plan = goodnightPlan{Off: []string{"porch light", "living light"}, Lock: []string{"front lock"}}
-				}
-				var did []string
-				for _, d := range plan.Off {
-					if err := j.house.set(ctx, d, "off"); err != nil {
-						return err
-					}
-					did = append(did, d+" off")
-				}
-				for _, d := range plan.Lock {
-					if err := j.house.set(ctx, d, "locked"); err != nil {
-						return err
-					}
-					did = append(did, d+" locked")
-				}
-				turn.Reply("Goodnight — " + strings.Join(did, ", ") + ".")
-				return nil
-			})).WithId(idGoodnight).Durable().Next(j.speak()))
+	})).Next(bb.Every("30 22 * * *")).Next(j.goodnight().Next(j.speak()))
 
 	// A doorbell camera POSTs here whenever it sees someone — the reception
 	// half of bb.Payload/bb.Metadata. bb.Payload[T] reads the JSON body (who

@@ -2447,3 +2447,137 @@ then restored) so the failure is real, not asserted:
 
 `go build ./...`, `go vet ./...` clean; `go test ./...` green across every
 package.
+
+## 2026-07-29 — Filled in missing `mock.go`s for `internal/agent` and `internal/flow`
+
+Audit found two exported-interface packages with no `mock.go` (`pkg/engine`
+and `pkg/model` already had one each): `internal/agent` (`Schema`) and
+`internal/flow` (`Store`, `Scheduler`, `Webhooks`) — plus `pkg/model.Schema`
+(the 1-method tool-argument schema, distinct from `agent.Schema`'s 2-method
+structured-reply schema), which had a `mock.go` for `Model` but not for it.
+Every one of these already had 1-4 independent hand-rolled test-local fakes
+scattered across `_test.go` files (`jsonSchema`, `emptySchema`, `objSchema`,
+`fakeSchema`, `memStore`, `recordingStore` (kept — it wraps `engine.MemStore`
+with extra put-tracking, not a plain fake), `mockScheduler`, `mockWebhooks`)
+reimplementing the same interfaces with no shared behavior.
+
+Added:
+- `pkg/model/mock.go`: `MockSchema` (map-backed `Schema`).
+- `internal/agent/mock.go`: `MockSchema{Data, Err}` (`Schema`, settable
+  `Validate` failure).
+- `internal/flow/mock.go`: `MockStore` (in-memory `Store`), `MockScheduler`
+  (records `Defer` calls in `Calls []MockDeferCall`), `MockWebhooks` (records
+  `Register` calls in `Hooks`, rejects a duplicate endpoint id via the new
+  sentinel `ErrDuplicateWebhook` in `internal/flow/errors.go`).
+
+Rewired every ad-hoc fake above to the new mocks and deleted the local types
+(`internal/agent/agent_test.go`, `chat_test.go`; `internal/serve/tools_test.go`;
+`pkg/model/tool_test.go`; `internal/flow/durable_test.go`, `respond_test.go`,
+`trigger_test.go`, `groups_test.go`). Added an authoring-guide section
+("Mocks for every public interface") pointing authors at these instead of
+hand-rolling a fake per test file.
+
+Verification note: `pkg/model` had unrelated in-progress changes from another
+concurrent session (a token-usage feature touching `model.go`/`effective.go`/
+new `tally.go`/`usage.go`) that left the package non-building at the time of
+this change, so `go build ./...`/`go test ./...` could not be run clean
+end-to-end. Everything touched here was checked by hand (`gofmt -l` clean,
+manual re-read of every diff) instead; re-run the full suite once that other
+work lands.
+
+## 2026-07-29 — Implemented `docs/design-metrics.md` end to end: usage parsing, wire `usage`, OTel instruments, resurrected `internal/telemetry`, per-flow trace attribution
+
+Full build of the metrics design (previously fact-checked against the tree in
+a prior session; every line reference in the doc was current). Scope grew by
+one item versus the doc's original plan: `pkg/model/anthropic.go` now has a
+native Anthropic-consuming `Model` (it didn't when the doc was written), so
+Anthropic usage parsing was added alongside OpenAI's rather than deferred.
+
+1. **`model.Usage` + `Chunk.Usage`.** New `pkg/model/usage.go` (`Input,
+   Output, CacheRead, CacheWrite, Reasoning`; `Add` is the only aggregation;
+   `Total()` excludes `Reasoning`, already inside `Output`) and
+   `pkg/model/tally.go` (`*Tally`, nil-receiver safe, so a request outside a
+   served context never needs a nil check). `Chunk` gained a `Usage *Usage`
+   field. `CollectAll` now returns `(string, []ToolCall, Usage, error)` — its
+   one caller (`internal/agent/chat.go`) and three existing tests
+   (`openai_test.go`, `anthropic_test.go`, `tool_test.go`) updated.
+2. **Provider parsing.** `pkg/model/openai.go`: sets
+   `StreamOptions.IncludeUsage` (skippable via `BIG_BRAIN_STREAM_USAGE=false`
+   for OpenAI-compatible endpoints that reject it); the `len(c.Choices) == 0`
+   guard now checks `c.Usage.JSON.TotalTokens.Valid()` first and normalizes
+   via `openaiUsage` (subtracts `cached_tokens`/`cache_write_tokens` from
+   `prompt_tokens` — OpenAI's cache counts are a subset of the total, unlike
+   Anthropic's disjoint ones). `pkg/model/anthropic.go`: a new
+   `case "message_delta":` arm captures `ev.Usage` (cumulative; the last one
+   before stream close is the final total) via `anthropicUsage`, a straight
+   field mapping (Anthropic's convention already matches bb's). Fixed
+   alongside (doc's incidental finding #8): `pkg/model/spec.go`'s `Build()`
+   now memoizes by `(provider, baseURL, apiKey, name)` in a package-level
+   `sync.Map`, instead of constructing a fresh client + OTel instrument set
+   on every `Ask`.
+3. **In-process API.** `internal/agent/tally.go` (new): `WithTally`/
+   `tallyFrom`/`TallyFrom`, the same ctx-key idiom as `sink.go`/`request.go`.
+   `streamBuf` gained `usage`/`setUsage`/`usageOf` (mirrors
+   `toolCalls`'s wait-for-close pattern exactly); `pump` now takes `ctx` so a
+   live reply's usage — which arrives asynchronously, after `Ask` already
+   returned — can still reach the tally. `Reply.Usage()` blocks on a live
+   reply exactly as `ToolCalls()` does, returns the buffered value otherwise.
+   `pkg/bb.Spent(ctx)` is a free function reading the ctx tally, zero outside
+   a served request.
+4. **Wire-level `usage`.** `internal/openai/wire.go`: `ChatRequest` parses
+   `stream_options.include_usage`; `chatResponse` gained `Usage *usage`;
+   `WriteResponse`/`WriteDone` take a `model.Usage` (`WriteDone`'s is gated on
+   the client having asked for it). `internal/anthropic/wire.go`:
+   `WriteResponse` and `WriteStop` (`message_delta`) carry a real usage map;
+   `WriteStart` (`message_start`) always reports the zero Usage — honestly,
+   since bb doesn't know a run's cost before any model call has completed,
+   unlike a native Anthropic server which knows input tokens upfront.
+   Skipped the doc's optional `x_bigbrain.model_calls` field — the doc itself
+   flags it as the first thing to cut if it causes client trouble.
+5. **OTel instruments.** `pkg/model/telemetry.go`: added `model.tokens`
+   (`token.kind` attribute), `model.ttft.seconds`, `model.generation.seconds`
+   (recorded only when ≥2 content chunks arrived), `model.usage.missing`;
+   explicit bucket boundaries per the doc's table; removed the unsafe
+   `tool` attribute from `model.tool.calls` (forwarded tool names are
+   client-controlled, unbounded cardinality); added a `now func() time.Time`
+   field (nil -> `time.Now`) for deterministic timing tests, no `Clock`
+   interface. `internal/agent/telemetry.go` (new): `tool.exec.seconds` around
+   `Resolve`'s local handler call — `tool` is safe here (author-declared via
+   `bb.OnCall`), unlike the forwarded name above. `internal/serve/telemetry.go`
+   (new): `request.seconds`/`request.ttft.seconds`, recorded inline in the
+   `openai`/`anthropic` handlers (not an `http.Handler` wrapper — only inline
+   has `sink.Claimed()` and the resolved flow name).
+6. **Resurrected `internal/telemetry`.** One function, `Start(ctx)`, selected
+   by `BIG_BRAIN_TELEMETRY` (unset/other -> leaves the global no-op provider;
+   `stdout` -> `stdoutmetric`; `otlp` -> `otlpmetricgrpc` against
+   `BIG_BRAIN_OTLP_ENDPOINT`), matching the codebase's actual `os.Getenv`
+   convention for `BIG_BRAIN_*` config rather than introducing `viper` for one
+   value (no other package in the repo uses it despite CLAUDE.md's mandate).
+   `serve.Serve` starts it after config, defers shutdown. Added
+   `go.opentelemetry.io/otel/exporters/{stdout/stdoutmetric,otlp/otlpmetric/otlpmetricgrpc}`
+   to `go.mod`.
+7. **Per-flow trace attribution.** `internal/flow/trace.go`'s `Event` gained
+   `Usage *model.Usage`. `Basic.run` snapshots `agent.TallyFrom(ctx).Total()`
+   before `flow.start` and again before `flow.end`, attaching the
+   element-wise difference — legal because tokens sum over a sequential span,
+   deliberately not attempted for `Group`/`One` members, whose overlapping
+   intervals make an individual share a lie (matches the doc's aggregation
+   table exactly).
+8. **Docs.** `docs/authoring-guide.md`: new `## Telemetry` section
+   (`reply.Usage()`, `bb.Spent(ctx)`, the sum-of-upstream-calls wire
+   semantics, the resumed-run and bound-model edge cases, the price-table and
+   benchmark-harness non-goals). `docs/PRODUCT.md`: the mimicry framing and
+   the "Observability" bullet both now mention cost. New
+   `internal/telemetry/effective.go`.
+
+Tests added/extended: `pkg/model/usage_test.go`, `tally_test.go` (new);
+`openai_test.go`/`anthropic_test.go` extended with a usage-bearing SSE/event
+fixture (happy/unhappy/edge/branch per CLAUDE.md); `spec_test.go`'s memoization
+case; `telemetry_test.go` extended for every new instrument plus the injected
+fake clock; `internal/agent/stream_test.go`/`chat_test.go` for
+`Usage()`/tally-sums-across-rounds; `internal/flow/flow_test.go` for the
+sequential/concurrent/`One`/`flow.cached` aggregation rules; both packages'
+`wire_test.go`/`convert_test.go` for the wire `usage` shape.
+
+`go build ./...`, `go vet ./...` clean; `go test ./... -race` green across
+every package.

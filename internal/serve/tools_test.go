@@ -113,7 +113,7 @@ func TestToolResultRoundTripIsStateless(t *testing.T) {
 // A handler that resolves a call in Go keeps it internal: the client never
 // learns the tool exists.
 func TestResolvedCallStaysInternal(t *testing.T) {
-	tool := model.NewTool().As("read_sensor").Is("read").WithSchema(objSchema{}).
+	tool := model.NewTool().As("read_sensor").Is("read").WithSchema(model.MockSchema{"type": "object"}).
 		OnCall(func(context.Context, model.ToolCall) (string, error) { return "18C", nil })
 	mock := &model.Mock{
 		Script:    []string{"", "It is 18C."},
@@ -191,7 +191,3 @@ func TestStreamingToolCalls(t *testing.T) {
 		}
 	}
 }
-
-type objSchema struct{}
-
-func (objSchema) JSONSchema() map[string]any { return map[string]any{"type": "object"} }

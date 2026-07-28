@@ -16,6 +16,7 @@ import "github.com/force1267/big-brain/pkg/model"
 type Reply struct {
 	content string
 	calls   []model.ToolCall
+	usage   model.Usage
 	buf     *streamBuf
 	read    bool
 }
@@ -30,6 +31,17 @@ func (r Reply) ToolCalls() []model.ToolCall {
 		return r.buf.toolCalls()
 	}
 	return r.calls
+}
+
+// Usage reports what this ask cost, as the provider reported it. For a live
+// (streaming) reply this BLOCKS until the reply is complete — providers send
+// usage last, exactly as ToolCalls does. A provider that reported nothing
+// yields the zero Usage; bb never estimates.
+func (r Reply) Usage() model.Usage {
+	if r.buf != nil {
+		return r.buf.usageOf()
+	}
+	return r.usage
 }
 
 // Messages returns the reply as chat messages: its text and calls as one

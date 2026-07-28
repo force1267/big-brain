@@ -97,7 +97,7 @@ func TestDecodeTranscriptBlocks(t *testing.T) {
 // Unanswered calls become tool_use blocks and flip the stop reason.
 func TestWriteResponseWithCalls(t *testing.T) {
 	rec := httptest.NewRecorder()
-	WriteResponse(rec, "msg_1", "jarvis", "let me check", Calls(callsFixture()))
+	WriteResponse(rec, "msg_1", "jarvis", "let me check", Calls(callsFixture()), model.Usage{})
 	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -125,7 +125,7 @@ func TestWriteResponseWithCalls(t *testing.T) {
 	}
 	// A pure text answer is unchanged.
 	plain := httptest.NewRecorder()
-	WriteResponse(plain, "msg_2", "jarvis", "hello", nil)
+	WriteResponse(plain, "msg_2", "jarvis", "hello", nil, model.Usage{})
 	var presp map[string]any
 	json.Unmarshal(plain.Body.Bytes(), &presp)
 	if presp["stop_reason"] != "end_turn" || len(presp["content"].([]any)) != 1 {
@@ -137,7 +137,7 @@ func TestWriteResponseWithCalls(t *testing.T) {
 // reports tool_use as the stop reason.
 func TestStreamToolCalls(t *testing.T) {
 	var b strings.Builder
-	if err := WriteStop(&b, Calls(callsFixture())); err != nil {
+	if err := WriteStop(&b, Calls(callsFixture()), model.Usage{}); err != nil {
 		t.Fatal(err)
 	}
 	out := b.String()

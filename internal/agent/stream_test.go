@@ -14,7 +14,7 @@ import (
 func TestStreamBufCoexistAndReplay(t *testing.T) {
 	b := newStreamBuf()
 	ch := make(chan model.Chunk)
-	go b.pump(ch)
+	go b.pump(context.Background(), ch)
 
 	r := Reply{buf: b}
 	got := []string{}
@@ -50,6 +50,61 @@ func TestStreamBufCoexistAndReplay(t *testing.T) {
 	}
 }
 
+// reply.Usage() blocks until the stream closes, then returns the provider's
+// usage — exactly as ToolCalls does — and a COPY of a live Reply observes the
+// same value (the value-semantics invariant the existing tests already guard
+// for ToolCalls: the shared *streamBuf is what a copy actually reads from).
+func TestReplyUsageBlocksUntilClose(t *testing.T) {
+	b := newStreamBuf()
+	ch := make(chan model.Chunk)
+	go b.pump(context.Background(), ch)
+
+	r := Reply{buf: b}
+	rCopy := r // value copy — must observe the same eventual usage
+
+	done := make(chan model.Usage)
+	go func() { done <- r.Usage() }()
+
+	select {
+	case u := <-done:
+		t.Fatalf("Usage() returned before the stream closed: %+v", u)
+	default:
+	}
+
+	ch <- model.Chunk{Content: "hi"}
+	ch <- model.Chunk{Usage: &model.Usage{Input: 3, Output: 1}}
+	close(ch)
+
+	got := <-done
+	want := model.Usage{Input: 3, Output: 1}
+	if got != want {
+		t.Fatalf("Usage() = %+v, want %+v", got, want)
+	}
+	if got2 := rCopy.Usage(); got2 != want {
+		t.Fatalf("copy's Usage() = %+v, want %+v", got2, want)
+	}
+}
+
+// A reply whose stream errored mid-way still reports whatever usage arrived
+// before the error, and Err() still reports the failure.
+func TestReplyUsagePartialOnError(t *testing.T) {
+	b := newStreamBuf()
+	ch := make(chan model.Chunk, 3)
+	ch <- model.Chunk{Content: "par"}
+	ch <- model.Chunk{Usage: &model.Usage{Input: 2}}
+	ch <- model.Chunk{Err: errors.New("boom")}
+	close(ch)
+	b.pump(context.Background(), ch)
+
+	r := Reply{buf: b}
+	if got := r.Usage(); got != (model.Usage{Input: 2}) {
+		t.Fatalf("Usage() = %+v, want {Input: 2}", got)
+	}
+	if r.Err() == nil {
+		t.Fatalf("Err() should still report the stream failure")
+	}
+}
+
 // A terminal stream error surfaces via reply.Err(), not the (already-returned)
 // Ask, and the partial content before it is still readable.
 func TestStreamBufError(t *testing.T) {
@@ -58,7 +113,7 @@ func TestStreamBufError(t *testing.T) {
 	ch <- model.Chunk{Content: "par"}
 	ch <- model.Chunk{Err: errors.New("boom")}
 	close(ch)
-	b.pump(ch)
+	b.pump(context.Background(), ch)
 
 	r := Reply{buf: b}
 	if r.ReadAll() != "par" {

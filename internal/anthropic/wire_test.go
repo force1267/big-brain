@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/force1267/big-brain/pkg/model"
 )
 
 func TestRequestDecodesStringAndBlockContent(t *testing.T) {
@@ -50,12 +52,16 @@ func TestMessagesRequestThink(t *testing.T) {
 
 func TestWriteResponseShape(t *testing.T) {
 	rec := httptest.NewRecorder()
-	WriteResponse(rec, "msg_1", "jarvis", "hello", nil)
+	WriteResponse(rec, "msg_1", "jarvis", "hello", nil, model.Usage{Input: 4, Output: 1})
 	var resp struct {
 		Type       string
 		Role       string
 		StopReason string `json:"stop_reason"`
 		Content    []struct{ Type, Text string }
+		Usage      struct {
+			InputTokens  int64 `json:"input_tokens"`
+			OutputTokens int64 `json:"output_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -63,6 +69,9 @@ func TestWriteResponseShape(t *testing.T) {
 	if resp.Type != "message" || resp.Role != "assistant" || resp.StopReason != "end_turn" ||
 		len(resp.Content) != 1 || resp.Content[0].Text != "hello" {
 		t.Fatalf("resp = %+v", resp)
+	}
+	if resp.Usage.InputTokens != 4 || resp.Usage.OutputTokens != 1 {
+		t.Fatalf("usage = %+v", resp.Usage)
 	}
 }
 
@@ -74,14 +83,16 @@ func TestStreamEventSequence(t *testing.T) {
 	if err := WriteDelta(&b, "hel"); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteStop(&b, nil); err != nil {
+	if err := WriteStop(&b, nil, model.Usage{Output: 2}); err != nil {
 		t.Fatal(err)
 	}
 	out := b.String()
 	for _, want := range []string{
 		"event: message_start", "event: content_block_start",
+		`"usage":{`, // message_start always carries a usage object
 		"event: content_block_delta", `"text":"hel"`,
-		"event: content_block_stop", `"stop_reason":"end_turn"`, "event: message_stop",
+		"event: content_block_stop", `"stop_reason":"end_turn"`,
+		`"output_tokens":2`, "event: message_stop",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)

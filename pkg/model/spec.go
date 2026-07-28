@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 )
 
 // ErrNoModelName is returned by Build when a Spec has no name set.
@@ -87,9 +88,26 @@ func (s Spec) Params() Params {
 	return p
 }
 
+// buildKey identifies a (provider, endpoint, credential, name) tuple: every
+// unbound Spec resolving to the same tuple can share one built Model.
+type buildKey struct {
+	provider Provider
+	baseURL  string
+	apiKey   string
+	name     string
+}
+
+// builtModels memoizes Build's result per buildKey, so an agent re-resolving
+// its Spec on every Ask (internal/agent/chat.go's Asker.Ask) reuses the same
+// client and OTel instruments instead of constructing them per call — see
+// docs/design-metrics.md's finding on per-Ask client/instrument churn.
+var builtModels sync.Map // buildKey -> Model
+
 // Build resolves the Spec to a runtime Model. It surfaces the recorded error
 // first, then requires a name; otherwise it returns an OpenAI-compatible model
-// pointed at the configured provider (BIG_BRAIN_BASE_URL / BIG_BRAIN_API_KEY).
+// pointed at the configured provider (BIG_BRAIN_BASE_URL / BIG_BRAIN_API_KEY),
+// memoized by (provider, endpoint, credential, name) so repeated Builds of an
+// equivalent Spec reuse one client rather than constructing a fresh one.
 func (s Spec) Build() (Model, error) {
 	if s.err != nil {
 		return nil, s.err
@@ -100,10 +118,19 @@ func (s Spec) Build() (Model, error) {
 	if s.name == "" {
 		return nil, ErrNoModelName
 	}
-	if s.provider == AnthropicProvider {
-		return Anthropic(os.Getenv("BIG_BRAIN_BASE_URL"), os.Getenv("BIG_BRAIN_API_KEY"), s.name), nil
+	baseURL, apiKey := os.Getenv("BIG_BRAIN_BASE_URL"), os.Getenv("BIG_BRAIN_API_KEY")
+	key := buildKey{provider: s.provider, baseURL: baseURL, apiKey: apiKey, name: s.name}
+	if m, ok := builtModels.Load(key); ok {
+		return m.(Model), nil
 	}
-	return OpenAI(os.Getenv("BIG_BRAIN_BASE_URL"), os.Getenv("BIG_BRAIN_API_KEY"), s.name), nil
+	var m Model
+	if s.provider == AnthropicProvider {
+		m = Anthropic(baseURL, apiKey, s.name)
+	} else {
+		m = OpenAI(baseURL, apiKey, s.name)
+	}
+	actual, _ := builtModels.LoadOrStore(key, m)
+	return actual.(Model), nil
 }
 
 // withErr returns a copy carrying err (used by the registry for an unknown-tag

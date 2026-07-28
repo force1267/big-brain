@@ -67,6 +67,84 @@ func TestAnthropicStreamsDeltas(t *testing.T) {
 	}
 }
 
+// happy: message_delta's usage is captured and mapped straight across —
+// Anthropic's convention is already disjoint, unlike OpenAI's, so no
+// subtraction is needed.
+func TestAnthropicUsageParsed(t *testing.T) {
+	srv := fakeAnthropicUpstream(t, http.StatusOK,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},`+
+			`"usage":{"input_tokens":12,"output_tokens":4,"cache_creation_input_tokens":2,`+
+			`"cache_read_input_tokens":1,"output_tokens_details":{"thinking_tokens":3}}}`,
+		`{"type":"message_stop"}`,
+	)
+	defer srv.Close()
+
+	m := Anthropic(srv.URL, "k", "claude-test")
+	stream, err := m.Stream(context.Background(), []Message{NewMessage("hi")}, Params{})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	_, _, usage, err := CollectAll(stream)
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	want := Usage{Input: 12, Output: 4, CacheRead: 1, CacheWrite: 2, Reasoning: 3}
+	if usage != want {
+		t.Fatalf("usage = %+v, want %+v", usage, want)
+	}
+}
+
+// unhappy: no message_delta at all yields the zero Usage — never estimated.
+func TestAnthropicNoUsageYieldsZero(t *testing.T) {
+	srv := fakeAnthropicUpstream(t, http.StatusOK,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+		`{"type":"message_stop"}`,
+	)
+	defer srv.Close()
+
+	m := Anthropic(srv.URL, "k", "claude-test")
+	stream, err := m.Stream(context.Background(), []Message{NewMessage("hi")}, Params{})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	text, _, usage, err := CollectAll(stream)
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if text != "hi" {
+		t.Fatalf("text = %q", text)
+	}
+	if usage != (Usage{}) {
+		t.Fatalf("usage = %+v, want zero (no estimation)", usage)
+	}
+}
+
+// edge: message_delta's usage is cumulative — Anthropic can send more than
+// one before message_stop, and the LAST one is the true final total.
+func TestAnthropicUsageIsLastCumulative(t *testing.T) {
+	srv := fakeAnthropicUpstream(t, http.StatusOK,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+		`{"type":"message_delta","delta":{},"usage":{"input_tokens":10,"output_tokens":2}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":10,"output_tokens":6}}`,
+		`{"type":"message_stop"}`,
+	)
+	defer srv.Close()
+
+	m := Anthropic(srv.URL, "k", "claude-test")
+	stream, err := m.Stream(context.Background(), []Message{NewMessage("hi")}, Params{})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	_, _, usage, err := CollectAll(stream)
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if want := (Usage{Input: 10, Output: 6}); usage != want {
+		t.Fatalf("usage = %+v, want %+v (the last message_delta, not the first)", usage, want)
+	}
+}
+
 // Think=true puts a budgeted thinking config on the wire; unset/false sends
 // nothing (the SDK omits a zero-value ThinkingConfigParamUnion).
 func TestAnthropicThinking(t *testing.T) {
@@ -164,7 +242,7 @@ func TestAnthropicToolRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stream: %v", err)
 	}
-	text, calls, err := CollectAll(stream)
+	text, calls, _, err := CollectAll(stream)
 	if err != nil {
 		t.Fatalf("collect: %v", err)
 	}

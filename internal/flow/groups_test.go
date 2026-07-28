@@ -131,7 +131,7 @@ func TestOneMembersCannotClaimClientStreamButWinnerStillDelivers(t *testing.T) {
 // One's commit-on-acceptance rule: a trigger reached inside a losing member is
 // discarded, not scheduled anyway — only the winner's trigger sticks.
 func TestOneDiscardsLosingMemberTrigger(t *testing.T) {
-	sch := &mockScheduler{}
+	sch := &MockScheduler{}
 	when := time.Now().Add(time.Hour)
 
 	fastStart := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
@@ -153,8 +153,8 @@ func TestOneDiscardsLosingMemberTrigger(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(sch.calls) != 1 || sch.calls[0].bodyID != "body-a" {
-		t.Fatalf("expected only the winning member's trigger committed, got %+v", sch.calls)
+	if len(sch.Calls) != 1 || sch.Calls[0].BodyID != "body-a" {
+		t.Fatalf("expected only the winning member's trigger committed, got %+v", sch.Calls)
 	}
 }
 
@@ -162,7 +162,7 @@ func TestOneDiscardsLosingMemberTrigger(t *testing.T) {
 // inner race resolves (a beats b) and reaches a trigger, but the outer race
 // picks the sibling c instead — a's trigger must never fire.
 func TestNestedOneDiscardsLosingMemberTrigger(t *testing.T) {
-	sch := &mockScheduler{}
+	sch := &MockScheduler{}
 	when := time.Now().Add(time.Hour)
 
 	innerFast := agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, _ *agent.ModelChat) error {
@@ -186,8 +186,8 @@ func TestNestedOneDiscardsLosingMemberTrigger(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(sch.calls) != 0 {
-		t.Fatalf("outer's sibling won; inner winner's trigger must be discarded, got %+v", sch.calls)
+	if len(sch.Calls) != 0 {
+		t.Fatalf("outer's sibling won; inner winner's trigger must be discarded, got %+v", sch.Calls)
 	}
 }
 

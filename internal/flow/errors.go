@@ -28,4 +28,9 @@ var (
 	// schedule under. Loud at registration time rather than a logged warning
 	// that leaves the trigger dead.
 	ErrTriggerBodyID = errors.New("flow: trigger body must resolve to exactly one id")
+
+	// ErrDuplicateWebhook means Webhook was called twice with the same
+	// endpoint id. Loud at registration time rather than a silently
+	// shadowed handler.
+	ErrDuplicateWebhook = errors.New("flow: duplicate webhook endpoint id")
 )

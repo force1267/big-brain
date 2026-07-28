@@ -8,16 +8,6 @@ import (
 	"github.com/force1267/big-brain/internal/agent"
 )
 
-// memStore is a tiny in-memory Store for durability tests.
-type memStore struct{ m map[string][]byte }
-
-func newMemStore() *memStore { return &memStore{m: map[string][]byte{}} }
-func (s *memStore) Get(_ context.Context, k string) ([]byte, bool, error) {
-	v, ok := s.m[k]
-	return v, ok, nil
-}
-func (s *memStore) Put(_ context.Context, k string, v []byte) error { s.m[k] = v; return nil }
-
 // countingAgent records how many times it actually asks the model.
 func countingAgent(counter *atomic.Int64, reply string) agent.Agent {
 	return agent.New().OnMessage(func(_ context.Context, turn *agent.Turn, chat *agent.ModelChat) error {
@@ -30,7 +20,7 @@ func countingAgent(counter *atomic.Int64, reply string) agent.Agent {
 // A completed flow is served from the checkpoint on the second run — its agent
 // does not execute again.
 func TestCheckpointResumes(t *testing.T) {
-	store := newMemStore()
+	store := NewMockStore()
 	var calls atomic.Int64
 	f := New().WithAgent(countingAgent(&calls, "done")).WithId("work")
 
@@ -60,7 +50,7 @@ func TestCheckpointResumes(t *testing.T) {
 
 // A different run id does not share checkpoints.
 func TestCheckpointPerRun(t *testing.T) {
-	store := newMemStore()
+	store := NewMockStore()
 	var calls atomic.Int64
 	f := New().WithAgent(countingAgent(&calls, "x")).WithId("work")
 
@@ -74,7 +64,7 @@ func TestCheckpointPerRun(t *testing.T) {
 // In a chain, only the completed prefix is skipped; the interrupted flow (and
 // after) run on resume. Simulated by saving one flow then resuming the pair.
 func TestCheckpointChainPartial(t *testing.T) {
-	store := newMemStore()
+	store := NewMockStore()
 	var a, b atomic.Int64
 	fa := New().WithAgent(countingAgent(&a, "ra")).WithId("A")
 
@@ -130,7 +120,7 @@ func lastOf(s State) string {
 // Opt-in: with a store available (WithStore) but the flow NOT Durable, nothing
 // is checkpointed — the agent runs again on the second run.
 func TestNoDurableNoCheckpoint(t *testing.T) {
-	store := newMemStore()
+	store := NewMockStore()
 	var calls atomic.Int64
 	f := New().WithAgent(countingAgent(&calls, "done")).WithId("work") // not Durable
 
@@ -149,7 +139,7 @@ func TestNoDurableNoCheckpoint(t *testing.T) {
 // A Durable flow checkpoints: the second run resumes and the agent does not
 // re-execute.
 func TestDurableCheckpoints(t *testing.T) {
-	store := newMemStore()
+	store := NewMockStore()
 	var calls atomic.Int64
 	f := New().WithAgent(countingAgent(&calls, "done")).WithId("work").Durable()
 
@@ -168,7 +158,7 @@ func TestDurableCheckpoints(t *testing.T) {
 // The structure-version guard: a durable flow whose graph changed is not resumed
 // into (its checkpoint is discarded) — unless ForwardCompatible.
 func TestDurableStructureGuard(t *testing.T) {
-	store := newMemStore()
+	store := NewMockStore()
 	var calls atomic.Int64
 
 	v1 := New().WithAgent(countingAgent(&calls, "a")).WithId("work").Durable()
@@ -186,7 +176,7 @@ func TestDurableStructureGuard(t *testing.T) {
 	}
 
 	// ForwardCompatible resumes despite the change.
-	store2 := newMemStore()
+	store2 := NewMockStore()
 	var calls2 atomic.Int64
 	ctx2 := WithStore(context.Background(), store2, "run-2")
 	w1 := New().WithAgent(countingAgent(&calls2, "a")).WithId("work").Durable(ForwardCompatible())

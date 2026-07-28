@@ -10,12 +10,8 @@ import (
 )
 
 func toolNamed(name string) model.Tool {
-	return model.NewTool().As(name).Is("does " + name).WithSchema(emptySchema{})
+	return model.NewTool().As(name).Is("does " + name).WithSchema(model.MockSchema{"type": "object"})
 }
-
-type emptySchema struct{}
-
-func (emptySchema) JSONSchema() map[string]any { return map[string]any{"type": "object"} }
 
 // Ask sends this ask's tools and choice, and never runs a local handler —
 // executing a side effect cannot be an implicit consequence of asking.
@@ -125,6 +121,45 @@ func TestResolveLoop(t *testing.T) {
 	}
 	if resultMsgs != 1 || results != 2 {
 		t.Fatalf("results spread over %d messages (%d results)", resultMsgs, results)
+	}
+}
+
+// Resolve's tool rounds each re-ask the model, and each ask really is billed
+// again — the tally must SUM every round's usage, not just remember the last.
+func TestResolveSumsUsageAcrossRounds(t *testing.T) {
+	tool := toolNamed("read_sensor").OnCall(func(_ context.Context, c model.ToolCall) (string, error) {
+		return "ok", nil
+	})
+	mock := &model.Mock{
+		Script: []string{"", "", "done"},
+		ToolCalls: [][]model.ToolCall{
+			{{ID: "c1", Name: "read_sensor"}},
+			{{ID: "c2", Name: "read_sensor"}},
+			nil,
+		},
+		Usage: &model.Usage{Input: 10, Output: 5},
+	}
+	tally := &model.Tally{}
+	ctx := WithTally(context.Background(), tally)
+	chat := NewChat(ctx, model.Bound(mock))
+
+	reply, err := chat.WithTools(tool).Resolve(model.NewMessage("go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.ReadAll() != "done" {
+		t.Fatalf("reply = %q", reply.ReadAll())
+	}
+	if mock.Calls != 3 {
+		t.Fatalf("model asked %d times, want 3", mock.Calls)
+	}
+	if want := (model.Usage{Input: 30, Output: 15}); tally.Total() != want {
+		t.Fatalf("tally.Total() = %+v, want %+v (sum of 3 rounds, not the last)", tally.Total(), want)
+	}
+	// The final Reply itself reports only its OWN ask's usage, not the round
+	// sum — bb.Spent(ctx) is where the request-wide total lives.
+	if got := reply.Usage(); got != (model.Usage{Input: 10, Output: 5}) {
+		t.Fatalf("reply.Usage() = %+v, want the final ask's own usage", got)
 	}
 }
 

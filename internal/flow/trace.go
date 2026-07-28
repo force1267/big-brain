@@ -6,6 +6,8 @@ import (
 	"io"
 	"sync"
 	"time"
+
+	"github.com/force1267/big-brain/pkg/model"
 )
 
 // Event is one thing that happened while a flow ran — a flow boundary, an agent
@@ -16,6 +18,7 @@ type Event struct {
 	Detail string        `json:"detail,omitempty"` // e.g. the selected id
 	At     time.Time     `json:"at"`
 	Dur    time.Duration `json:"dur_ns,omitempty"` // set on flow.end
+	Usage  *model.Usage  `json:"usage,omitempty"`  // set on flow.end — see internal/flow/flow.go's Basic.run
 }
 
 // Tracer receives flow events. Backends: NoTrace (default), Recorder (tests),

@@ -15,6 +15,7 @@ import (
 	"github.com/force1267/big-brain/internal/anthropic"
 	"github.com/force1267/big-brain/internal/flow"
 	"github.com/force1267/big-brain/internal/openai"
+	"github.com/force1267/big-brain/internal/telemetry"
 	"github.com/force1267/big-brain/pkg/engine"
 	"github.com/force1267/big-brain/pkg/model"
 	"github.com/google/uuid"
@@ -157,6 +158,15 @@ func Serve(ctx context.Context, f flow.Flow, opts ...Option) error {
 	for _, o := range opts {
 		o(&c)
 	}
+	// Telemetry lifecycle: noop unless BIG_BRAIN_TELEMETRY selects stdout/otlp
+	// (internal/telemetry.Start). Every Monitored wrapper in the codebase
+	// already targets the global MeterProvider, so nothing else needs to know
+	// this ran.
+	shutdownTelemetry, err := telemetry.Start(ctx)
+	if err != nil {
+		return err
+	}
+	defer shutdownTelemetry(context.Background())
 	// Run the durable job worker alongside HTTP: it fires the scheduled/deferred
 	// flows (crons, one-shots) registered via triggers. Stops when ctx is done.
 	// The worker ctx carries the scheduler too, so a fired body that itself
@@ -191,6 +201,9 @@ type reply struct {
 	// streaming handlers' own "nobody streamed" fallback must not fire again
 	// and re-send the same text.
 	delivered bool
+	// usage is the sum of every model call the run made, across every flow,
+	// agent, and tool round — see internal/serve.run and docs/design-metrics.md.
+	usage model.Usage
 }
 
 // triggerCtx wires Store/Scheduler/Webhooks onto ctx — everything a flow needs
@@ -218,17 +231,23 @@ func (s *server) triggerCtx(ctx context.Context, runID string) context.Context {
 
 func (s *server) run(ctx context.Context, f flow.Flow, runID string, msgs []model.Message, req agent.Request) (reply, error) {
 	ctx = s.triggerCtx(ctx, runID)
+	tally := &model.Tally{}
+	ctx = agent.WithTally(ctx, tally)
 	out, err := flow.Run(ctx, f, flow.State{Chat: msgs, Req: req}, s.tracer)
 	if err != nil {
-		return reply{}, err
+		return reply{usage: tally.Total()}, err
 	}
 	// The keystone rule over the whole transcript: a call with no matching result
 	// anywhere in the chat is owed to the client; one the client already answered,
 	// or a brain resolved internally, is settled history and stays in.
-	return reply{text: out.Answer(), calls: model.Unresolved(out.Chat), delivered: out.Sent() >= 0}, nil
+	return reply{
+		text: out.Answer(), calls: model.Unresolved(out.Chat), delivered: out.Sent() >= 0,
+		usage: tally.Total(),
+	}, nil
 }
 
 func (s *server) openai(w http.ResponseWriter, r *http.Request) {
+	reqStart := time.Now()
 	var req openai.ChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		openai.WriteError(w, http.StatusBadRequest, err.Error())
@@ -246,7 +265,9 @@ func (s *server) openai(w http.ResponseWriter, r *http.Request) {
 	if req.Stream {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fl := http.NewResponseController(w)
+		var ttftOnce sync.Once
 		sink := &agent.Sink{Write: func(_ context.Context, chunk string) error {
+			ttftOnce.Do(func() { recordRequestTTFT(r.Context(), name, time.Since(reqStart)) })
 			if err := openai.WriteChunk(w, id, name, chunk); err != nil {
 				return err
 			}
@@ -257,6 +278,7 @@ func (s *server) openai(w http.ResponseWriter, r *http.Request) {
 			logrus.WithField("model", name).Error(fmt.Errorf("serve: chat completion: %w", err))
 			openai.WriteStreamError(w, err.Error())
 			fl.Flush()
+			recordRequestSeconds(r.Context(), name, "error", true, time.Since(reqStart))
 			return
 		}
 		if !out.delivered && !sink.Claimed() { // nobody streamed or flushed: emit the buffered reply as one delta
@@ -264,8 +286,9 @@ func (s *server) openai(w http.ResponseWriter, r *http.Request) {
 		}
 		calls := openai.Calls(out.calls)
 		openai.WriteToolCalls(w, id, name, calls)
-		openai.WriteDone(w, id, name, calls)
+		openai.WriteDone(w, id, name, calls, out.usage, req.IncludeUsage())
 		fl.Flush()
+		recordRequestSeconds(r.Context(), name, "ok", true, time.Since(reqStart))
 		return
 	}
 
@@ -273,12 +296,15 @@ func (s *server) openai(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		logrus.WithField("model", name).Error(fmt.Errorf("serve: chat completion: %w", err))
 		openai.WriteError(w, http.StatusInternalServerError, err.Error())
+		recordRequestSeconds(r.Context(), name, "error", false, time.Since(reqStart))
 		return
 	}
-	openai.WriteResponse(w, id, name, out.text, openai.Calls(out.calls))
+	openai.WriteResponse(w, id, name, out.text, openai.Calls(out.calls), out.usage)
+	recordRequestSeconds(r.Context(), name, "ok", false, time.Since(reqStart))
 }
 
 func (s *server) anthropic(w http.ResponseWriter, r *http.Request) {
+	reqStart := time.Now()
 	var req anthropic.MessagesRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		anthropic.WriteError(w, http.StatusBadRequest, err.Error())
@@ -302,7 +328,9 @@ func (s *server) anthropic(w http.ResponseWriter, r *http.Request) {
 		fl := http.NewResponseController(w)
 		anthropic.WriteStart(w, id, name)
 		fl.Flush()
+		var ttftOnce sync.Once
 		sink := &agent.Sink{Write: func(_ context.Context, chunk string) error {
+			ttftOnce.Do(func() { recordRequestTTFT(r.Context(), name, time.Since(reqStart)) })
 			if err := anthropic.WriteDelta(w, chunk); err != nil {
 				return err
 			}
@@ -312,17 +340,21 @@ func (s *server) anthropic(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			logrus.WithField("model", name).Error(fmt.Errorf("serve: messages: %w", err))
 			// WriteStart already opened block 0 above; close it before the
-			// error frame so the stream isn't left with a dangling block.
-			anthropic.WriteStop(w, nil)
+			// error frame so the stream isn't left with a dangling block. The
+			// run errored, so out.usage isn't available — report the zero
+			// Usage rather than guess.
+			anthropic.WriteStop(w, nil, model.Usage{})
 			anthropic.WriteStreamError(w, err.Error())
 			fl.Flush()
+			recordRequestSeconds(r.Context(), name, "error", true, time.Since(reqStart))
 			return
 		}
 		if !out.delivered && !sink.Claimed() {
 			anthropic.WriteDelta(w, out.text)
 		}
-		anthropic.WriteStop(w, anthropic.Calls(out.calls))
+		anthropic.WriteStop(w, anthropic.Calls(out.calls), out.usage)
 		fl.Flush()
+		recordRequestSeconds(r.Context(), name, "ok", true, time.Since(reqStart))
 		return
 	}
 
@@ -330,9 +362,11 @@ func (s *server) anthropic(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		logrus.WithField("model", name).Error(fmt.Errorf("serve: messages: %w", err))
 		anthropic.WriteError(w, http.StatusInternalServerError, err.Error())
+		recordRequestSeconds(r.Context(), name, "error", false, time.Since(reqStart))
 		return
 	}
-	anthropic.WriteResponse(w, id, name, out.text, anthropic.Calls(out.calls))
+	anthropic.WriteResponse(w, id, name, out.text, anthropic.Calls(out.calls), out.usage)
+	recordRequestSeconds(r.Context(), name, "ok", false, time.Since(reqStart))
 }
 
 func (s *server) models(w http.ResponseWriter, _ *http.Request) {

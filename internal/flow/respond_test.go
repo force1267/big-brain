@@ -180,7 +180,7 @@ func TestGroupMemberContentFlushedAtNextRespond(t *testing.T) {
 // connection saw nothing, so the retried request's client must see the whole
 // answer, not just what happened after the crash.
 func TestRespondRedeliversCompletedStageOnDurableResume(t *testing.T) {
-	store := newMemStore()
+	store := NewMockStore()
 	var calls atomic.Int64
 	stage1 := New().WithAgent(countingAgent(&calls, "stage one")).WithId("stage1").Durable()
 	stage2 := New().WithAgent(mockAgent("stage two")).WithId("stage2")

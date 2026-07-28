@@ -13,14 +13,8 @@ type argsA struct {
 	Days int    `json:"days,omitempty"`
 }
 
-// schemaOf is bb.Schema[T]'s job; here a tiny stand-in keeps pkg/model free of
-// a dependency on the facade while still exercising the Schema interface.
-type fakeSchema map[string]any
-
-func (f fakeSchema) JSONSchema() map[string]any { return f }
-
-func schemaA() fakeSchema {
-	return fakeSchema{
+func schemaA() MockSchema {
+	return MockSchema{
 		"type": "object",
 		"properties": map[string]any{
 			"city": map[string]any{"type": "string"},
@@ -238,7 +232,7 @@ func TestCollectAll(t *testing.T) {
 	stream <- Chunk{Content: "lo"}
 	stream <- Chunk{Call: &call}
 	close(stream)
-	text, calls, err := CollectAll(stream)
+	text, calls, _, err := CollectAll(stream)
 	if err != nil || text != "hello" || len(calls) != 1 || calls[0].ID != "c1" {
 		t.Fatalf("collected %q %+v %v", text, calls, err)
 	}
@@ -247,8 +241,29 @@ func TestCollectAll(t *testing.T) {
 	failing <- Chunk{Content: "partial"}
 	failing <- Chunk{Err: errors.New("boom")}
 	close(failing)
-	text, _, err = CollectAll(failing)
+	text, _, _, err = CollectAll(failing)
 	if err == nil || text != "partial" {
 		t.Fatalf("error path: %q %v", text, err)
+	}
+}
+
+// CollectAll also returns the provider-reported Usage (zero when none was
+// ever sent — never estimated).
+func TestCollectAllUsage(t *testing.T) {
+	stream := make(chan Chunk, 2)
+	stream <- Chunk{Content: "hi"}
+	stream <- Chunk{Usage: &Usage{Input: 10, Output: 2}}
+	close(stream)
+	_, _, usage, err := CollectAll(stream)
+	if err != nil || usage != (Usage{Input: 10, Output: 2}) {
+		t.Fatalf("usage = %+v, err = %v", usage, err)
+	}
+
+	noUsage := make(chan Chunk, 1)
+	noUsage <- Chunk{Content: "hi"}
+	close(noUsage)
+	_, _, usage, err = CollectAll(noUsage)
+	if err != nil || usage != (Usage{}) {
+		t.Fatalf("expected zero Usage when none reported, got %+v", usage)
 	}
 }

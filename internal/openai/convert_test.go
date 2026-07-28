@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/force1267/big-brain/pkg/model"
 )
 
 // A client's tool declarations and its tool_choice survive the wire, in both
@@ -84,7 +86,7 @@ func TestDecodeTranscriptRoundTrip(t *testing.T) {
 // An unanswered call turns a completion into a tool_calls completion.
 func TestWriteResponseWithCalls(t *testing.T) {
 	rec := httptest.NewRecorder()
-	WriteResponse(rec, "id1", "jarvis", "let me check", Calls(callsFixture()))
+	WriteResponse(rec, "id1", "jarvis", "let me check", Calls(callsFixture()), model.Usage{})
 	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -122,7 +124,7 @@ func TestStreamToolCalls(t *testing.T) {
 	if err := WriteToolCalls(&b, "id1", "jarvis", calls); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteDone(&b, "id1", "jarvis", calls); err != nil {
+	if err := WriteDone(&b, "id1", "jarvis", calls, model.Usage{}, false); err != nil {
 		t.Fatal(err)
 	}
 	out := b.String()

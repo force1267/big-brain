@@ -26,13 +26,13 @@ type house struct {
 type world struct {
 	mu      sync.Mutex
 	devices map[string]string
-	offset  float64 // sensor calibration, BIG_BRAIN_DEMO_TEMP_OFFSET
-	srv     *http.Server
+	said    []string // every /notify text, in order — the sink a test reads
+	offset  float64  // sensor calibration, BIG_BRAIN_DEMO_TEMP_OFFSET
 	now     func() time.Time
 }
 
-func startWorld(addr string) *world {
-	w := &world{
+func newWorld() *world {
+	return &world{
 		devices: map[string]string{
 			"porch light":  "off",
 			"living light": "off",
@@ -46,7 +46,19 @@ func startWorld(addr string) *world {
 		offset: envFloat("BIG_BRAIN_DEMO_TEMP_OFFSET", 0),
 		now:    time.Now,
 	}
+}
 
+// heard is a snapshot of every /notify text received so far, in order — what a
+// test reads to assert Jarvis actually spoke into the house.
+func (w *world) heard() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]string(nil), w.said...)
+}
+
+// handler is the dummy house's HTTP surface. Callers decide how to serve it:
+// main wraps it in a fixed-address *http.Server, a test in an httptest.Server.
+func (w *world) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /house", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, w.snapshot())
@@ -86,16 +98,16 @@ func startWorld(addr string) *world {
 			Text string `json:"text"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		fmt.Fprintf(os.Stderr, "🔔 %s\n", strings.TrimSpace(body.Text))
+		text := strings.TrimSpace(body.Text)
+		w.mu.Lock()
+		w.said = append(w.said, text)
+		w.mu.Unlock()
+		fmt.Fprintf(os.Stderr, "🔔 %s\n", text)
 		fmt.Fprint(rw, "ok")
 	})
 
-	w.srv = &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	go w.srv.ListenAndServe()
-	return w
+	return mux
 }
-
-func (w *world) shutdown() { _ = w.srv.Shutdown(context.Background()) }
 
 // snapshot derives the sensor readings from the clock and the device states: the
 // heater warms the house, an open window cools it, the sun does the rest.

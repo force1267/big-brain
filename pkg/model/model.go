@@ -41,10 +41,12 @@ type Params struct {
 // complete tool call the model requested. A non-nil Err ends the stream and
 // reports why. Tool-call ARGUMENTS are not streamed in v1 — a provider buffers
 // a call's argument deltas and emits it whole — so a Chunk carrying a Call is
-// always complete.
+// always complete. Usage is non-nil only on a terminal, content-less
+// accounting chunk — providers report it last, after all content and calls.
 type Chunk struct {
 	Content string
 	Call    *ToolCall
+	Usage   *Usage
 	Err     error
 }
 
@@ -58,27 +60,32 @@ type Model interface {
 type Models map[Role]Model
 
 // Collect drains a stream into the full completion text, returning the
-// terminal error if the stream ended badly. Tool calls are discarded — use
-// CollectAll where they matter.
+// terminal error if the stream ended badly. Tool calls and usage are
+// discarded — use CollectAll where they matter.
 func Collect(stream <-chan Chunk) (string, error) {
-	text, _, err := CollectAll(stream)
+	text, _, _, err := CollectAll(stream)
 	return text, err
 }
 
-// CollectAll drains a stream into the completion text and the tool calls the
-// model requested. A completion can carry both: an assistant may answer in
-// prose and ask for a tool in the same turn.
-func CollectAll(stream <-chan Chunk) (string, []ToolCall, error) {
+// CollectAll drains a stream into the completion text, the tool calls the
+// model requested, and the provider-reported Usage (zero if the provider
+// reported none — never estimated). A completion can carry both text and
+// calls: an assistant may answer in prose and ask for a tool in the same turn.
+func CollectAll(stream <-chan Chunk) (string, []ToolCall, Usage, error) {
 	var b []byte
 	var calls []ToolCall
+	var usage Usage
 	for c := range stream {
 		if c.Err != nil {
-			return string(b), calls, c.Err
+			return string(b), calls, usage, c.Err
 		}
 		if c.Call != nil {
 			calls = append(calls, *c.Call)
 		}
+		if c.Usage != nil {
+			usage = *c.Usage
+		}
 		b = append(b, c.Content...)
 	}
-	return string(b), calls, nil
+	return string(b), calls, usage, nil
 }

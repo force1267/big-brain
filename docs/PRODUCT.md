@@ -15,6 +15,9 @@ Anthropic-compatible). From the outside it is just another model endpoint —
 every existing chat UI, IDE plugin, and SDK is a free client. Inside, a
 request runs through a **brain**: model calls, memory, tools, and background
 work that make it far more effective than one model for a specialized task.
+The disguise extends to cost: bb's `usage` block is the honest SUM of every
+upstream call the brain made, not a mirror of the client's own prompt — a
+transparent proxy is just the degenerate case where the two coincide.
 
 ## The one thing the engine sells
 
@@ -33,9 +36,11 @@ engine earns its place by owning the parts they would get wrong or forget:
   point in a game — the run continues from where it was.
 
 - **Observability, free from the same boundaries.** Every flow start/end,
-  select, response, and cached-resume is a timed trace event. Backends: a
-  diagnostics ring (always on, at `/v1/diagnostics/trace`), a jsonl writer, or
-  the author's own. Debugging is a byproduct of running the tree.
+  select, response, and cached-resume is a timed trace event, and flow.end
+  carries what that flow actually spent (`reply.Usage()`, `bb.Spent(ctx)`).
+  Backends: a diagnostics ring (always on, at `/v1/diagnostics/trace`), a
+  jsonl writer, OTel (opt-in via `BIG_BRAIN_TELEMETRY`), or the author's own.
+  Debugging is a byproduct of running the tree.
 
 - **The boring boundary.** OpenAI/Anthropic-compatible serving, `/models`,
   startup validation of the whole wiring, faithful passthrough of the chat

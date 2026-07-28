@@ -77,6 +77,38 @@ func TestSentinelMessagesSharePackagePrefix(t *testing.T) {
 	}
 }
 
+// Build memoizes by (provider, baseURL, apiKey, name): two Specs resolving to
+// the same tuple share one client instead of each constructing its own,
+// which is what makes a Spec safe to Build() on every Ask.
+func TestSpecBuildMemoizesByTuple(t *testing.T) {
+	t.Setenv("BIG_BRAIN_BASE_URL", "http://memo.test.invalid")
+	t.Setenv("BIG_BRAIN_API_KEY", "k")
+
+	s := Spec{}.WithName("memo-test-model")
+	m1, err := s.Build()
+	if err != nil {
+		t.Fatalf("Build 1: %v", err)
+	}
+	m2, err := s.Build()
+	if err != nil {
+		t.Fatalf("Build 2: %v", err)
+	}
+	c1 := m1.(monitoredModel).inner.(openaiModel).client
+	c2 := m2.(monitoredModel).inner.(openaiModel).client
+	if c1 != c2 {
+		t.Fatalf("Build() constructed a new client instead of reusing the memoized one")
+	}
+
+	// A different name is a different tuple: no incidental sharing.
+	other, err := Spec{}.WithName("memo-test-model-2").Build()
+	if err != nil {
+		t.Fatalf("Build other: %v", err)
+	}
+	if other.(monitoredModel).inner.(openaiModel).client == c1 {
+		t.Fatalf("different names must not share a client")
+	}
+}
+
 func TestNewMessageAndAs(t *testing.T) {
 	m := NewMessage("hi")
 	if m.Role != "user" || m.Content != "hi" {

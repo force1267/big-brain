@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/force1267/big-brain/pkg/model"
 )
 
 // Function is a tool's callable half: the name the model emits, what it is
@@ -93,7 +95,18 @@ type ChatRequest struct {
 	// "high"/…). bb's Think is a bare on/off, so any non-empty value here
 	// means "on" — see Think.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// StreamOptions carries include_usage: streaming clients that want a
+	// final usage chunk (see WriteDone) must ask for it, exactly as bb itself
+	// asks its own upstream (pkg/model/openai.go).
+	StreamOptions struct {
+		IncludeUsage bool `json:"include_usage"`
+	} `json:"stream_options"`
 }
+
+// IncludeUsage reports whether the client asked for a final usage chunk on a
+// streaming completion (stream_options.include_usage). Non-streaming
+// responses always carry usage regardless of this flag.
+func (r ChatRequest) IncludeUsage() bool { return r.StreamOptions.IncludeUsage }
 
 // MaxOutputTokens resolves the token cap the client asked for, preferring the
 // current max_completion_tokens field over the deprecated max_tokens.
@@ -148,20 +161,41 @@ type chatResponse struct {
 	Created int64    `json:"created"`
 	Model   string   `json:"model"`
 	Choices []choice `json:"choices"`
+	Usage   *usage   `json:"usage,omitempty"`
+}
+
+// usage is this wire's token-accounting shape. bb reports the SUM of every
+// upstream model call the request made (docs/design-metrics.md's answer
+// (a)): a brain that ran a router, a capability agent, and two tool rounds
+// genuinely spent all of it, even though prompt_tokens will then exceed the
+// size of the client's own prompt — that is the honest cost, not a bug.
+type usage struct {
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	TotalTokens      int64 `json:"total_tokens"`
+}
+
+// usageFrom converts bb's normalized Usage into this wire's shape. PromptTokens
+// is the total input (Input+CacheRead+CacheWrite — bb's Input already excludes
+// the cached/cache-write portions, see pkg/model/usage.go).
+func usageFrom(u model.Usage) *usage {
+	prompt := u.Input + u.CacheRead + u.CacheWrite
+	return &usage{PromptTokens: prompt, CompletionTokens: u.Output, TotalTokens: prompt + u.Output}
 }
 
 // WriteResponse writes a complete (non-streaming) chat completion. Unanswered
 // tool calls make it a tool_calls completion: the client is expected to run
 // them and send the whole transcript back, exactly as it would to a real model.
-func WriteResponse(w http.ResponseWriter, id, model, content string, calls []ToolCall) {
+func WriteResponse(w http.ResponseWriter, id, modelName, content string, calls []ToolCall, u model.Usage) {
 	reason := FinishReason(calls)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(chatResponse{
-		ID: id, Object: "chat.completion", Created: time.Now().Unix(), Model: model,
+		ID: id, Object: "chat.completion", Created: time.Now().Unix(), Model: modelName,
 		Choices: []choice{{
 			Message:      &Message{Role: "assistant", Content: content, ToolCalls: calls},
 			FinishReason: &reason,
 		}},
+		Usage: usageFrom(u),
 	})
 }
 
@@ -206,12 +240,20 @@ func WriteChunk(w io.Writer, id, model, delta string) error {
 
 // WriteDone terminates a streaming chat completion, reporting how it ended
 // (pass the calls that went out, if any, so the client knows to run them).
-func WriteDone(w io.Writer, id, model string, calls []ToolCall) error {
+// includeUsage gates the usage field on the terminal chunk — set it from
+// ChatRequest.IncludeUsage(), since a client that never asked for
+// stream_options.include_usage gets a response shaped like every other
+// OpenAI stream, not a surprise extra field.
+func WriteDone(w io.Writer, id, modelName string, calls []ToolCall, u model.Usage, includeUsage bool) error {
 	stop := FinishReason(calls)
-	body, err := json.Marshal(chatResponse{
-		ID: id, Object: "chat.completion.chunk", Created: time.Now().Unix(), Model: model,
+	resp := chatResponse{
+		ID: id, Object: "chat.completion.chunk", Created: time.Now().Unix(), Model: modelName,
 		Choices: []choice{{Delta: &Message{}, FinishReason: &stop}},
-	})
+	}
+	if includeUsage {
+		resp.Usage = usageFrom(u)
+	}
+	body, err := json.Marshal(resp)
 	if err != nil {
 		return err
 	}

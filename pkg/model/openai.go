@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	openai "github.com/openai/openai-go/v3"
@@ -53,6 +54,13 @@ func (m openaiModel) Stream(ctx context.Context, msgs []Message, p Params) (<-ch
 	if c := openaiToolChoice(p.ToolChoice); c != nil {
 		body.ToolChoice = *c
 	}
+	// Ask for the terminal usage chunk (a choices:[] frame at stream end).
+	// Some OpenAI-compatible endpoints (vLLM, Ollama, older proxies) reject or
+	// ignore stream_options entirely; BIG_BRAIN_STREAM_USAGE=false is the
+	// escape hatch for those until a per-endpoint auto-retry is worth building.
+	if os.Getenv("BIG_BRAIN_STREAM_USAGE") != "false" {
+		body.StreamOptions.IncludeUsage = openai.Bool(true)
+	}
 
 	stream := m.client.Chat.Completions.NewStreaming(ctx, body)
 	if err := stream.Err(); err != nil {
@@ -68,8 +76,17 @@ func (m openaiModel) Stream(ctx context.Context, msgs []Message, p Params) (<-ch
 		// text, so they are accumulated here and emitted whole at the end —
 		// which also means a Chunk carrying a Call is always complete.
 		calls := newCallBuf()
+		var usage *Usage
 		for stream.Next() {
 			c := stream.Current()
+			// Usage can arrive on its own choices:[] frame (the common case)
+			// or, on some OpenAI-compatible servers, riding along a chunk that
+			// also carries choices — check it unconditionally so neither shape
+			// is missed.
+			if c.Usage.JSON.TotalTokens.Valid() {
+				u := openaiUsage(c.Usage)
+				usage = &u
+			}
 			if len(c.Choices) == 0 {
 				continue
 			}
@@ -100,8 +117,31 @@ func (m openaiModel) Stream(ctx context.Context, msgs []Message, p Params) (<-ch
 				return
 			}
 		}
+		if usage != nil {
+			select {
+			case out <- Chunk{Usage: usage}:
+			case <-ctx.Done():
+			}
+		}
 	}()
 	return out, nil
+}
+
+// openaiUsage normalizes OpenAI's usage shape into bb's disjoint convention.
+// OpenAI's cached_tokens and cache_write_tokens are SUBSETS of prompt_tokens
+// (unlike Anthropic's, which are already disjoint), so Input is what's left
+// after subtracting both — see docs/design-metrics.md's cache-accounting
+// trap and pkg/model/usage.go's doc comment.
+func openaiUsage(u openai.CompletionUsage) Usage {
+	cacheRead := u.PromptTokensDetails.CachedTokens
+	cacheWrite := u.PromptTokensDetails.CacheWriteTokens
+	return Usage{
+		Input:      u.PromptTokens - cacheRead - cacheWrite,
+		Output:     u.CompletionTokens,
+		CacheRead:  cacheRead,
+		CacheWrite: cacheWrite,
+		Reasoning:  u.CompletionTokensDetails.ReasoningTokens,
+	}
 }
 
 // openaiMessages renders one neutral Message as OpenAI wire messages. Results

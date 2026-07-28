@@ -56,6 +56,143 @@ func TestOpenAIStreamsDeltas(t *testing.T) {
 	}
 }
 
+// usageUpstream is fakeUpstream plus an optional terminal usage frame and a
+// captured decoded request body, so a test can assert on both the parsed
+// Usage and what bb actually sent upstream.
+func usageUpstream(t *testing.T, deltas []string, usage map[string]any, captured *map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(captured); err != nil {
+			t.Errorf("upstream decode: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, d := range deltas {
+			fmt.Fprintf(w, `data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":%q}}]}`+"\n\n", d)
+		}
+		if usage != nil {
+			body, _ := json.Marshal(map[string]any{"object": "chat.completion.chunk", "choices": []any{}, "usage": usage})
+			fmt.Fprintf(w, "data: %s\n\n", body)
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+}
+
+// happy: a terminal choices:[] usage frame is parsed and normalized —
+// cached_tokens/cache_write_tokens are subtracted out of prompt_tokens since
+// OpenAI's cache counts are a SUBSET of the total (unlike Anthropic's).
+func TestOpenAIUsageParsedAndNormalized(t *testing.T) {
+	var req map[string]any
+	srv := usageUpstream(t, []string{"hi"}, map[string]any{
+		"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
+		"prompt_tokens_details":     map[string]any{"cached_tokens": 30, "cache_write_tokens": 5},
+		"completion_tokens_details": map[string]any{"reasoning_tokens": 8},
+	}, &req)
+	defer srv.Close()
+
+	m := OpenAI(srv.URL, "k", "gpt-test")
+	stream, err := m.Stream(context.Background(), []Message{NewMessage("hi")}, Params{})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	_, _, usage, err := CollectAll(stream)
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	want := Usage{Input: 65, Output: 20, CacheRead: 30, CacheWrite: 5, Reasoning: 8}
+	if usage != want {
+		t.Fatalf("usage = %+v, want %+v", usage, want)
+	}
+}
+
+// unhappy: a provider that never sends usage yields the zero Usage — the
+// regression test for the no-estimation fallback policy. Text is unaffected.
+func TestOpenAINoUsageYieldsZero(t *testing.T) {
+	var req map[string]any
+	srv := usageUpstream(t, []string{"hel", "lo"}, nil, &req)
+	defer srv.Close()
+
+	m := OpenAI(srv.URL, "k", "gpt-test")
+	stream, err := m.Stream(context.Background(), []Message{NewMessage("hi")}, Params{})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	text, _, usage, err := CollectAll(stream)
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if text != "hello" {
+		t.Fatalf("text = %q, want %q", text, "hello")
+	}
+	if usage != (Usage{}) {
+		t.Fatalf("usage = %+v, want zero (no estimation)", usage)
+	}
+}
+
+// edge: a chunk that carries both a real choices delta AND usage (some
+// OpenAI-compatible servers do this) must still have its usage captured.
+func TestOpenAIUsageAlongsideChoices(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"}}],`+
+			`"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	m := OpenAI(srv.URL, "k", "gpt-test")
+	stream, err := m.Stream(context.Background(), []Message{NewMessage("hi")}, Params{})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	text, _, usage, err := CollectAll(stream)
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if text != "hi" {
+		t.Fatalf("text = %q", text)
+	}
+	if want := (Usage{Input: 10, Output: 2}); usage != want {
+		t.Fatalf("usage = %+v, want %+v", usage, want)
+	}
+}
+
+// branch: stream_options.include_usage is actually sent, and
+// BIG_BRAIN_STREAM_USAGE=false suppresses it (the escape hatch for
+// OpenAI-compatible endpoints that reject the field).
+func TestOpenAIIncludeUsageRequested(t *testing.T) {
+	var req map[string]any
+	srv := usageUpstream(t, []string{"hi"}, nil, &req)
+	defer srv.Close()
+
+	m := OpenAI(srv.URL, "k", "gpt-test")
+	stream, err := m.Stream(context.Background(), []Message{NewMessage("hi")}, Params{})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	Collect(stream)
+	opts, ok := req["stream_options"].(map[string]any)
+	if !ok || opts["include_usage"] != true {
+		t.Fatalf("stream_options.include_usage not sent: %v", req["stream_options"])
+	}
+}
+
+func TestOpenAIStreamUsageEnvHatch(t *testing.T) {
+	t.Setenv("BIG_BRAIN_STREAM_USAGE", "false")
+	var req map[string]any
+	srv := usageUpstream(t, []string{"hi"}, nil, &req)
+	defer srv.Close()
+
+	m := OpenAI(srv.URL, "k", "gpt-test")
+	stream, err := m.Stream(context.Background(), []Message{NewMessage("hi")}, Params{})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	Collect(stream)
+	if opts, ok := req["stream_options"].(map[string]any); ok && opts["include_usage"] == true {
+		t.Fatalf("BIG_BRAIN_STREAM_USAGE=false should suppress include_usage, got %v", opts)
+	}
+}
+
 func TestOpenAIUpstreamFailure(t *testing.T) {
 	srv := fakeUpstream(t, http.StatusInternalServerError)
 	defer srv.Close()
@@ -159,7 +296,7 @@ func TestOpenAIToolRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stream: %v", err)
 	}
-	text, calls, err := CollectAll(stream)
+	text, calls, _, err := CollectAll(stream)
 	if err != nil {
 		t.Fatalf("collect: %v", err)
 	}

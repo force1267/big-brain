@@ -1,9 +1,11 @@
 package bb
 
 import (
+	"context"
 	"errors"
 	"testing"
 
+	"github.com/force1267/big-brain/internal/agent"
 	"github.com/force1267/big-brain/pkg/model"
 )
 
@@ -50,6 +52,21 @@ func TestNewModelUnknownTagRecordsError(t *testing.T) {
 	m := NewModel("ghost")
 	if !errors.Is(m.Err(), model.ErrUnknownModelTags) {
 		t.Fatalf("unknown tag err = %v", m.Err())
+	}
+}
+
+// Spent reads the ctx-carried tally through internal/agent — zero outside a
+// served request, the running sum once one is installed.
+func TestSpent(t *testing.T) {
+	if got := Spent(context.Background()); got != (Usage{}) {
+		t.Fatalf("Spent outside a request = %+v, want zero", got)
+	}
+
+	tally := &model.Tally{}
+	tally.Add(model.Usage{Input: 3, Output: 1})
+	ctx := agent.WithTally(context.Background(), tally)
+	if got := Spent(ctx); got != (Usage{Input: 3, Output: 1}) {
+		t.Fatalf("Spent = %+v, want {Input:3 Output:1}", got)
 	}
 }
 

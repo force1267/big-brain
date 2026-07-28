@@ -13,6 +13,12 @@
 // them without growing a method. Unresolved states the keystone rule in one
 // function: a call with no matching result is what a brain owes its client.
 //
+// Usage is the fourth thing a Chunk can carry: a provider-reported token
+// count, always on its own terminal chunk. Tally is the plain mutex-plus-total
+// that sums Usage across every call a request makes — infrastructure, not an
+// interface, because there is exactly one legal way to combine two Usages
+// (Add) and no second implementation would ever exist.
+//
 // OpenAI and Anthropic are two implementations of the same Model interface,
 // each translating the neutral Message/Params/Chunk shapes into its own
 // wire framing (a system message vs. a top-level system field; a dedicated

@@ -8,17 +8,6 @@ import (
 	"github.com/force1267/big-brain/pkg/model"
 )
 
-// jsonSchema is a local Schema impl so the agent package doesn't import bb.
-type jsonSchema struct{ valid bool }
-
-func (jsonSchema) JSONSchema() map[string]any { return map[string]any{"type": "object"} }
-func (s jsonSchema) Validate(data []byte) error {
-	if s.valid {
-		return nil
-	}
-	return errors.New("bad shape")
-}
-
 func boundAgent(chunks ...string) Agent {
 	return New().WithModel(model.Bound(&model.Mock{Chunks: chunks}))
 }
@@ -62,13 +51,13 @@ func TestAskUpstream(t *testing.T) {
 
 // Ask validates against a schema: pass and fail branches.
 func TestAskSchema(t *testing.T) {
-	ok := boundAgent(`{"a":1}`).WithSchema(jsonSchema{valid: true})
+	ok := boundAgent(`{"a":1}`).WithSchema(MockSchema{})
 	_, okChat := NewTurn(context.Background(), ok, nil)
 	if _, err := okChat.Ask(); err != nil {
 		t.Fatalf("valid schema should pass: %v", err)
 	}
 
-	bad := boundAgent(`not json`).WithSchema(jsonSchema{valid: false})
+	bad := boundAgent(`not json`).WithSchema(MockSchema{Err: errors.New("bad shape")})
 	_, badChat := NewTurn(context.Background(), bad, nil)
 	if _, err := badChat.Ask(); !errors.Is(err, ErrSchema) {
 		t.Fatalf("want ErrSchema, got %v", err)
