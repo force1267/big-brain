@@ -144,7 +144,15 @@ func (a Asker) WithMaxRounds(n int) Asker { a.maxRounds = n; return a }
 func (a Asker) Ask() (Reply, error) {
 	m, err := a.chat.spec.Build()
 	if err != nil {
-		return Reply{}, fmt.Errorf("%w: %w", ErrNoModel, err)
+		// ErrNoModel means specifically "nothing was configured" — only true
+		// when Build failed on a missing name. Any other Build failure (e.g.
+		// model.ErrUnknownModelTags) means a model WAS configured and just
+		// didn't resolve, so it must surface as itself, unwrapped, the same
+		// way flow.Validate already lets it through.
+		if errors.Is(err, model.ErrNoModelName) {
+			return Reply{}, fmt.Errorf("%w: %w", ErrNoModel, err)
+		}
+		return Reply{}, err
 	}
 	for _, t := range a.tools {
 		if err := t.Err(); err != nil {

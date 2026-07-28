@@ -97,3 +97,21 @@ func TestWriteErrorShape(t *testing.T) {
 		t.Fatalf("code %d body %s", rec.Code, rec.Body)
 	}
 }
+
+// A 500 must not claim to be the client's fault: the inner error "type" is
+// what a caller branches retry logic on, and it should agree with
+// WriteStreamError's label for the same class of failure ("api_error"), not
+// diverge from it.
+func TestWriteErrorTypeMatchesStatus(t *testing.T) {
+	rec := httptest.NewRecorder()
+	WriteError(rec, 500, "boom")
+	if !strings.Contains(rec.Body.String(), `"type":"api_error"`) {
+		t.Fatalf("500 body should carry inner type api_error, got %s", rec.Body)
+	}
+
+	rec = httptest.NewRecorder()
+	WriteError(rec, 400, "bad input")
+	if !strings.Contains(rec.Body.String(), `"type":"invalid_request_error"`) {
+		t.Fatalf("400 body should carry inner type invalid_request_error, got %s", rec.Body)
+	}
+}

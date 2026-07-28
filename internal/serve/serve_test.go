@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sirupsen/logrus"
+	logrustest "github.com/sirupsen/logrus/hooks/test"
+
 	"github.com/force1267/big-brain/internal/agent"
 	"github.com/force1267/big-brain/internal/flow"
 	"github.com/force1267/big-brain/pkg/model"
@@ -137,6 +140,43 @@ func TestServeFlowError(t *testing.T) {
 	s.openai(rec, req)
 	if rec.Code != 500 {
 		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+}
+
+// A non-streaming flow error must be logged server-side, not just handed to
+// the client — otherwise a 500 leaves no trace an operator can find.
+func TestServeFlowErrorIsLogged(t *testing.T) {
+	hook := logrustest.NewGlobal()
+	t.Cleanup(func() { logrus.StandardLogger().ReplaceHooks(make(logrus.LevelHooks)) })
+
+	boom := flow.New().WithAgent(agent.New().OnMessage(func(context.Context, *agent.Turn, *agent.ModelChat) error {
+		return context.Canceled
+	}))
+	s := &server{def: boom, name: "brain", tracer: &ring{max: 10}, ring: &ring{max: 10}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"messages":[]}`))
+	s.openai(rec, req)
+
+	if len(hook.Entries) == 0 {
+		t.Fatal("a flow error reaching the client must also be logged")
+	}
+}
+
+// The Anthropic non-streaming handler must log the same way.
+func TestServeAnthropicFlowErrorIsLogged(t *testing.T) {
+	hook := logrustest.NewGlobal()
+	t.Cleanup(func() { logrus.StandardLogger().ReplaceHooks(make(logrus.LevelHooks)) })
+
+	boom := flow.New().WithAgent(agent.New().OnMessage(func(context.Context, *agent.Turn, *agent.ModelChat) error {
+		return context.Canceled
+	}))
+	s := &server{def: boom, name: "brain", tracer: &ring{max: 10}, ring: &ring{max: 10}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"max_tokens":16,"messages":[]}`))
+	s.anthropic(rec, req)
+
+	if len(hook.Entries) == 0 {
+		t.Fatal("a flow error reaching the client must also be logged")
 	}
 }
 

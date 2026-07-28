@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sirupsen/logrus"
+	logrustest "github.com/sirupsen/logrus/hooks/test"
+
 	"github.com/force1267/big-brain/internal/agent"
 	"github.com/force1267/big-brain/internal/flow"
 	"github.com/force1267/big-brain/pkg/engine"
@@ -253,6 +256,38 @@ func TestFlattenHeaders(t *testing.T) {
 	}
 	if len(flattenHeaders(http.Header{})) != 0 {
 		t.Fatal("expected empty headers to flatten to nothing")
+	}
+}
+
+// A synchronous (HasReply) webhook whose body errors out must log
+// server-side, exactly like the fire-and-forget (async) path already does —
+// whether an error is logged should not depend on which route hit it.
+func TestWebhookSyncErrorIsLogged(t *testing.T) {
+	flow.ResetTriggers()
+	t.Cleanup(flow.ResetTriggers)
+
+	hook := logrustest.NewGlobal()
+	t.Cleanup(func() { logrus.StandardLogger().ReplaceHooks(make(logrus.LevelHooks)) })
+
+	body := flow.New().WithAgent(agent.New().OnMessage(func(context.Context, *agent.Turn, *agent.ModelChat) error {
+		return context.Canceled
+	}))
+	flow.Trigger().Next(flow.Webhook("sync-error")).Next(body).Next(flow.Respond)
+
+	_, mux, err := build(talkFlow("x"), Store(engine.NewMemStore()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/hooks/sync-error", strings.NewReader(`hello`))
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if len(hook.Entries) == 0 {
+		t.Fatal("a synchronous webhook error must be logged, same as the async path")
 	}
 }
 

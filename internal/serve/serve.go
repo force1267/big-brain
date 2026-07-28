@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/sirupsen/logrus"
 
 	"github.com/force1267/big-brain/internal/agent"
 	"github.com/force1267/big-brain/internal/anthropic"
@@ -251,6 +254,7 @@ func (s *server) openai(w http.ResponseWriter, r *http.Request) {
 		}}
 		out, err := s.run(agent.WithSink(r.Context(), sink), f, runID, msgs, rp)
 		if err != nil {
+			logrus.WithField("model", name).Error(fmt.Errorf("serve: chat completion: %w", err))
 			openai.WriteStreamError(w, err.Error())
 			fl.Flush()
 			return
@@ -267,6 +271,7 @@ func (s *server) openai(w http.ResponseWriter, r *http.Request) {
 
 	out, err := s.run(r.Context(), f, runID, msgs, rp)
 	if err != nil {
+		logrus.WithField("model", name).Error(fmt.Errorf("serve: chat completion: %w", err))
 		openai.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -305,6 +310,7 @@ func (s *server) anthropic(w http.ResponseWriter, r *http.Request) {
 		}}
 		out, err := s.run(agent.WithSink(r.Context(), sink), f, runID, msgs, rp)
 		if err != nil {
+			logrus.WithField("model", name).Error(fmt.Errorf("serve: messages: %w", err))
 			// WriteStart already opened block 0 above; close it before the
 			// error frame so the stream isn't left with a dangling block.
 			anthropic.WriteStop(w, nil)
@@ -322,6 +328,7 @@ func (s *server) anthropic(w http.ResponseWriter, r *http.Request) {
 
 	out, err := s.run(r.Context(), f, runID, msgs, rp)
 	if err != nil {
+		logrus.WithField("model", name).Error(fmt.Errorf("serve: messages: %w", err))
 		anthropic.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

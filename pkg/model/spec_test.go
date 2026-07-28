@@ -2,6 +2,7 @@ package model
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -61,6 +62,18 @@ func TestSpecBuild(t *testing.T) {
 	_, err = Spec{}.withErr(sentinel).WithName("x").Build()
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("recorded error should win over name check, got %v", err)
+	}
+}
+
+// Every sentinel in this package follows the same "model: ..." prefix
+// (ErrNoModelName, ErrUnknownModelTags, ErrToolInput, ErrToolSchema,
+// ErrToolArgs) so grepping/reading a bare error string is unambiguous about
+// which package it came from. ErrUpstream was the one outlier.
+func TestSentinelMessagesSharePackagePrefix(t *testing.T) {
+	for _, err := range []error{ErrNoModelName, ErrUnknownModelTags, ErrToolInput, ErrToolSchema, ErrToolArgs, ErrUpstream} {
+		if !strings.HasPrefix(err.Error(), "model: ") {
+			t.Errorf("%q does not start with the package's %q prefix", err.Error(), "model: ")
+		}
 	}
 }
 

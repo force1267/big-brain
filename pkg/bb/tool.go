@@ -66,7 +66,7 @@ func OnCall[T any](t Tool, fn func(ctx context.Context, args T) (string, error))
 		var args T
 		if len(call.Input) > 0 {
 			if err := json.Unmarshal(call.Input, &args); err != nil {
-				return "", fmt.Errorf("tool %q: bad arguments: %w", call.Name, err)
+				return "", fmt.Errorf("%w: tool %q: %w", model.ErrToolArgs, call.Name, err)
 			}
 		}
 		return fn(ctx, args)

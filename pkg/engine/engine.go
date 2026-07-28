@@ -299,7 +299,8 @@ func (e *Engine) exec(ctx context.Context, r Run) {
 	if !ok {
 		// Unknown flow (e.g. reloaded by a binary missing it). Leave the run
 		// persisted and drop it from this process's pending set — loudly.
-		e.tr.Trace(ctx, StepRecord{Run: r.ID, Flow: r.Flow, Step: "<dispatch>", Err: ErrUnknownFlow.Error()})
+		err := fmt.Errorf("%w: %q", ErrUnknownFlow, r.Flow)
+		e.tr.Trace(ctx, StepRecord{Run: r.ID, Flow: r.Flow, Step: "<dispatch>", Err: err.Error()})
 		return
 	}
 

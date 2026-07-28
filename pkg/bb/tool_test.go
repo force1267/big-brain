@@ -55,10 +55,14 @@ func TestOnCallBindsAndDecodes(t *testing.T) {
 		t.Fatalf("zero args expected, got %+v", got)
 	}
 
-	// Malformed arguments from a model are an error the model can see.
-	if _, err := bound.Handler()(context.Background(),
-		ToolCall{Name: "read_sensor", Input: json.RawMessage(`{"city":`)}); err == nil {
-		t.Fatal("bad arguments should error")
+	// Malformed arguments from a model are an error the model can see, and
+	// match a sentinel — the same way every other tool-input failure in this
+	// package does (model.ErrToolInput, model.ErrToolSchema) — so a caller can
+	// errors.Is for "the model sent unparseable arguments" specifically.
+	_, err = bound.Handler()(context.Background(),
+		ToolCall{Name: "read_sensor", Input: json.RawMessage(`{"city":`)})
+	if !errors.Is(err, model.ErrToolArgs) {
+		t.Fatalf("want model.ErrToolArgs, got %v", err)
 	}
 }
 

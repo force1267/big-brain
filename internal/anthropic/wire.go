@@ -302,10 +302,20 @@ func WriteStreamError(w io.Writer, msg string) error {
 		"error": map[string]string{"type": "api_error", "message": msg}})
 }
 
-// WriteError writes an Anthropic-shaped error body.
+// WriteError writes an Anthropic-shaped error body. The "type" field reflects
+// status, not a hardcoded guess: 5xx is the server's fault ("api_error",
+// matching WriteStreamError's label for the same class of failure), anything
+// else is the client's ("invalid_request_error").
 func WriteError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"type": "error",
-		"error": map[string]string{"type": "invalid_request_error", "message": msg}})
+		"error": map[string]string{"type": errType(status), "message": msg}})
+}
+
+func errType(status int) string {
+	if status >= http.StatusInternalServerError {
+		return "api_error"
+	}
+	return "invalid_request_error"
 }

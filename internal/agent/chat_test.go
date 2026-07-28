@@ -261,6 +261,34 @@ func TestAskRejectsBrokenTool(t *testing.T) {
 	}
 }
 
+// Ask on a Spec that recorded a construction error OTHER than "no name set"
+// (e.g. an unknown registry tag — a model WAS configured, it just didn't
+// resolve) must surface that error as itself, not mislabel it ErrNoModel
+// ("no model configured" would be false: one was configured).
+func TestAskUnknownModelTagIsNotErrNoModel(t *testing.T) {
+	model.ResetRegistry()
+	t.Cleanup(model.ResetRegistry)
+	chat := NewChat(context.Background(), model.Resolve("ghost-tag"))
+
+	_, err := chat.Ask()
+	if !errors.Is(err, model.ErrUnknownModelTags) {
+		t.Fatalf("want ErrUnknownModelTags, got %v", err)
+	}
+	if errors.Is(err, ErrNoModel) {
+		t.Fatalf("an unknown-tag failure must not also match ErrNoModel: %v", err)
+	}
+}
+
+// Ask on a genuinely empty Spec (no name, no tag lookup attempted) still
+// reports ErrNoModel — the one case that sentinel is meant for.
+func TestAskNoNameIsErrNoModel(t *testing.T) {
+	chat := NewChat(context.Background(), model.Spec{})
+	_, err := chat.Ask()
+	if !errors.Is(err, ErrNoModel) {
+		t.Fatalf("want ErrNoModel, got %v", err)
+	}
+}
+
 // turn.Call coalesces into ONE message carrying the text alongside, and
 // ToolResults reads what the client sent back.
 func TestTurnCallAndToolResults(t *testing.T) {

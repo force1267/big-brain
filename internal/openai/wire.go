@@ -253,11 +253,21 @@ func WriteModels(w http.ResponseWriter, names ...string) {
 	}{"list", data})
 }
 
-// WriteError writes an OpenAI-shaped error body.
+// WriteError writes an OpenAI-shaped error body. The "type" field reflects
+// status, not a hardcoded guess: 5xx is the server's fault ("server_error",
+// matching WriteStreamError's label for the same class of failure), anything
+// else is the client's ("invalid_request_error").
 func WriteError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]map[string]string{
-		"error": {"message": msg, "type": "invalid_request_error"},
+		"error": {"message": msg, "type": errType(status)},
 	})
+}
+
+func errType(status int) string {
+	if status >= http.StatusInternalServerError {
+		return "server_error"
+	}
+	return "invalid_request_error"
 }

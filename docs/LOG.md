@@ -2368,3 +2368,82 @@ where noted), written before the fix in the shutdown case:
 
 `go build ./...`, `go vet ./...` clean; `go test ./...` green across every
 package, including the new shutdown regression test.
+
+## 2026-07-28 — Error/logging/API-error-surfacing audit (session)
+
+Investigated (via a sub-agent, evidence-based, file:line cited) how the
+project's sentinel-error/`%w`-wrapping convention holds up end-to-end: origin
+→ propagation → HTTP response → log line, across `internal/serve`,
+`internal/openai`, `internal/anthropic`, `internal/agent`, `internal/flow`,
+`pkg/model`, `pkg/bb`, `pkg/engine`. Sentinel/wrapping discipline itself was
+already good (16 sentinels, all genuinely used, consistent `%w: %w`); the
+real problems were at the edges — the HTTP boundary and logging. Found and
+fixed six issues, each pinned with a test written first to fail against the
+pre-fix code (confirmed red via `git diff`/`git checkout -- <impl file>`,
+then restored) so the failure is real, not asserted:
+
+1. **HTTP error `type` field ignored actual status** — `internal/openai/wire.go`
+   and `internal/anthropic/wire.go`'s `WriteError` hardcoded
+   `"invalid_request_error"` regardless of status, so a 500 (a server fault)
+   claimed to be a 400-class client fault — and disagreed with each
+   package's own `WriteStreamError`, which already labeled the same failure
+   class `"server_error"`/`"api_error"`. Fixed: both `WriteError`s now derive
+   `type` from status (`errType(status)`, 5xx → the package's existing
+   stream-error label, else `invalid_request_error`), so streaming and
+   non-streaming responses agree. Tests:
+   `internal/openai/wire_test.go::TestWriteErrorTypeMatchesStatus`,
+   `internal/anthropic/wire_test.go::TestWriteErrorTypeMatchesStatus`.
+2. **No server-side logging on error** — `internal/serve/serve.go`'s
+   `openai()`/`anthropic()` handlers (both streaming and non-streaming) wrote
+   the error straight to the client via `logrus`-free code, and
+   `internal/serve/webhook.go`'s synchronous (`HasReply`) path did the same,
+   while the async/background webhook path already logged via
+   `logrus.WithField("endpoint", id).Error(...)`. Whether a failure was
+   observable server-side depended on which route hit it. Fixed: all four
+   sites now log via `logrus.WithField(...).Error(fmt.Errorf("serve: ...: %w", err))`
+   before responding, matching the async path's existing style. Tests:
+   `internal/serve/serve_test.go::TestServeFlowErrorIsLogged`,
+   `::TestServeAnthropicFlowErrorIsLogged`,
+   `internal/serve/webhook_test.go::TestWebhookSyncErrorIsLogged` (using
+   `logrus/hooks/test`).
+3. **`ErrNoModel` mislabeled `ErrUnknownModelTags` failures** —
+   `internal/agent/chat.go`'s `Asker.Ask` wrapped every `Spec.Build()` error
+   in `ErrNoModel` ("no model configured"), even when a model *was*
+   configured and only its tag lookup failed (`model.ErrUnknownModelTags`) —
+   producing a self-contradictory message and a false-positive
+   `errors.Is(err, ErrNoModel)`. `internal/flow/validate.go` already handled
+   this correctly (lets the real error through unwrapped). Fixed: `Ask` now
+   only wraps with `ErrNoModel` when the cause is specifically
+   `model.ErrNoModelName`; anything else (e.g. `ErrUnknownModelTags`)
+   surfaces as itself, matching `flow.Validate`'s behavior. Test:
+   `internal/agent/chat_test.go::TestAskUnknownModelTagIsNotErrNoModel` (plus
+   `TestAskNoNameIsErrNoModel` pinning the case `ErrNoModel` IS meant for).
+4. **No sentinel for bad tool-call-argument decoding** — `pkg/bb/tool.go`'s
+   `OnCall` returned a raw `fmt.Errorf` on `json.Unmarshal` failure of a
+   call's arguments, unlike its siblings `model.ErrToolInput`/`ErrToolSchema`,
+   so a caller couldn't `errors.Is`-match "the model sent unparseable
+   arguments." Fixed: added `model.ErrToolArgs` (`pkg/model/tool.go`), used it
+   in `OnCall`'s unmarshal-failure branch. Test:
+   `pkg/bb/tool_test.go::TestOnCallBindsAndDecodes` (strengthened its
+   existing "bad arguments should error" assertion into an `errors.Is`
+   check).
+5. **`ErrUnknownFlow` never actually wrapped as an error** —
+   `pkg/engine/engine.go`'s `exec` recorded the unknown-flow trace as
+   `ErrUnknownFlow.Error()` verbatim — a bare sentinel string with no `%w`
+   wrapping and no per-run detail (which flow name), unlike every sibling
+   sentinel in the package (`ErrDupStep`, `ErrDupFlow` are wrapped with
+   `%w: %q`). Fixed: `exec` now builds `fmt.Errorf("%w: %q", ErrUnknownFlow,
+   r.Flow)` and traces that, so the record names the offending flow and the
+   sentinel is genuinely wrapped, matching convention. Test:
+   `pkg/engine/engine_test.go::TestExecTracesUnknownFlowAsWrappedSentinel`.
+6. **`pkg/model.ErrUpstream` broke the package's own naming convention** —
+   every other `pkg/model` sentinel is prefixed `"model: ..."`
+   (`ErrNoModelName`, `ErrUnknownModelTags`, `ErrToolInput`, `ErrToolSchema`)
+   except `ErrUpstream` ("upstream model call failed"). Fixed: added the
+   `"model: "` prefix. Test:
+   `pkg/model/spec_test.go::TestSentinelMessagesSharePackagePrefix` (asserts
+   every package sentinel shares the prefix, so a future addition without it
+   fails loudly).
+
+`go build ./...`, `go vet ./...` clean; `go test ./...` green across every
+package.

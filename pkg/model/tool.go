@@ -20,6 +20,10 @@ var (
 	// ErrToolSchema is recorded when a handler's argument type disagrees with
 	// the schema already on the tool it is bound to.
 	ErrToolSchema = errors.New("model: tool handler does not match the tool's schema")
+	// ErrToolArgs wraps a call's arguments failing to decode into a handler's
+	// argument type (bb.OnCall) — the mirror failure of ErrToolInput, on the
+	// receiving side.
+	ErrToolArgs = errors.New("model: tool call arguments could not be decoded")
 )
 
 // Schema is the JSON schema of a tool's arguments, in the shape Structured[T]

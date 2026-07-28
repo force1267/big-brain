@@ -79,6 +79,7 @@ func (s *server) webhook(w http.ResponseWriter, r *http.Request) {
 	if h.HasReply {
 		out, err := h.Run(s.triggerCtx(r.Context(), runID), body, meta)
 		if err != nil {
+			logrus.WithField("endpoint", id).Error(fmt.Errorf("serve: webhook run: %w", err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

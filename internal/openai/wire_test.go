@@ -118,6 +118,25 @@ func TestWriteErrorShape(t *testing.T) {
 	}
 }
 
+// A 500 must not claim to be the client's fault: the "type" field is what a
+// caller branches retry logic on, and a genuine server failure mislabeled
+// "invalid_request_error" tells the client not to retry a transient error.
+// It should also agree with WriteStreamError's label for the same class of
+// failure ("server_error"), not diverge from it.
+func TestWriteErrorTypeMatchesStatus(t *testing.T) {
+	rec := httptest.NewRecorder()
+	WriteError(rec, 500, "boom")
+	if !strings.Contains(rec.Body.String(), `"type":"server_error"`) {
+		t.Fatalf("500 body should carry type server_error, got %s", rec.Body)
+	}
+
+	rec = httptest.NewRecorder()
+	WriteError(rec, 400, "bad input")
+	if !strings.Contains(rec.Body.String(), `"type":"invalid_request_error"`) {
+		t.Fatalf("400 body should carry type invalid_request_error, got %s", rec.Body)
+	}
+}
+
 func TestWriteModelsShape(t *testing.T) {
 	rec := httptest.NewRecorder()
 	WriteModels(rec, "jarvis")

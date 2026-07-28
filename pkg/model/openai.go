@@ -13,7 +13,7 @@ import (
 )
 
 // ErrUpstream wraps failures talking to the backing provider.
-var ErrUpstream = errors.New("upstream model call failed")
+var ErrUpstream = errors.New("model: upstream model call failed")
 
 // OpenAI returns a Model backed by any OpenAI-compatible endpoint.
 func OpenAI(baseURL, apiKey, name string) Model {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -227,6 +228,35 @@ func TestExecTracesPersistFailureOnRequeue(t *testing.T) {
 		}
 	}
 	t.Fatal("persist failure during requeue was not traced")
+}
+
+// Dispatching a run for a flow name nobody Registered on this engine must
+// trace a real, matchable ErrUnknownFlow — not just a bare, unwrapped string
+// that happens to equal the sentinel's own text. The package's own sentinel
+// convention ("callers match with errors.Is; each layer wraps with %w")
+// applies here too: the traced message must be produced by wrapping the
+// sentinel with %w so it also names the offending flow.
+func TestExecTracesUnknownFlowAsWrappedSentinel(t *testing.T) {
+	tr := &RecordTracer{}
+	e, err := New(NewMockStore(), tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e.exec(context.Background(), Run{ID: "r", Flow: "ghost"})
+
+	var found string
+	for _, rec := range tr.Records {
+		if rec.Step == "<dispatch>" {
+			found = rec.Err
+		}
+	}
+	if found == "" {
+		t.Fatal("unknown-flow dispatch was not traced")
+	}
+	if want := fmt.Sprintf("%s: %q", ErrUnknownFlow.Error(), "ghost"); found != want {
+		t.Fatalf("traced err = %q, want %q (sentinel wrapped with the flow name)", found, want)
+	}
 }
 
 // persist must not leave a run record on disk with no index entry pointing
