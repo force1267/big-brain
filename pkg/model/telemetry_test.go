@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
 	"time"
 
@@ -296,5 +297,39 @@ func TestMonitoredSingleChunkSkipsGenerationWindow(t *testing.T) {
 		if h := gen.Data.(metricdata.Histogram[float64]); len(h.DataPoints) != 0 {
 			t.Fatalf("generation window recorded for a single-chunk reply: %+v", h.DataPoints)
 		}
+	}
+}
+
+// monitoredModel.Stream forwards chunks to the caller through its own
+// goroutine and an unbuffered channel; that goroutine only exits once the
+// caller drains the forwarded channel to completion. Every consumer in this
+// codebase (CollectAll, streamBuf.pump) does that today, but a regression
+// here — a forward loop that doesn't exit, or a new partial-drain consumer —
+// would leak one goroutine per call, forever. Catch it by fully draining many
+// calls and checking the goroutine count returns to baseline rather than
+// climbing with the call count.
+func TestMonitoredStreamDoesNotLeakGoroutines(t *testing.T) {
+	setupReader(t)
+
+	const calls = 200
+	m := Monitored(&Mock{Chunks: []string{"a", "b", "c"}}, "gpt-test")
+	for i := 0; i < calls; i++ {
+		stream, err := m.Stream(context.Background(), nil, Params{})
+		if err != nil {
+			t.Fatalf("Stream: %v", err)
+		}
+		if _, err := Collect(stream); err != nil {
+			t.Fatalf("collect: %v", err)
+		}
+	}
+
+	// Forwarding goroutines exit right after their last send; give the
+	// scheduler a moment to actually reclaim them before counting.
+	for i := 0; i < 50; i++ {
+		runtime.Gosched()
+	}
+	after := runtime.NumGoroutine()
+	if after > calls/2 {
+		t.Fatalf("goroutine count %d after %d fully-drained calls; forwarding goroutines are leaking", after, calls)
 	}
 }
